@@ -50,7 +50,7 @@
 
 - **Direct Non-Browser Probe (No Cloudflare clearance)**: Returns `HTTP/1.1 403 Forbidden`.
 - **Authorized Browser Session**: Inside the authorized browser session, Cloudflare clearance cookies and token allow HTTP 206 Partial Content streaming and chunked retrieval.
-- **Transport Requirement Summary**: Media URL token is tied to short-lived browser session credentials managed by Cloudflare protection.
+- **Transport Requirement Summary**: Media URL access for this sample depends on a browser-mediated session context and short-lived tokenized media URL. The current evidence does **not** prove that the token is cryptographically bound to any specific Cookie or Referer value; exact header/session propagation requirements remain an implementation-stage unknown.
 
 ---
 
@@ -136,6 +136,7 @@ FFprobe successfully parsed the moov atom from the 5MB slice without full video 
 | **Direct MP4 HTTP 206 Range Transport** | `[VERIFIED]` | Verified on sample `pO1k7` (5MB bounded chunk, status 206) |
 | **FFprobe Metadata from Bounded Moov** | `[VERIFIED]` | Verified on sample `pO1k7` (FastStart parsed in 5MB) |
 | **No DRM on Sample** | `[VERIFIED]` | Verified on sample `pO1k7` only |
-| **Cloudflare Protection Dependency** | `[VERIFIED]` | Non-session request triggers 403; session required |
+| **Browser-mediated access requirement** | `[VERIFIED]` | Non-session request triggers 403; browser context with tokenized URL succeeds |
+| **Exact Cookie / Referer binding** | `[UNKNOWN]` | Current evidence does not isolate which session/header values are required |
 | **Catalog-Wide Format Uniformity** | `[REPORTED]` | Historical 10-sample survey; not verified on whole site |
 | **Token Refresh & Resumability** | `[UNKNOWN]` | Needs runtime hook during implementation |
