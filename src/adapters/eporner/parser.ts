@@ -67,13 +67,24 @@ export function parseEpornerHtml(
     durationSeconds = parseInt(ogDurationMatch[1], 10);
   }
 
-  // 3. Extract Tags / Declared Performers
+  // 3. Extract Declared Performers (Only explicit pornstar tags, not generic categories/tags)
   const declaredPerformers: string[] = [];
-  const tagMatches = html.matchAll(/<li class="vit-(?:category|tag)"><a[^>]*>([^<]+)<\/a><\/li>/gi);
-  for (const match of tagMatches) {
-    const tag = match[1].trim();
-    if (tag && !declaredPerformers.includes(tag)) {
-      declaredPerformers.push(tag);
+  const pornstarMatches = html.matchAll(/<li class="vit-pornstar"><a[^>]*>([^<]+)<\/a><\/li>/gi);
+  for (const match of pornstarMatches) {
+    const performer = match[1].trim();
+    if (performer && !declaredPerformers.includes(performer)) {
+      declaredPerformers.push(performer);
+    }
+  }
+
+  // Also check explicit /pornstar/ links if vit-pornstar was absent
+  if (declaredPerformers.length === 0) {
+    const directPornstarMatches = html.matchAll(/<a\s+href="\/pornstar\/[^"]*"[^>]*>([^<]+)<\/a>/gi);
+    for (const match of directPornstarMatches) {
+      const performer = match[1].trim();
+      if (performer && !declaredPerformers.includes(performer)) {
+        declaredPerformers.push(performer);
+      }
     }
   }
 
@@ -133,7 +144,6 @@ export function parseEpornerHtml(
       vcodec,
       directUrl,
       formattedSize,
-      supportsRange: true,
     });
   }
 

@@ -30,6 +30,11 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
             </script>
           </head>
           <body>
+            <div id="video-info-tags">
+              <ul>
+                <li class="vit-pornstar"><a href="/pornstar/yua-mikami/">Yua Mikami</a></li>
+              </ul>
+            </div>
             <div id="downloaddiv">
               <div id="hd-porn-dload">
                 <div class="dloaddivcol">

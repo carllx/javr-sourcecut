@@ -82,7 +82,7 @@ export function buildMediaIdentity(descriptor: SourceDescriptor): ProgressiveMed
   const title = descriptor.rawTitle || "";
   const catalogMatch = extractCatalogId(title) || extractCatalogId(descriptor.sourceUrl);
 
-  let realPerformers = filterRealPerformers(descriptor.declaredPerformers);
+  const realPerformers = filterRealPerformers(descriptor.declaredPerformers);
 
   if (catalogMatch) {
     const canonicalCatalogId = catalogMatch.canonical;
@@ -95,18 +95,6 @@ export function buildMediaIdentity(descriptor: SourceDescriptor): ProgressiveMed
         hyphenated.toLowerCase(),
       ])
     );
-
-    if (realPerformers.length === 0) {
-      // Try extracting performer from remaining title
-      const remainingTitle = title
-        .replace(new RegExp(catalogMatch.raw, "i"), "")
-        .replace(/[-_–—]/g, " ")
-        .trim();
-      const cleaned = sanitizeFilename(remainingTitle);
-      if (cleaned.length > 2 && !GENERIC_TAG_WORDS.has(cleaned.toLowerCase())) {
-        realPerformers = [cleaned];
-      }
-    }
 
     const performerObjects = realPerformers.map((p) => ({ preferredName: p }));
     const performerGroup = realPerformers.join("_");
@@ -127,7 +115,7 @@ export function buildMediaIdentity(descriptor: SourceDescriptor): ProgressiveMed
     };
   }
 
-  // Deterministic fallback
+  // Deterministic fallback identity when no catalog ID is detected
   const sanitizedTitle = sanitizeFilename(title);
   const baseName = sanitizeFilename(
     `${descriptor.provider}-${descriptor.providerAssetId} - ${sanitizedTitle}`

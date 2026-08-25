@@ -8,6 +8,7 @@ export interface DownloadOptions {
   onProgress?: (transferredBytes: number, totalBytes?: number) => void;
   fetchFn?: typeof fetch;
   headers?: Record<string, string>;
+  allowOverwrite?: boolean;
 }
 
 export interface DownloadResult {
@@ -26,6 +27,18 @@ export async function downloadFile(
 
   // Ensure parent directory exists
   await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
+
+  // Collision check
+  if (!options.allowOverwrite) {
+    try {
+      const existingStat = await fsp.stat(destinationPath);
+      if (existingStat.size > 0) {
+        throw new Error(`Target destination file already exists and overwrite is disabled: ${destinationPath}`);
+      }
+    } catch (err: any) {
+      if (err.code !== "ENOENT") throw err;
+    }
+  }
 
   let response: Response;
   try {

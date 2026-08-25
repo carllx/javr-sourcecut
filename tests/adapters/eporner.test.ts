@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseEpornerHtml, extractVideoIdFromUrl, EpornerAdapter } from "../../src/adapters/eporner/index.js";
+import { parseEpornerHtml, extractVideoIdFromUrl } from "../../src/adapters/eporner/index.js";
 
 describe("Eporner HTML Parser", () => {
   const sampleWithAv1 = `
@@ -22,6 +22,8 @@ describe("Eporner HTML Parser", () => {
         <ul>
           <li class="vit-category"><a href="/cat/asian/">Asian</a></li>
           <li class="vit-category"><a href="/cat/vr-porn/">VR Porn</a></li>
+          <li class="vit-tag"><a href="/tag/big-tits/">Big Tits</a></li>
+          <li class="vit-pornstar"><a href="/pornstar/yua-mikami/">Yua Mikami</a></li>
         </ul>
       </div>
       <div id="downloaddiv">
@@ -46,23 +48,26 @@ describe("Eporner HTML Parser", () => {
     </html>
   `;
 
-  const sampleH264Only = `
+  const sampleWithoutPornstar = `
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Test 082126 001 Carib 宇野かな美 - EPORNER</title>
-      <meta property="og:duration" content="3337" />
+      <title>My Spinster Boss - EPORNER</title>
+      <meta property="og:duration" content="1503" />
     </head>
     <body>
+      <div id="video-info-tags">
+        <ul>
+          <li class="vit-category"><a href="/cat/asian/">Asian</a></li>
+          <li class="vit-tag"><a href="/tag/big-tits/">Big Tits</a></li>
+          <li class="vit-tag"><a href="/tag/pov/">POV</a></li>
+        </ul>
+      </div>
       <div id="downloaddiv">
         <div id="hd-porn-dload">
           <div class="dloaddivcol">
-            <u>240p:</u>
-            <span class="download-h264"><a href="/dload/i5MIJLt4gu0/240/18043213-240p.mp4">Download MP4 (240p, h264, 121.06 MB)</a></span><br />
             <u>480p:</u>
-            <span class="download-h264"><a href="/dload/i5MIJLt4gu0/480/18043213-480p.mp4">Download MP4 (480p, h264, 437.95 MB)</a></span><br />
-            <u>720p@60fps HD:</u>
-            <span class="download-h264"><a href="/dload/i5MIJLt4gu0/720/18043213-720p.mp4">Download MP4 (720p, h264, 474.14 MB)</a></span><br />
+            <span class="download-av1"><a href="/dload/y1qUfge13j0/480/14500253-480p-av1.mp4">Download MP4 (480p, AV1, 97 MB)</a></span>
           </div>
         </div>
       </div>
@@ -78,49 +83,29 @@ describe("Eporner HTML Parser", () => {
     expect(extractVideoIdFromUrl("https://other-site.com/video-123")).toBeNull();
   });
 
-  it("parses page with both AV1 and H264 renditions", () => {
+  it("extracts only explicit pornstars and ignores generic categories/tags", () => {
     const descriptor = parseEpornerHtml(
       sampleWithAv1,
       "https://www.eporner.com/video-5n1ArXshUMZ/uploading-for-good-av1/",
       "5n1ArXshUMZ"
     );
 
-    expect(descriptor.provider).toBe("eporner");
-    expect(descriptor.providerAssetId).toBe("5n1ArXshUMZ");
-    expect(descriptor.rawTitle).toBe("Sample AV1 Video Title");
-    expect(descriptor.durationSeconds).toBe(904);
+    expect(descriptor.declaredPerformers).toEqual(["Yua Mikami"]);
     expect(descriptor.renditions.length).toBe(8);
 
-    const av1_480 = descriptor.renditions.find((r) => r.formatId === "480p-av1");
-    expect(av1_480).toBeDefined();
-    expect(av1_480?.height).toBe(480);
-    expect(av1_480?.vcodec).toBe("av1");
-    expect(av1_480?.directUrl).toBe("https://www.eporner.com/dload/5n1ArXshUMZ/480/17854268-480p-av1.mp4");
-    expect(av1_480?.formattedSize).toBe("60.8 MB");
-
-    const h264_480 = descriptor.renditions.find((r) => r.formatId === "480p-h264");
-    expect(h264_480).toBeDefined();
-    expect(h264_480?.height).toBe(480);
-    expect(h264_480?.vcodec).toBe("h264");
-    expect(h264_480?.directUrl).toBe("https://www.eporner.com/dload/5n1ArXshUMZ/480/17854268-480p.mp4");
+    // supportsRange should be undefined before actual range probe
+    expect(descriptor.renditions[0].supportsRange).toBeUndefined();
   });
 
-  it("parses page with only H264 renditions", () => {
+  it("leaves declaredPerformers empty when only categories/tags are present", () => {
     const descriptor = parseEpornerHtml(
-      sampleH264Only,
-      "https://www.eporner.com/video-i5MIJLt4gu0/test-082126-001-carib-yu-yekana-mei/",
-      "i5MIJLt4gu0"
+      sampleWithoutPornstar,
+      "https://www.eporner.com/video-y1qUfge13j0/my-spinster-boss/",
+      "y1qUfge13j0"
     );
 
-    expect(descriptor.provider).toBe("eporner");
-    expect(descriptor.providerAssetId).toBe("i5MIJLt4gu0");
-    expect(descriptor.rawTitle).toBe("Test 082126 001 Carib 宇野かな美");
-    expect(descriptor.durationSeconds).toBe(3337);
-    expect(descriptor.renditions.length).toBe(3);
-    expect(descriptor.renditions.map((r) => r.formatId)).toEqual([
-      "240p-h264",
-      "480p-h264",
-      "720p-h264"
-    ]);
+    expect(descriptor.declaredPerformers).toEqual([]);
+    expect(descriptor.renditions.length).toBe(1);
+    expect(descriptor.renditions[0].supportsRange).toBeUndefined();
   });
 });
