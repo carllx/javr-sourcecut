@@ -242,4 +242,39 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
       })
     ).rejects.toThrow(Http206RequiredError);
   });
+
+  it("executes multi-segment selective fetch with budget tracking and merges segments into coherent verified output", async () => {
+    networkRequestLog = [];
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const outputClipPath = path.join(tempDir, "multi_clip_merged.mp4");
+
+    const result = await runSelectiveFetch({
+      sourceUrl: videoUrl,
+      timeRanges: [
+        { startSeconds: 2.0, endSeconds: 4.0 },
+        { startSeconds: 9.0, endSeconds: 11.0 },
+      ],
+      outputClipPath,
+      workDir: path.join(tempDir, "multi-sel-workdir"),
+      options: {
+        budgetMultiplier: 1.5,
+      },
+    });
+
+    expect(result.outputClipPath).toBe(outputClipPath);
+    expect(result.multiPlan).toBeDefined();
+    expect(result.multiPlan?.discreteByteRanges.length).toBe(2);
+
+    // Verify final merged probe
+    expect(result.probeResult.isValid).toBe(true);
+    expect(result.probeResult.duration).toBeGreaterThanOrEqual(3.5);
+    expect(result.probeResult.duration).toBeLessThanOrEqual(5.0);
+    expect(result.probeResult.videoStream.codec).toBe("h264");
+    expect(result.savingsPercent).toBeGreaterThanOrEqual(10);
+  });
 });
+
+
+
+
+

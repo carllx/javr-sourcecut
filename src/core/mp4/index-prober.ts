@@ -180,6 +180,7 @@ export async function probeMP4Index(
   }
 
   const headProbeBytesTransferred = headBuffer.length;
+  const observedEtag = headRes.headers.get("etag") || undefined;
 
   // Try parsing from head probe buffer
   try {
@@ -190,6 +191,7 @@ export async function probeMP4Index(
       headProbeBytesTransferred,
       tailProbeBytesTransferred: 0,
       totalProbeBytesTransferred: capabilityProbeBytesTransferred + headProbeBytesTransferred,
+      etag: observedEtag,
       cachedHead: {
         buffer: headBuffer,
         range: { startByte: 0, endByte: headEnd },
@@ -200,6 +202,7 @@ export async function probeMP4Index(
       throw err;
     }
   }
+
 
   // =========================================================================
   // Stage C: Bounded Tail Probe (if moov not in head)
@@ -301,6 +304,7 @@ export async function probeMP4Index(
       tailProbeBytesTransferred,
       totalProbeBytesTransferred:
         capabilityProbeBytesTransferred + headProbeBytesTransferred + tailProbeBytesTransferred,
+      etag: tailRes.headers.get("etag") || observedEtag,
       cachedHead: {
         buffer: headBuffer,
         range: { startByte: 0, endByte: headEnd },
@@ -311,6 +315,7 @@ export async function probeMP4Index(
       },
     };
   } catch (err: any) {
+
     throw new UnprovablePartialPlanError(
       `Could not locate complete moov atom within bounded head (${headBudget}B) or tail (${tailBudget}B) probes for ${url}. Refusing unbounded full-file download.`
     );

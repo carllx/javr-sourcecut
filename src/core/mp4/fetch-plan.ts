@@ -1,5 +1,12 @@
-import type { ByteRange, ByteRangeFetchPlan, MP4Index, TimeRange } from "./types.js";
+import type {
+  ByteRange,
+  ByteRangeFetchPlan,
+  MP4Index,
+  MultiSegmentFetchPlan,
+  TimeRange,
+} from "./types.js";
 import { UnprovablePartialPlanError } from "./types.js";
+
 
 export function createByteRangeFetchPlan(
   index: MP4Index,
@@ -134,4 +141,77 @@ export function createByteRangeFetchPlan(
     moovByteRange,
   };
 }
+
+export function mergeDiscreteByteRanges(ranges: ByteRange[]): ByteRange[] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a.startByte - b.startByte);
+  const merged: ByteRange[] = [{ ...sorted[0] }];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const current = sorted[i];
+    const last = merged[merged.length - 1];
+
+    if (current.startByte <= last.endByte + 1) {
+      // Overlapping or adjacent
+      last.endByte = Math.max(last.endByte, current.endByte);
+    } else {
+      merged.push({ ...current });
+    }
+  }
+
+  return merged;
+}
+
+export function createMultiSegmentFetchPlan(
+  index: MP4Index,
+  targetTimeRanges: TimeRange[],
+  sourceUrl: string
+): MultiSegmentFetchPlan {
+  if (!targetTimeRanges || targetTimeRanges.length === 0) {
+    throw new UnprovablePartialPlanError("Cannot build fetch plan: no target time ranges provided.");
+  }
+
+  const segmentPlans: ByteRangeFetchPlan[] = [];
+  const allMediaRanges: ByteRange[] = [];
+
+  for (const timeRange of targetTimeRanges) {
+    const plan = createByteRangeFetchPlan(index, timeRange, sourceUrl);
+    segmentPlans.push(plan);
+    allMediaRanges.push(plan.combinedByteRange);
+  }
+
+  const discreteByteRanges = mergeDiscreteByteRanges(allMediaRanges);
+  const totalBytesToFetch = discreteByteRanges.reduce(
+    (sum, r) => sum + (r.endByte - r.startByte + 1),
+    0
+  );
+
+  const fullFileBytes = index.fileSize;
+  const savingsRatio = Math.max(0, 1 - totalBytesToFetch / fullFileBytes);
+  const totalCutDuration = targetTimeRanges.reduce(
+    (sum, r) => sum + (r.endSeconds - r.startSeconds),
+    0
+  );
+  const isFullSpan = totalCutDuration >= index.duration - 0.2;
+  const isProvablePartial =
+    !isFullSpan && savingsRatio > 0.05 && totalBytesToFetch < fullFileBytes;
+
+  const moovByteRange: ByteRange = {
+    startByte: index.moovOffset,
+    endByte: index.moovOffset + index.moovSize - 1,
+  };
+
+  return {
+    sourceUrl,
+    targetTimeRanges,
+    segmentPlans,
+    discreteByteRanges,
+    totalBytesToFetch,
+    fullFileBytes,
+    savingsRatio,
+    isProvablePartial,
+    moovByteRange,
+  };
+}
+
 

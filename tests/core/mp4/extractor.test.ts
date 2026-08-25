@@ -194,4 +194,41 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
       })
     ).rejects.toThrow(/FFmpeg stream-copy extraction failed[\s\S]*Refusing to fallback to re-encoding/);
   });
+
+  it("extracts multiple non-contiguous segments and merges them losslessly via FFmpeg concat", async () => {
+    const { createMultiSegmentFetchPlan } = await import(
+      "../../../src/core/mp4/fetch-plan.js"
+    );
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const probeResult = await probeMP4Index(videoUrl, { headProbeBytes: 64 * 1024 });
+    const index = probeResult.index;
+
+    const targetRanges = [
+      { startSeconds: 2.0, endSeconds: 5.0 }, // 3.0s
+      { startSeconds: 10.0, endSeconds: 13.0 }, // 3.0s
+    ];
+
+    const multiPlan = createMultiSegmentFetchPlan(index, targetRanges, videoUrl);
+    const outputClipPath = path.join(tempDir, "merged_multi_segment.mp4");
+
+    const result = await extractClipFromPlan({
+      plan: multiPlan,
+      index,
+      outputClipPath,
+      workDir: path.join(tempDir, "multi-workdir"),
+      cachedHead: probeResult.cachedHead,
+    });
+
+    expect(result.outputClipPath).toBe(outputClipPath);
+
+    // Verify merged clip with ffprobe
+    const probe = await verifyMediaFile(outputClipPath);
+    expect(probe.isValid).toBe(true);
+    // Total expected duration is ~6.0s (3.0s + 3.0s)
+    expect(probe.duration).toBeGreaterThanOrEqual(5.5);
+    expect(probe.duration).toBeLessThanOrEqual(7.0);
+    expect(probe.videoStream.codec).toBe("h264");
+    expect(probe.audioStream?.codec).toBe("aac");
+  });
 });
+
