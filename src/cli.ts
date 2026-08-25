@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { runTracerSlice, resumeJobWorkflow } from "./core/workflow.js";
+import { launchAuthBrowser, resetAuthProfile } from "./core/session.js";
 import type { QualityTargetOptions, VideoCodec } from "./types.js";
 
 const VALID_CODECS: VideoCodec[] = ["av1", "h264", "hevc", "other"];
@@ -80,6 +81,9 @@ Usage:
   # Resume mode (Slice 3):
   javr-sourcecut resume <job-directory-or-job.json> [options]
 
+  # Dedicated browser authentication:
+  javr-sourcecut auth eporner [--reset]
+
 Options:
   --resume, resume     Resume an existing waiting-for-llc Job
   --llc <path>         Explicit path to LosslessCut .llc project file
@@ -87,14 +91,34 @@ Options:
   --height <number>    Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
   --quality <string>   Target quality resolution (e.g. 2160p, 1440p, max)
   --codec <string>     Preferred codec (av1, h264, hevc, other)
+  --reset              Reset dedicated browser profile (used with auth)
   --help, -h           Show this help message
 
 Examples:
-  javr-sourcecut "https://www.eporner.com/video-5n1ArXshUMZ/sample-video/" "./downloads" --cookies "./cookies.txt"
+  javr-sourcecut auth eporner
+  javr-sourcecut auth eporner --reset
+  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --cookies "./cookies.txt"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080 --codec av1
 `);
     process.exit(0);
+  }
+
+  // Handle auth command
+  if (args[0] === "auth") {
+    const provider = args[1]?.startsWith("-") ? "eporner" : (args[1] || "eporner");
+    const isReset = args.includes("--reset");
+    try {
+      if (isReset) {
+        await resetAuthProfile(provider);
+      } else {
+        await launchAuthBrowser(provider);
+      }
+      process.exit(0);
+    } catch (err: any) {
+      console.error(`\nAuth error: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   let isResume = false;
