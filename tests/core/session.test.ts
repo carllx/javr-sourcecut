@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import http from "node:http";
 import { spawn } from "node:child_process";
 import {
   parseNetscapeCookies,
@@ -295,5 +296,74 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
       exists = false;
     }
     expect(exists).toBe(false);
+  });
+
+  it("10. Cross-Origin Redirect Security: Eporner request carries Cookie, but redirect to unrelated origin strips Cookie", async () => {
+    let targetReceivedCookie: string | undefined;
+    const targetServer = http.createServer((req, res) => {
+      targetReceivedCookie = req.headers["cookie"];
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("target reached");
+    });
+
+    await new Promise<void>((resolve) => targetServer.listen(0, "127.0.0.1", () => resolve()));
+    const targetPort = (targetServer.address() as any).port;
+    const targetUrl = `http://127.0.0.1:${targetPort}/payload`;
+
+    let originReceivedCookie: string | undefined;
+    const originServer = http.createServer((req, res) => {
+      originReceivedCookie = req.headers["cookie"];
+      res.writeHead(302, { Location: targetUrl });
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => originServer.listen(0, "127.0.0.1", () => resolve()));
+    const originPort = (originServer.address() as any).port;
+    const originUrl = `http://127.0.0.1:${originPort}/source`;
+
+    try {
+      const provider = new NetscapeCookieFileSessionProvider([
+        {
+          domain: "127.0.0.1",
+          includeSubdomains: false,
+          path: "/source",
+          secure: false,
+          expires: 1893456000,
+          name: "EPRNS",
+          value: "test_session_secret",
+        },
+      ]);
+
+      const sessionFetch = provider.createSessionFetch(fetch);
+      const res = await sessionFetch(originUrl);
+      expect(res.status).toBe(200);
+
+      // Verify origin received cookie
+      expect(originReceivedCookie).toBeDefined();
+      expect(originReceivedCookie).toContain("EPRNS=");
+
+      // Verify cross-path/cross-target redirect target did NOT receive cookie
+      expect(targetReceivedCookie).toBeUndefined();
+
+      // Verify direct request to unrelated domain does not attach cookie
+      const providerEporner = new NetscapeCookieFileSessionProvider([
+        {
+          domain: ".eporner.com",
+          includeSubdomains: true,
+          path: "/",
+          secure: true,
+          expires: 1893456000,
+          name: "EPRNS",
+          value: "eporner_secret",
+        },
+      ]);
+      const sessionFetchEporner = providerEporner.createSessionFetch(fetch);
+      const unattachedRes = await sessionFetchEporner(targetUrl);
+      expect(unattachedRes.status).toBe(200);
+      expect(targetReceivedCookie).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => originServer.close(() => resolve()));
+      await new Promise<void>((resolve) => targetServer.close(() => resolve()));
+    }
   });
 });

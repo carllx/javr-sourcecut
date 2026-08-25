@@ -304,10 +304,10 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
 
   const expectedCutDuration = timeRange.endSeconds - timeRange.startSeconds;
   const durationDiff = Math.abs(verifiedProbe.duration - expectedCutDuration);
-  const maxDurationTolerance = Math.max(5.0, expectedCutDuration * 0.1);
+  const maxDurationTolerance = 5.0; // Fixed bounded keyframe alignment tolerance (<= 5s)
   if (durationDiff > maxDurationTolerance) {
     throw new Error(
-      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
+      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds fixed tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
     );
   }
 

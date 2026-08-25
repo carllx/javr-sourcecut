@@ -951,7 +951,7 @@ describe("Workflow Resume E2E", () => {
       JSON.stringify({
         version: 1,
         mediaFileName: "test.mp4",
-        cutSegments: [{ start: 10, end: 20 }], // 10s duration
+        cutSegments: [{ start: 1075.922793, end: 1451.572984 }], // ~375.650s duration (Sample 1 shape)
       })
     );
 
@@ -962,7 +962,7 @@ describe("Workflow Resume E2E", () => {
       rawTitle: "Duration Mismatch Test",
       declaredPerformers: [],
       renditions: [
-        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
       ],
     };
 
@@ -979,7 +979,7 @@ describe("Workflow Resume E2E", () => {
       });
     });
 
-    // Simulate selective fetch returning 100s duration instead of 10s
+    // 1. Difference of 24.35s (> 5s fixed tolerance) on ~375s clip must be rejected
     vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
       await fs.writeFile(params.outputClipPath, "mock-output");
       return {
@@ -987,9 +987,9 @@ describe("Workflow Resume E2E", () => {
         plan: {} as any,
         index: {} as any,
         probeResult: {
-          format: { filename: params.outputClipPath, duration: "100.0" } as any,
-          videoStream: { index: 0, codec: "av1", width: 1280, height: 720, fps: 30 },
-          duration: 100.0,
+          format: { filename: params.outputClipPath, duration: "400.0" } as any,
+          videoStream: { index: 0, codec: "av1", width: 3840, height: 2160, fps: 60 },
+          duration: 400.0,
           isValid: true,
         },
         indexProbeResult: {} as any,
@@ -1006,10 +1006,41 @@ describe("Workflow Resume E2E", () => {
         fetchFn: mockFetch as any,
         sessionProvider: new NoopSessionProvider(),
       })
-    ).rejects.toThrow(/Output duration mismatch: expected ~10.000s/);
+    ).rejects.toThrow(/Output duration mismatch: expected ~375.650s[\s\S]*diff 24.350s exceeds fixed tolerance 5.000s/);
 
     const savedJob = await loadJob(workspaceDir);
     expect(savedJob.status).not.toBe("completed");
+
+    // Clean failed output file before testing accepted run
+    await fs.rm(path.join(workspaceDir, "test.mp4"), { force: true });
+
+    // 2. Small keyframe-level difference (~1.35s <= 5s tolerance) is accepted
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "377.0" } as any,
+          videoStream: { index: 0, codec: "av1", width: 3840, height: 2160, fps: 60 },
+          duration: 377.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    const acceptedResult = await resumeJobWorkflow({
+      jobPathOrDir: workspaceDir,
+      adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
+      sessionProvider: new NoopSessionProvider(),
+    });
+    expect(acceptedResult.job.status).toBe("completed");
   });
 
   it("Test J: completes workflow when verified AV1 / 2160p / duration match expectations", async () => {
@@ -1024,7 +1055,7 @@ describe("Workflow Resume E2E", () => {
       JSON.stringify({
         version: 1,
         mediaFileName: "test.mp4",
-        cutSegments: [{ start: 10, end: 20 }], // 10s
+        cutSegments: [{ start: 1075.922793, end: 1451.572984 }], // 375.650191s
       })
     );
 
@@ -1052,6 +1083,7 @@ describe("Workflow Resume E2E", () => {
       });
     });
 
+    // Real Sample 1 duration difference: 375.661003s vs 375.650191s (~0.011s diff)
     vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
       await fs.writeFile(params.outputClipPath, "mock-output");
       return {
@@ -1059,9 +1091,9 @@ describe("Workflow Resume E2E", () => {
         plan: {} as any,
         index: {} as any,
         probeResult: {
-          format: { filename: params.outputClipPath, duration: "10.05" } as any,
+          format: { filename: params.outputClipPath, duration: "375.661003" } as any,
           videoStream: { index: 0, codec: "av01", width: 4320, height: 2160, fps: 60 },
-          duration: 10.05,
+          duration: 375.661003,
           isValid: true,
         },
         indexProbeResult: {} as any,
