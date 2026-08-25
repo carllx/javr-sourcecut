@@ -39,13 +39,19 @@ export interface MP4Index {
   hasMoovAtStart: boolean;
 }
 
+export interface CachedBufferWithRange {
+  buffer: Buffer;
+  range: ByteRange;
+}
+
 export interface MP4IndexProbeResult {
   index: MP4Index;
+  capabilityProbeBytesTransferred: number;
   headProbeBytesTransferred: number;
   tailProbeBytesTransferred: number;
   totalProbeBytesTransferred: number;
-  cachedHeadBuffer?: Buffer;
-  cachedTailBuffer?: Buffer;
+  cachedHead?: CachedBufferWithRange;
+  cachedTail?: CachedBufferWithRange;
 }
 
 export interface ByteRangeFetchPlan {

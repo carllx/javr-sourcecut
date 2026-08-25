@@ -31,28 +31,67 @@ export async function runSelectiveFetch(
 ): Promise<SelectiveFetchResult> {
   const { sourceUrl, timeRange, outputClipPath, workDir, options = {} } = params;
 
-  // 1. Probe MP4 Index (bounded head and optional tail probe)
+  // 1. Probe MP4 Index (2-stage capability + bounded head & tail probe)
   const indexProbeResult = await probeMP4Index(sourceUrl, options);
   const index = indexProbeResult.index;
+  const fullFileBytes = index.fileSize;
 
   // 2. Build structurally proven ByteRange Fetch Plan
   const plan = createByteRangeFetchPlan(index, timeRange, sourceUrl);
 
-  // 3. Strict Fail-Closed Enforcement: Must be provably partial
-  if (!plan.isProvablePartial) {
+  // 3. Pre-Fetch Network Budget Estimation
+  const headEndByte = index.hasMoovAtStart
+    ? index.moovOffset + index.moovSize - 1
+    : Math.min(index.fileSize - 1, 1024);
+
+  let expectedAdditionalMetadataBytes = 0;
+  const hasCachedHead =
+    indexProbeResult.cachedHead &&
+    indexProbeResult.cachedHead.range.startByte === 0 &&
+    indexProbeResult.cachedHead.range.endByte >= headEndByte;
+  if (!hasCachedHead) {
+    expectedAdditionalMetadataBytes += headEndByte + 1;
+  }
+
+  if (!index.hasMoovAtStart) {
+    const moovStart = index.moovOffset;
+    const moovEnd = index.moovOffset + index.moovSize - 1;
+    const hasCachedTailMoov =
+      indexProbeResult.cachedTail &&
+      moovStart >= indexProbeResult.cachedTail.range.startByte &&
+      moovEnd <= indexProbeResult.cachedTail.range.endByte;
+    if (!hasCachedTailMoov) {
+      expectedAdditionalMetadataBytes += index.moovSize;
+    }
+  }
+
+  const expectedTotalNetworkBytes =
+    indexProbeResult.totalProbeBytesTransferred +
+    expectedAdditionalMetadataBytes +
+    plan.totalBytesToFetch;
+
+  const expectedTotalSavingsRatio = 1 - expectedTotalNetworkBytes / fullFileBytes;
+
+  // 4. Strict Pre-Fetch Fail-Closed Budget Enforcement:
+  // Must be provably partial across TOTAL expected network transfer before fetching media payload
+  if (
+    !plan.isProvablePartial ||
+    expectedTotalNetworkBytes >= fullFileBytes ||
+    expectedTotalSavingsRatio <= 0.05
+  ) {
     throw new UnprovablePartialPlanError(
-      `Plan is not provably partial for time range [${timeRange.startSeconds}s, ${timeRange.endSeconds}s]. Total bytes to fetch (${plan.totalBytesToFetch}B) spans full file (${plan.fullFileBytes}B) or provides zero byte savings. Refusing full-file fetch.`
+      `Plan is not provably partial for time range [${timeRange.startSeconds}s, ${timeRange.endSeconds}s]. Total expected network bytes (${expectedTotalNetworkBytes}B) exceeds budget or spans full file (${fullFileBytes}B). Refusing full-file fetch.`
     );
   }
 
-  // 4. Execute partial HTTP 206 fetch and extract clip via FFmpeg
+  // 5. Execute partial HTTP 206 fetch and extract clip via FFmpeg
   const extractResult = await extractClipFromPlan({
     plan,
     index,
     outputClipPath,
     workDir,
-    cachedHeadBuffer: indexProbeResult.cachedHeadBuffer,
-    cachedTailBuffer: indexProbeResult.cachedTailBuffer,
+    cachedHead: indexProbeResult.cachedHead,
+    cachedTail: indexProbeResult.cachedTail,
     fetchFn: options.fetchFn,
     onProgress: (transferred, total) => {
       if (options.onProgress && total > 0) {
@@ -62,10 +101,9 @@ export async function runSelectiveFetch(
     },
   });
 
-  // 5. Total transferred network bytes includes all probing and extraction network transfers
+  // 6. Total transferred network bytes includes all probing and extraction network transfers
   const totalTransferredBytes =
     indexProbeResult.totalProbeBytesTransferred + extractResult.bytesFetched;
-  const fullFileBytes = index.fileSize;
   const savingsPercent = Math.max(
     0,
     Math.round((1 - totalTransferredBytes / fullFileBytes) * 100)

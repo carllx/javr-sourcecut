@@ -23,16 +23,100 @@ export async function probeMP4Index(
   options: IndexProbeOptions = {}
 ): Promise<MP4IndexProbeResult> {
   const fetchFn = options.fetchFn || fetch;
-  const headProbeBytes = options.headProbeBytes ?? 512 * 1024;
-  const tailProbeBytes = options.tailProbeBytes ?? 2 * 1024 * 1024;
+  const configuredHeadProbeBytes = options.headProbeBytes ?? 512 * 1024;
+  const configuredTailProbeBytes = options.tailProbeBytes ?? 2 * 1024 * 1024;
 
-  // 1. Bounded Head Probe (0..headProbeBytes-1)
-  const requestedHeadStart = 0;
-  const requestedHeadEnd = headProbeBytes - 1;
+  // =========================================================================
+  // Stage A: 1-Byte Capability & File Size Probe (Range: bytes=0-0)
+  // =========================================================================
+  const capRes = await fetchFn(url, {
+    headers: {
+      Range: "bytes=0-0",
+      ...options.headers,
+    },
+  });
+
+  if (capRes.status === 200) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Server returned HTTP 200 OK instead of 206 Partial Content for capability probe on ${url}. Byte-range requests are unsupported or ignored.`
+    );
+  }
+
+  if (capRes.status !== 206) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Capability probe failed with HTTP ${capRes.status} ${capRes.statusText} for ${url}`
+    );
+  }
+
+  const capContentRange = capRes.headers.get("content-range");
+  if (!capContentRange) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Missing Content-Range header on capability probe response from ${url}`
+    );
+  }
+
+  const capMatch = capContentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+  if (!capMatch) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Malformed Content-Range header: "${capContentRange}" on ${url}`
+    );
+  }
+
+  if (capMatch[3] === "*") {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Content-Range total file size cannot be wildcard (*) on ${url}`
+    );
+  }
+
+  const fileSize = parseInt(capMatch[3], 10);
+  const capStart = parseInt(capMatch[1], 10);
+  const capEnd = parseInt(capMatch[2], 10);
+
+  if (isNaN(fileSize) || fileSize <= 0) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Invalid total file size "${capMatch[3]}" in Content-Range on ${url}`
+    );
+  }
+
+  if (capStart !== 0 || capEnd !== 0) {
+    cancelResponseBody(capRes);
+    throw new Http206RequiredError(
+      `Server returned mismatched capability range: expected 0-0, got ${capStart}-${capEnd}`
+    );
+  }
+
+  const capArrayBuffer = await capRes.arrayBuffer();
+  const capBuffer = Buffer.from(capArrayBuffer);
+  if (capBuffer.length !== 1) {
+    throw new Http206RequiredError(
+      `Capability probe body length mismatch: expected 1 byte, received ${capBuffer.length} bytes`
+    );
+  }
+
+  const capabilityProbeBytesTransferred = capBuffer.length;
+
+  // =========================================================================
+  // Stage B: Bounded Head Probe
+  // Calculate head probe boundary strictly < fileSize (never download full file)
+  // =========================================================================
+  const headBudget = Math.min(configuredHeadProbeBytes, Math.floor(fileSize * 0.5));
+  const headEnd = Math.max(0, headBudget - 1);
+
+  if (headEnd >= fileSize - 1 || headBudget < 8) {
+    throw new UnprovablePartialPlanError(
+      `File size (${fileSize}B) is too small to execute a bounded partial head probe without requesting the full file. Refusing full-file probe.`
+    );
+  }
 
   const headRes = await fetchFn(url, {
     headers: {
-      Range: `bytes=${requestedHeadStart}-${requestedHeadEnd}`,
+      Range: `bytes=0-${headEnd}`,
       ...options.headers,
     },
   });
@@ -40,73 +124,58 @@ export async function probeMP4Index(
   if (headRes.status === 200) {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Server returned HTTP 200 OK instead of 206 Partial Content for range probe on ${url}. Byte-range requests are unsupported or ignored.`
+      `Server returned HTTP 200 OK instead of 206 Partial Content for head probe on ${url}`
     );
   }
 
   if (headRes.status !== 206) {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Range probe failed with HTTP ${headRes.status} ${headRes.statusText} for ${url}`
+      `Head probe failed with HTTP ${headRes.status} ${headRes.statusText} for ${url}`
     );
   }
 
-  const contentRange = headRes.headers.get("content-range");
-  if (!contentRange) {
+  const headContentRange = headRes.headers.get("content-range");
+  if (!headContentRange) {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Missing Content-Range response header from server for range probe on ${url}`
+      `Missing Content-Range header on head probe response from ${url}`
     );
   }
 
-  const crMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
-  if (!crMatch) {
+  const headMatch = headContentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+  if (!headMatch || headMatch[3] === "*") {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Malformed Content-Range header: "${contentRange}" on ${url}`
+      `Invalid or wildcard Content-Range on head probe: "${headContentRange}" on ${url}`
     );
   }
 
-  if (crMatch[3] === "*") {
+  const returnedHeadStart = parseInt(headMatch[1], 10);
+  const returnedHeadEnd = parseInt(headMatch[2], 10);
+  const returnedHeadTotal = parseInt(headMatch[3], 10);
+
+  if (returnedHeadTotal !== fileSize) {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Content-Range total file size cannot be wildcard (*) on ${url}`
+      `Head probe returned conflicting total file size: ${returnedHeadTotal} vs initial ${fileSize}`
     );
   }
 
-  const fileSize = parseInt(crMatch[3], 10);
-  const returnedHeadStart = parseInt(crMatch[1], 10);
-  const returnedHeadEnd = parseInt(crMatch[2], 10);
-
-  if (isNaN(fileSize) || fileSize <= 0) {
+  if (returnedHeadStart !== 0 || returnedHeadEnd !== headEnd) {
     cancelResponseBody(headRes);
     throw new Http206RequiredError(
-      `Invalid total file size "${crMatch[3]}" in Content-Range on ${url}`
-    );
-  }
-
-  const expectedHeadEnd = Math.min(requestedHeadEnd, fileSize - 1);
-  if (returnedHeadStart !== requestedHeadStart) {
-    cancelResponseBody(headRes);
-    throw new Http206RequiredError(
-      `Server returned mismatched head probe start byte: expected ${requestedHeadStart}, got ${returnedHeadStart}`
-    );
-  }
-
-  if (returnedHeadEnd !== expectedHeadEnd) {
-    cancelResponseBody(headRes);
-    throw new Http206RequiredError(
-      `Server returned mismatched head probe end byte: expected ${expectedHeadEnd}, got ${returnedHeadEnd}`
+      `Server returned mismatched head probe byte range: expected 0-${headEnd}, got ${returnedHeadStart}-${returnedHeadEnd}`
     );
   }
 
   const headArrayBuffer = await headRes.arrayBuffer();
   const headBuffer = Buffer.from(headArrayBuffer);
-  const expectedHeadBodyLength = returnedHeadEnd - returnedHeadStart + 1;
+  const expectedHeadLength = headEnd + 1;
 
-  if (headBuffer.length !== expectedHeadBodyLength) {
+  if (headBuffer.length !== expectedHeadLength) {
     throw new Http206RequiredError(
-      `Head probe response body length mismatch: expected ${expectedHeadBodyLength} bytes, received ${headBuffer.length} bytes`
+      `Head probe response body length mismatch: expected ${expectedHeadLength} bytes, received ${headBuffer.length} bytes`
     );
   }
 
@@ -117,10 +186,14 @@ export async function probeMP4Index(
     const index = parseMP4Buffer(headBuffer, fileSize, 0);
     return {
       index,
+      capabilityProbeBytesTransferred,
       headProbeBytesTransferred,
       tailProbeBytesTransferred: 0,
-      totalProbeBytesTransferred: headProbeBytesTransferred,
-      cachedHeadBuffer: headBuffer,
+      totalProbeBytesTransferred: capabilityProbeBytesTransferred + headProbeBytesTransferred,
+      cachedHead: {
+        buffer: headBuffer,
+        range: { startByte: 0, endByte: headEnd },
+      },
     };
   } catch (err: any) {
     if (!(err instanceof UnprovablePartialPlanError)) {
@@ -128,13 +201,17 @@ export async function probeMP4Index(
     }
   }
 
-  // 2. Bounded Tail Probe
-  const tailStart = Math.max(0, fileSize - tailProbeBytes);
+  // =========================================================================
+  // Stage C: Bounded Tail Probe (if moov not in head)
+  // Ensure tail probe does not overlap head probe to span the full file
+  // =========================================================================
+  const tailBudget = Math.min(configuredTailProbeBytes, Math.floor(fileSize * 0.5));
+  const tailStart = fileSize - tailBudget;
   const tailEnd = fileSize - 1;
 
-  if (tailStart >= fileSize) {
+  if (tailStart <= headEnd || tailStart <= 0) {
     throw new UnprovablePartialPlanError(
-      `Invalid tail probe range: start ${tailStart} >= fileSize ${fileSize}`
+      `Cannot execute bounded tail probe: tailStart (${tailStart}) <= headEnd (${headEnd}). Probe would span full file (${fileSize}B). Refusing full-file probe.`
     );
   }
 
@@ -168,17 +245,10 @@ export async function probeMP4Index(
   }
 
   const tailCrMatch = tailContentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
-  if (!tailCrMatch) {
+  if (!tailCrMatch || tailCrMatch[3] === "*") {
     cancelResponseBody(tailRes);
     throw new Http206RequiredError(
-      `Malformed Content-Range header on tail probe: "${tailContentRange}" from ${url}`
-    );
-  }
-
-  if (tailCrMatch[3] === "*") {
-    cancelResponseBody(tailRes);
-    throw new Http206RequiredError(
-      `Tail Content-Range total size cannot be wildcard (*) on ${url}`
+      `Malformed or wildcard Content-Range on tail probe: "${tailContentRange}" from ${url}`
     );
   }
 
@@ -216,15 +286,23 @@ export async function probeMP4Index(
     const index = parseMP4Buffer(tailBuffer, fileSize, tailStart);
     return {
       index,
+      capabilityProbeBytesTransferred,
       headProbeBytesTransferred,
       tailProbeBytesTransferred,
-      totalProbeBytesTransferred: headProbeBytesTransferred + tailProbeBytesTransferred,
-      cachedHeadBuffer: headBuffer,
-      cachedTailBuffer: tailBuffer,
+      totalProbeBytesTransferred:
+        capabilityProbeBytesTransferred + headProbeBytesTransferred + tailProbeBytesTransferred,
+      cachedHead: {
+        buffer: headBuffer,
+        range: { startByte: 0, endByte: headEnd },
+      },
+      cachedTail: {
+        buffer: tailBuffer,
+        range: { startByte: tailStart, endByte: tailEnd },
+      },
     };
   } catch (err: any) {
     throw new UnprovablePartialPlanError(
-      `Could not locate complete moov atom within bounded head (${headProbeBytes}B) or tail (${tailProbeBytes}B) probes for ${url}. Refusing unbounded full-file download.`
+      `Could not locate complete moov atom within bounded head (${headBudget}B) or tail (${tailBudget}B) probes for ${url}. Refusing unbounded full-file download.`
     );
   }
 }

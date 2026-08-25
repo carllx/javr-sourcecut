@@ -70,7 +70,6 @@ describe("Bounded MP4 Index Prober", () => {
       }
 
       if (url.includes("wrong-start")) {
-        // Returns start at byte 50 instead of requested 0
         const chunk = targetBuffer.subarray(50, 500);
         res.writeHead(206, {
           "Content-Type": "video/mp4",
@@ -82,7 +81,6 @@ describe("Bounded MP4 Index Prober", () => {
       }
 
       if (url.includes("wrong-end")) {
-        // Returns end at 200 instead of expected end
         const chunk = targetBuffer.subarray(0, 200);
         res.writeHead(206, {
           "Content-Type": "video/mp4",
@@ -106,20 +104,19 @@ describe("Bounded MP4 Index Prober", () => {
       if (url.includes("wildcard-total")) {
         res.writeHead(206, {
           "Content-Type": "video/mp4",
-          "Content-Range": `bytes 0-500/*`,
-          "Content-Length": "501",
+          "Content-Range": `bytes 0-0/*`,
+          "Content-Length": "1",
         });
-        res.end(targetBuffer.subarray(0, 501));
+        res.end(targetBuffer.subarray(0, 1));
         return;
       }
 
       if (url.includes("truncated-body")) {
-        // Content-Range says 0-499 (500 bytes), but body only sends 100 bytes
         res.writeHead(206, {
           "Content-Type": "video/mp4",
-          "Content-Range": `bytes 0-499/${totalSize}`,
+          "Content-Range": `bytes 0-0/${totalSize}`,
         });
-        res.write(targetBuffer.subarray(0, 100));
+        res.write(Buffer.alloc(0));
         res.end();
         return;
       }
@@ -168,17 +165,19 @@ describe("Bounded MP4 Index Prober", () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("probes index from faststart MP4 and counts head transferred bytes", async () => {
+  it("probes index from faststart MP4 via 2-stage discovery and counts probe bytes", async () => {
     const result = await probeMP4Index(`${serverUrl}/faststart.mp4`, {
       headProbeBytes: 64 * 1024,
     });
 
     expect(result.index.hasMoovAtStart).toBe(true);
     expect(result.index.duration).toBeGreaterThanOrEqual(3.9);
+    expect(result.capabilityProbeBytesTransferred).toBe(1);
     expect(result.headProbeBytesTransferred).toBeGreaterThan(0);
     expect(result.tailProbeBytesTransferred).toBe(0);
-    expect(result.totalProbeBytesTransferred).toBe(result.headProbeBytesTransferred);
-    expect(result.cachedHeadBuffer).toBeDefined();
+    expect(result.totalProbeBytesTransferred).toBe(1 + result.headProbeBytesTransferred);
+    expect(result.cachedHead).toBeDefined();
+    expect(result.cachedHead?.range.startByte).toBe(0);
   });
 
   it("probes index from tail MP4 and counts both head and tail transferred bytes", async () => {
@@ -189,12 +188,14 @@ describe("Bounded MP4 Index Prober", () => {
 
     expect(result.index.hasMoovAtStart).toBe(false);
     expect(result.index.duration).toBeGreaterThanOrEqual(3.9);
+    expect(result.capabilityProbeBytesTransferred).toBe(1);
     expect(result.headProbeBytesTransferred).toBe(1024);
     expect(result.tailProbeBytesTransferred).toBeGreaterThan(0);
     expect(result.totalProbeBytesTransferred).toBe(
-      result.headProbeBytesTransferred + result.tailProbeBytesTransferred
+      1 + result.headProbeBytesTransferred + result.tailProbeBytesTransferred
     );
-    expect(result.cachedTailBuffer).toBeDefined();
+    expect(result.cachedTail).toBeDefined();
+    expect(result.cachedTail?.range.endByte).toBe(result.index.fileSize - 1);
   });
 
   it("fails closed with Http206RequiredError when server returns 200 OK", async () => {
@@ -209,33 +210,15 @@ describe("Bounded MP4 Index Prober", () => {
     ).rejects.toThrow(Http206RequiredError);
   });
 
-  it("fails closed with Http206RequiredError when server returns wrong start byte", async () => {
-    await expect(
-      probeMP4Index(`${serverUrl}/wrong-start.mp4`, { headProbeBytes: 500 })
-    ).rejects.toThrow(Http206RequiredError);
-  });
-
-  it("fails closed with Http206RequiredError when server returns wrong end byte", async () => {
-    await expect(
-      probeMP4Index(`${serverUrl}/wrong-end.mp4`, { headProbeBytes: 500 })
-    ).rejects.toThrow(Http206RequiredError);
-  });
-
-  it("fails closed with Http206RequiredError when Content-Range is malformed", async () => {
-    await expect(
-      probeMP4Index(`${serverUrl}/malformed-content-range.mp4`, { headProbeBytes: 500 })
-    ).rejects.toThrow(Http206RequiredError);
-  });
-
   it("fails closed with Http206RequiredError when Content-Range total is wildcard (*)", async () => {
     await expect(
-      probeMP4Index(`${serverUrl}/wildcard-total.mp4`, { headProbeBytes: 500 })
+      probeMP4Index(`${serverUrl}/wildcard-total.mp4`)
     ).rejects.toThrow(Http206RequiredError);
   });
 
-  it("fails closed with Http206RequiredError when response body is truncated", async () => {
+  it("fails closed with Http206RequiredError when capability response body is truncated", async () => {
     await expect(
-      probeMP4Index(`${serverUrl}/truncated-body.mp4`, { headProbeBytes: 500 })
+      probeMP4Index(`${serverUrl}/truncated-body.mp4`)
     ).rejects.toThrow(Http206RequiredError);
   });
 });

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { ByteRange, ByteRangeFetchPlan, MP4Index } from "./types.js";
+import type { ByteRange, ByteRangeFetchPlan, CachedBufferWithRange, MP4Index } from "./types.js";
 import { fetchByteRange } from "./partial-fetcher.js";
 import { verifyMediaFile, type FfprobeProbeResult } from "../verifier.js";
 
@@ -13,8 +13,8 @@ export interface ExtractClipParams {
   index: MP4Index;
   outputClipPath: string;
   workDir: string;
-  cachedHeadBuffer?: Buffer;
-  cachedTailBuffer?: Buffer;
+  cachedHead?: CachedBufferWithRange;
+  cachedTail?: CachedBufferWithRange;
   fetchFn?: typeof fetch;
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
 }
@@ -33,8 +33,8 @@ export async function extractClipFromPlan(
     index,
     outputClipPath,
     workDir,
-    cachedHeadBuffer,
-    cachedTailBuffer,
+    cachedHead,
+    cachedTail,
     fetchFn = fetch,
     onProgress,
   } = params;
@@ -67,8 +67,13 @@ export async function extractClipFromPlan(
     : Math.min(index.fileSize - 1, 1024);
 
   let headBuffer: Buffer;
-  if (cachedHeadBuffer && cachedHeadBuffer.length >= headEndByte + 1) {
-    headBuffer = cachedHeadBuffer.subarray(0, headEndByte + 1);
+  if (
+    cachedHead &&
+    cachedHead.range.startByte === 0 &&
+    cachedHead.range.endByte >= headEndByte &&
+    cachedHead.buffer.length >= headEndByte + 1
+  ) {
+    headBuffer = cachedHead.buffer.subarray(0, headEndByte + 1);
   } else {
     const headFetch = await fetchByteRange(
       plan.sourceUrl,
@@ -80,27 +85,37 @@ export async function extractClipFromPlan(
     headBuffer = await fs.readFile(headPath);
   }
 
-  let tailBuffer: Buffer | undefined;
+  let moovBuffer: Buffer | undefined;
   if (!index.hasMoovAtStart) {
-    const tailStart = index.moovOffset;
-    const tailEnd = Math.min(index.fileSize - 1, index.moovOffset + index.moovSize - 1);
-    const tailExpectedLength = tailEnd - tailStart + 1;
+    const moovStart = index.moovOffset;
+    const moovEnd = index.moovOffset + index.moovSize - 1;
 
-    if (cachedTailBuffer && cachedTailBuffer.length >= tailExpectedLength) {
-      tailBuffer = cachedTailBuffer;
-    } else {
+    if (
+      cachedTail &&
+      moovStart >= cachedTail.range.startByte &&
+      moovEnd <= cachedTail.range.endByte
+    ) {
+      const relStart = moovStart - cachedTail.range.startByte;
+      const relEnd = relStart + index.moovSize;
+
+      if (relStart >= 0 && relEnd <= cachedTail.buffer.length) {
+        moovBuffer = cachedTail.buffer.subarray(relStart, relEnd);
+      }
+    }
+
+    if (!moovBuffer) {
       const tailFetch = await fetchByteRange(
         plan.sourceUrl,
-        { startByte: tailStart, endByte: tailEnd },
+        { startByte: moovStart, endByte: moovEnd },
         tailMoovPath,
         { fetchFn, allowOverwrite: true }
       );
       totalBytesFetched += tailFetch.bytesDownloaded;
-      tailBuffer = await fs.readFile(tailMoovPath);
+      moovBuffer = await fs.readFile(tailMoovPath);
     }
   }
 
-  // 3. Assemble sparse MP4 with original offsets preserved
+  // 3. Assemble sparse MP4 with original absolute offsets preserved
   const mediaBuffer = await fs.readFile(mediaChunkPath);
 
   const fileHandle = await fs.open(sparseMp4Path, "w+");
@@ -108,9 +123,9 @@ export async function extractClipFromPlan(
     // Write head buffer at offset 0 (ftyp + moov if at start)
     await fileHandle.write(headBuffer, 0, headBuffer.length, 0);
 
-    // If moov is at tail, write tail moov buffer at moovOffset
-    if (!index.hasMoovAtStart && tailBuffer) {
-      await fileHandle.write(tailBuffer, 0, tailBuffer.length, index.moovOffset);
+    // If moov is at tail, write extracted moovBuffer at exact moovOffset
+    if (!index.hasMoovAtStart && moovBuffer) {
+      await fileHandle.write(moovBuffer, 0, moovBuffer.length, index.moovOffset);
     }
 
     // Write media buffer at its exact original file offset
