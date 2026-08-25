@@ -3,7 +3,7 @@ import path from "node:path";
 import type { HITLPauseResult, MediaRendition, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
-import { selectHighestPublicHqRendition } from "./hq-selector.js";
+import { selectHighestPublicHqRendition, type HqSelectionResult } from "./hq-selector.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
@@ -118,9 +118,16 @@ export interface ResumeJobResult {
   llcPath: string;
   timeRange: TimeRange;
   selectedHq: MediaRendition;
+  hqSelectionResult: HqSelectionResult;
   discoveredRenditions: MediaRendition[];
   outputClipPath: string;
   selectiveFetchResult: SelectiveFetchResult;
+  hqSelectionProbeBytes: number;
+  selectiveFetchBytes: number;
+  totalHqLifecycleBytes: number;
+  selectedFullFileBytes: number;
+  selectiveFetchSavingsPercent: number;
+  lifecycleSavingsPercent: number;
 }
 
 export async function resumeJobWorkflow(params: ResumeJobParams): Promise<ResumeJobResult> {
@@ -188,10 +195,11 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
 
   // 6. Select highest publicly available Direct MP4 rendition with verified HTTP 206 capability
-  const selectedHq = await selectHighestPublicHqRendition(descriptor.renditions, {
+  const hqSelectionResult = await selectHighestPublicHqRendition(descriptor.renditions, {
     fetchFn,
     onLog,
   });
+  const selectedHq = hqSelectionResult.selected;
   onLog(
     `[Resume 4/5] Selected HQ rendition: ${selectedHq.formatId} (${selectedHq.resolution}, ${selectedHq.vcodec.toUpperCase()}) directUrl=${selectedHq.directUrl}`
   );
@@ -232,7 +240,18 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     );
   }
 
-  // 9. Update job status to completed and save
+  // 9. Aggregate lifecycle network ledger
+  const hqSelectionProbeBytes = hqSelectionResult.capabilitySelectionBytesTransferred;
+  const selectiveFetchBytes = selectiveFetchResult.transferredBytes;
+  const totalHqLifecycleBytes = hqSelectionProbeBytes + selectiveFetchBytes;
+  const selectedFullFileBytes = selectiveFetchResult.fullFileBytes;
+  const selectiveFetchSavingsPercent = selectiveFetchResult.savingsPercent;
+  const lifecycleSavingsPercent = Math.max(
+    0,
+    Math.round((1 - totalHqLifecycleBytes / selectedFullFileBytes) * 100)
+  );
+
+  // 10. Update job status to completed and save
   job.status = "completed";
   job.renditions = descriptor.renditions;
   await saveJob(job);
@@ -244,8 +263,15 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     llcPath: resolvedLlcPath,
     timeRange,
     selectedHq,
+    hqSelectionResult,
     discoveredRenditions: descriptor.renditions,
     outputClipPath,
     selectiveFetchResult,
+    hqSelectionProbeBytes,
+    selectiveFetchBytes,
+    totalHqLifecycleBytes,
+    selectedFullFileBytes,
+    selectiveFetchSavingsPercent,
+    lifecycleSavingsPercent,
   };
 }

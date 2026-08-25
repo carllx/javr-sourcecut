@@ -1,4 +1,4 @@
-import type { MediaRendition } from "../types.js";
+import type { MediaRendition, VideoCodec } from "../types.js";
 import { compareCodecs } from "./proxy-selector.js";
 import { CapabilityMismatchError } from "./mp4/types.js";
 
@@ -36,10 +36,40 @@ export function selectHqRendition(renditions: MediaRendition[]): MediaRendition 
   return ranked[0];
 }
 
+export interface HqCandidateProbeAttempt {
+  formatId: string;
+  resolution: string;
+  height: number;
+  codec: VideoCodec;
+  httpStatus?: number;
+  contentRange?: string;
+  accepted: boolean;
+  reason?: string;
+  bodyBytesConsumed: number;
+}
+
+export interface HqSelectionResult {
+  selected: MediaRendition;
+  attempts: HqCandidateProbeAttempt[];
+  capabilitySelectionBytesTransferred: number;
+}
+
+async function cancelResponseBody(res: Response): Promise<void> {
+  try {
+    if (res.body && typeof res.body.cancel === "function") {
+      await res.body.cancel();
+    }
+  } catch {
+    // Ignore cancellation errors
+  }
+}
+
 /**
  * Discovers the highest publicly available Direct MP4 rendition from a list of renditions,
  * verifying live HTTP 206 Range capability in strict rank order (highest resolution first,
  * then AV1 within the same tier).
+ *
+ * Implements fail-closed immediate cancellation of response streams for rejected candidates.
  */
 export async function selectHighestPublicHqRendition(
   renditions: MediaRendition[],
@@ -47,39 +77,146 @@ export async function selectHighestPublicHqRendition(
     fetchFn?: typeof fetch;
     onLog?: (msg: string) => void;
   }
-): Promise<MediaRendition> {
+): Promise<HqSelectionResult> {
   const ranked = groupAndRankHqRenditions(renditions);
   const fetchFn = options?.fetchFn ?? fetch;
   const onLog = options?.onLog ?? (() => {});
 
+  const attempts: HqCandidateProbeAttempt[] = [];
+  let totalSelectionBytesTransferred = 0;
+
   for (const candidate of ranked) {
-    onLog(`[Capability Probe] Verifying candidate ${candidate.formatId} (${candidate.resolution}, ${candidate.vcodec.toUpperCase()})...`);
+    onLog(
+      `[Capability Probe] Verifying candidate ${candidate.formatId} (${candidate.resolution}, ${candidate.vcodec.toUpperCase()})...`
+    );
+
+    let res: Response;
     try {
-      const res = await fetchFn(candidate.directUrl, {
+      res = await fetchFn(candidate.directUrl, {
         headers: { Range: "bytes=0-0" },
         redirect: "follow",
       });
-
-      if (res.status === 206) {
-        const contentRange = res.headers.get("content-range");
-        if (contentRange && /^bytes\s+0-0\/\d+$/i.test(contentRange.trim())) {
-          const body = await res.arrayBuffer();
-          if (body.byteLength === 1) {
-            onLog(
-              `[Capability Probe] Candidate ${candidate.formatId} verified with HTTP 206 Range capability (${contentRange.trim()}).`
-            );
-            return candidate;
-          }
-        }
-      }
-      onLog(
-        `[Capability Probe] Candidate ${candidate.formatId} is not a publicly accessible Direct MP4 with Range capability (HTTP status ${res.status}). Skipping.`
-      );
     } catch (err: any) {
       onLog(
-        `[Capability Probe] Candidate ${candidate.formatId} capability probe error: ${err.message}. Skipping.`
+        `[Capability Probe] Candidate ${candidate.formatId} network error: ${err.message}. Skipping.`
       );
+      attempts.push({
+        formatId: candidate.formatId,
+        resolution: candidate.resolution,
+        height: candidate.height || 0,
+        codec: candidate.vcodec,
+        accepted: false,
+        reason: `Network fetch failed: ${err.message}`,
+        bodyBytesConsumed: 0,
+      });
+      continue;
     }
+
+    const httpStatus = res.status;
+    const contentRange = res.headers.get("content-range") || undefined;
+
+    // Fail-closed check 1: Must be HTTP 206
+    if (httpStatus !== 206) {
+      await cancelResponseBody(res);
+      onLog(
+        `[Capability Probe] Candidate ${candidate.formatId} rejected: HTTP ${httpStatus} is not 206 Partial Content. Cancelled stream.`
+      );
+      attempts.push({
+        formatId: candidate.formatId,
+        resolution: candidate.resolution,
+        height: candidate.height || 0,
+        codec: candidate.vcodec,
+        httpStatus,
+        contentRange,
+        accepted: false,
+        reason: `HTTP ${httpStatus} is not 206 Partial Content`,
+        bodyBytesConsumed: 0,
+      });
+      continue;
+    }
+
+    // Fail-closed check 2: Must have valid Content-Range: bytes 0-0/TOTAL
+    if (!contentRange || !/^bytes\s+0-0\/\d+$/i.test(contentRange.trim())) {
+      await cancelResponseBody(res);
+      onLog(
+        `[Capability Probe] Candidate ${candidate.formatId} rejected: Invalid or missing Content-Range header ("${contentRange ?? ""}"). Cancelled stream.`
+      );
+      attempts.push({
+        formatId: candidate.formatId,
+        resolution: candidate.resolution,
+        height: candidate.height || 0,
+        codec: candidate.vcodec,
+        httpStatus,
+        contentRange,
+        accepted: false,
+        reason: `Invalid or missing Content-Range header: "${contentRange ?? ""}"`,
+        bodyBytesConsumed: 0,
+      });
+      continue;
+    }
+
+    // Read exactly 1 byte body
+    let body: ArrayBuffer;
+    try {
+      body = await res.arrayBuffer();
+    } catch (err: any) {
+      await cancelResponseBody(res);
+      attempts.push({
+        formatId: candidate.formatId,
+        resolution: candidate.resolution,
+        height: candidate.height || 0,
+        codec: candidate.vcodec,
+        httpStatus,
+        contentRange,
+        accepted: false,
+        reason: `Failed to read response body: ${err.message}`,
+        bodyBytesConsumed: 0,
+      });
+      continue;
+    }
+
+    const bodyBytesConsumed = body.byteLength;
+    totalSelectionBytesTransferred += bodyBytesConsumed;
+
+    // Fail-closed check 3: Body must be exactly 1 byte for Range: bytes=0-0
+    if (bodyBytesConsumed !== 1) {
+      onLog(
+        `[Capability Probe] Candidate ${candidate.formatId} rejected: Expected 1 byte body, received ${bodyBytesConsumed} bytes.`
+      );
+      attempts.push({
+        formatId: candidate.formatId,
+        resolution: candidate.resolution,
+        height: candidate.height || 0,
+        codec: candidate.vcodec,
+        httpStatus,
+        contentRange,
+        accepted: false,
+        reason: `Expected 1 byte body for Range: bytes=0-0, received ${bodyBytesConsumed} bytes`,
+        bodyBytesConsumed,
+      });
+      continue;
+    }
+
+    // Candidate accepted
+    onLog(
+      `[Capability Probe] Candidate ${candidate.formatId} verified with HTTP 206 Range capability (${contentRange.trim()}).`
+    );
+    attempts.push({
+      formatId: candidate.formatId,
+      resolution: candidate.resolution,
+      height: candidate.height || 0,
+      codec: candidate.vcodec,
+      httpStatus,
+      contentRange,
+      accepted: true,
+      bodyBytesConsumed: 1,
+    });
+
+    return {
+      selected: candidate,
+      attempts,
+      capabilitySelectionBytesTransferred: totalSelectionBytesTransferred,
+    };
   }
 
   throw new CapabilityMismatchError(

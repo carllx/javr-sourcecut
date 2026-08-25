@@ -215,6 +215,143 @@ describe("Workflow Resume E2E", () => {
     expect(savedJobJson.status).toBe("completed");
   });
 
+  // Test E: Workflow ledger: hqSelectionProbeBytes + selectiveFetchBytes = totalHqLifecycleBytes
+  it("Test E: enforces workflow network ledger: hqSelectionProbeBytes + selectiveFetchBytes === totalHqLifecycleBytes", async () => {
+    const workspaceDir = path.join(tmpDir, "eporner-ledger-test");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "test.proxy.mp4");
+    await fs.writeFile(proxyPath, "dummy-proxy");
+
+    const llcPath = path.join(workspaceDir, "test.proxy-proj.llc");
+    await fs.writeFile(llcPath, JSON.stringify({ cutSegments: [{ start: 10, end: 20 }] }));
+
+    const finalOutputPath = path.join(workspaceDir, "test.mp4");
+
+    const jobState: JobState = {
+      jobId: "eporner-ledger-test",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      provider: "eporner",
+      providerAssetId: "test",
+      identity: {
+        provider: "eporner",
+        providerAssetId: "test",
+        observedTitle: "Test",
+        searchAliases: ["test"],
+        performers: [],
+        confidence: "fallback",
+        baseName: "test",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "480p-av1",
+        resolution: "480p",
+        height: 480,
+        vcodec: "av1",
+        directUrl: "https://www.eporner.com/dload/proxy.mp4",
+      },
+      proxyPath,
+      expectedLlcPath: path.join(workspaceDir, "test.llc"),
+      finalOutputPath,
+      renditions: [],
+    };
+
+    await fs.writeFile(path.join(workspaceDir, "job.json"), JSON.stringify(jobState, null, 2));
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      rawTitle: "Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
+        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("2160-av1")) {
+        return { status: 200, headers: new Headers(), body: { cancel: vi.fn() } };
+      }
+      if (url.includes("720-av1")) {
+        return {
+          status: 206,
+          headers: new Headers({ "content-range": "bytes 0-0/50000000" }),
+          body: null,
+          arrayBuffer: async () => new Uint8Array([0x01]).buffer,
+        };
+      }
+      return { status: 404, headers: new Headers(), body: null };
+    });
+
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {
+          sourceUrl: params.sourceUrl,
+          targetTimeRange: params.timeRange,
+          keyframeAlignedTimeRange: params.timeRange,
+          videoByteRange: { startByte: 100, endByte: 500 },
+          combinedByteRange: { startByte: 100, endByte: 500 },
+          segmentRanges: [{ startByte: 100, endByte: 500 }],
+          totalBytesToFetch: 401,
+          fullFileBytes: 50000000,
+          savingsRatio: 0.99,
+          isProvablePartial: true,
+        },
+        index: {
+          fileSize: 50000000,
+          moovOffset: 0,
+          moovSize: 100,
+          timescale: 1000,
+          duration: 10,
+          tracks: [],
+          hasMoovAtStart: true,
+        },
+        probeResult: {
+          format: { filename: params.outputClipPath, format_name: "mp4", duration: "10.0", size: "401", bit_rate: "100" },
+          videoStream: { index: 0, codec: "av1", width: 1280, height: 720, fps: 30 },
+          duration: 10.0,
+        },
+        indexProbeResult: {
+          index: { fileSize: 50000000, moovOffset: 0, moovSize: 100, timescale: 1000, duration: 10, tracks: [], hasMoovAtStart: true },
+          capabilityProbeBytesTransferred: 1,
+          headProbeBytesTransferred: 100,
+          tailProbeBytesTransferred: 0,
+          totalProbeBytesTransferred: 101,
+        },
+        transferredBytes: 502, // 101 probe + 401 data
+        fullFileBytes: 50000000,
+        savingsPercent: 99,
+      };
+    });
+
+    const result = await resumeJobWorkflow({
+      jobPathOrDir: workspaceDir,
+      adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
+    });
+
+    expect(result.hqSelectionProbeBytes).toBe(1);
+    expect(result.selectiveFetchBytes).toBe(502);
+    expect(result.totalHqLifecycleBytes).toBe(result.hqSelectionProbeBytes + result.selectiveFetchBytes);
+    expect(result.totalHqLifecycleBytes).toBe(503);
+    expect(result.selectedFullFileBytes).toBe(50000000);
+    expect(result.selectiveFetchSavingsPercent).toBe(99);
+    expect(result.lifecycleSavingsPercent).toBe(100);
+  });
+
   it("fails if existing proxy file is missing (does not silently re-download)", async () => {
     const workspaceDir = path.join(tmpDir, "eporner-missing-proxy");
     await fs.mkdir(workspaceDir, { recursive: true });
