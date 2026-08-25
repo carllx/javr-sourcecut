@@ -1,11 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { verifyMediaFile, parseFfprobeOutput, type FfprobeProbeResult } from "../../src/core/verifier.js";
-import path from "node:path";
-import os from "node:os";
-import fs from "node:fs/promises";
+import { verifyMediaFile, parseFfprobeOutput } from "../../src/core/verifier.js";
 
 describe("FFprobe Media Verifier", () => {
-  it("parses valid ffprobe output correctly", () => {
+  it("parses valid ffprobe output correctly with audio and video streams", () => {
     const rawFfprobeJson = JSON.stringify({
       streams: [
         {
@@ -21,6 +18,8 @@ describe("FFprobe Media Verifier", () => {
           index: 1,
           codec_name: "aac",
           codec_type: "audio",
+          channels: 2,
+          sample_rate: "48000",
           duration: "904.5",
         },
       ],
@@ -38,6 +37,8 @@ describe("FFprobe Media Verifier", () => {
     expect(result.videoStream.width).toBe(854);
     expect(result.videoStream.height).toBe(480);
     expect(result.audioStream?.codec).toBe("aac");
+    expect(result.audioStream?.channels).toBe(2);
+    expect(result.audioStream?.sampleRate).toBe(48000);
   });
 
   it("fails verification if duration is 0 or missing", () => {
@@ -49,6 +50,11 @@ describe("FFprobe Media Verifier", () => {
           codec_type: "video",
           width: 854,
           height: 480,
+        },
+        {
+          index: 1,
+          codec_name: "aac",
+          codec_type: "audio",
         },
       ],
       format: {
@@ -77,6 +83,26 @@ describe("FFprobe Media Verifier", () => {
     });
 
     expect(() => parseFfprobeOutput(rawFfprobeJson)).toThrow("missing video stream");
+  });
+
+  it("fails verification if audio stream is missing when required", () => {
+    const rawFfprobeJson = JSON.stringify({
+      streams: [
+        {
+          index: 0,
+          codec_name: "h264",
+          codec_type: "video",
+          width: 854,
+          height: 480,
+        },
+      ],
+      format: {
+        duration: "100",
+        size: "1000",
+      },
+    });
+
+    expect(() => parseFfprobeOutput(rawFfprobeJson, { requireAudio: true })).toThrow("missing audio stream");
   });
 
   it("fails if file does not exist", async () => {

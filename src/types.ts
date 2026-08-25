@@ -76,4 +76,5 @@ export interface HITLPauseResult {
   expectedLlcPath: string;
   status: "waiting-for-llc";
   instructions: string;
+  job: JobState;
 }

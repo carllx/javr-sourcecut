@@ -93,5 +93,6 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
     expectedLlcPath: job.expectedLlcPath,
     status: "waiting-for-llc",
     instructions,
+    job,
   };
 }

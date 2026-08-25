@@ -13,6 +13,8 @@ export interface VideoStreamInfo {
 
 export interface AudioStreamInfo {
   codec: string;
+  channels?: number;
+  sampleRate?: number;
 }
 
 export interface FfprobeProbeResult {
@@ -23,7 +25,10 @@ export interface FfprobeProbeResult {
   rawFormat?: any;
 }
 
-export function parseFfprobeOutput(rawJson: string): FfprobeProbeResult {
+export function parseFfprobeOutput(
+  rawJson: string,
+  options: { requireAudio?: boolean } = { requireAudio: true }
+): FfprobeProbeResult {
   let data: any;
   try {
     data = JSON.parse(rawJson);
@@ -64,11 +69,17 @@ export function parseFfprobeOutput(rawJson: string): FfprobeProbeResult {
     fps,
   };
 
-  let audioStream: AudioStreamInfo | undefined;
   const audioStreamData = streams.find((s) => s.codec_type === "audio");
+  if (options.requireAudio && !audioStreamData) {
+    throw new Error("Proxy media verification failed: missing audio stream");
+  }
+
+  let audioStream: AudioStreamInfo | undefined;
   if (audioStreamData) {
     audioStream = {
       codec: audioStreamData.codec_name || "unknown",
+      channels: audioStreamData.channels ? parseInt(audioStreamData.channels, 10) : undefined,
+      sampleRate: audioStreamData.sample_rate ? parseInt(audioStreamData.sample_rate, 10) : undefined,
     };
   }
 
@@ -81,7 +92,10 @@ export function parseFfprobeOutput(rawJson: string): FfprobeProbeResult {
   };
 }
 
-export async function verifyMediaFile(filePath: string): Promise<FfprobeProbeResult> {
+export async function verifyMediaFile(
+  filePath: string,
+  options: { requireAudio?: boolean } = { requireAudio: true }
+): Promise<FfprobeProbeResult> {
   const stat = await fs.stat(filePath);
   if (stat.size === 0) {
     throw new Error(`Proxy media verification failed: empty file (0 bytes) at ${filePath}`);
@@ -92,13 +106,13 @@ export async function verifyMediaFile(filePath: string): Promise<FfprobeProbeRes
       "-v",
       "error",
       "-show_entries",
-      "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,duration",
+      "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,channels,sample_rate,duration",
       "-of",
       "json",
       filePath,
     ]);
 
-    return parseFfprobeOutput(stdout);
+    return parseFfprobeOutput(stdout, options);
   } catch (err: any) {
     if (err.message && err.message.includes("Proxy media verification failed")) {
       throw err;
