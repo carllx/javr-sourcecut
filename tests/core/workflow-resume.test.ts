@@ -117,6 +117,16 @@ describe("Workflow Resume E2E", () => {
       resolve: vi.fn().mockResolvedValue(mockDescriptor),
     };
 
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: {
+          "Content-Range": "bytes 0-0/100000",
+          "Content-Length": "1",
+        },
+      });
+    });
+
     // Mock selective fetch
     const selectiveFetchSpy = vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
       // Create empty mock output clip
@@ -185,6 +195,7 @@ describe("Workflow Resume E2E", () => {
     const result = await resumeJobWorkflow({
       jobPathOrDir: workspaceDir,
       adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
     });
 
     expect(result.job.status).toBe("completed");

@@ -1,32 +1,88 @@
 import type { MediaRendition } from "../types.js";
 import { compareCodecs } from "./proxy-selector.js";
+import { CapabilityMismatchError } from "./mp4/types.js";
 
 /**
- * Selects the optimal high-quality rendition according to the strict priority:
- * 1. Highest publicly available resolution (maximum height).
- * 2. Within the same highest resolution tier, prioritize AV1 over H.264 / HEVC / other.
+ * Ranks renditions strictly by:
+ * 1. Highest resolution (height descending)
+ * 2. Within the same resolution tier, prioritize AV1 > H264 > HEVC > other
  * 3. Never downgrade resolution for AV1 (e.g. 2160p H264 > 1440p AV1).
  */
-export function selectHqRendition(renditions: MediaRendition[]): MediaRendition {
+export function groupAndRankHqRenditions(renditions: MediaRendition[]): MediaRendition[] {
   if (!renditions || renditions.length === 0) {
     throw new Error("No renditions available for high-quality selection");
   }
 
-  // Filter renditions that have a valid directUrl
   const valid = renditions.filter((r) => Boolean(r.directUrl));
   if (valid.length === 0) {
     throw new Error("No renditions with valid directUrl available for HQ selection");
   }
 
-  // 1. Group by highest resolution (height)
-  const withHeight = valid.filter((r) => (r.height || 0) > 0);
-  const pool = withHeight.length > 0 ? withHeight : valid;
+  return [...valid].sort((a, b) => {
+    const heightA = a.height || 0;
+    const heightB = b.height || 0;
+    if (heightA !== heightB) {
+      return heightB - heightA;
+    }
+    return compareCodecs(a.vcodec, b.vcodec);
+  });
+}
 
-  const maxHeight = Math.max(...pool.map((r) => r.height || 0));
-  const topTier = pool.filter((r) => (r.height || 0) === maxHeight);
+/**
+ * Pure synchronous selector picking the statically highest ranked rendition.
+ */
+export function selectHqRendition(renditions: MediaRendition[]): MediaRendition {
+  const ranked = groupAndRankHqRenditions(renditions);
+  return ranked[0];
+}
 
-  // 2. Sort within highest tier by codec preference: AV1 > H264 > HEVC > other
-  topTier.sort((a, b) => compareCodecs(a.vcodec, b.vcodec));
+/**
+ * Discovers the highest publicly available Direct MP4 rendition from a list of renditions,
+ * verifying live HTTP 206 Range capability in strict rank order (highest resolution first,
+ * then AV1 within the same tier).
+ */
+export async function selectHighestPublicHqRendition(
+  renditions: MediaRendition[],
+  options?: {
+    fetchFn?: typeof fetch;
+    onLog?: (msg: string) => void;
+  }
+): Promise<MediaRendition> {
+  const ranked = groupAndRankHqRenditions(renditions);
+  const fetchFn = options?.fetchFn ?? fetch;
+  const onLog = options?.onLog ?? (() => {});
 
-  return topTier[0];
+  for (const candidate of ranked) {
+    onLog(`[Capability Probe] Verifying candidate ${candidate.formatId} (${candidate.resolution}, ${candidate.vcodec.toUpperCase()})...`);
+    try {
+      const res = await fetchFn(candidate.directUrl, {
+        headers: { Range: "bytes=0-0" },
+        redirect: "follow",
+      });
+
+      if (res.status === 206) {
+        const contentRange = res.headers.get("content-range");
+        if (contentRange && /^bytes\s+0-0\/\d+$/i.test(contentRange.trim())) {
+          const body = await res.arrayBuffer();
+          if (body.byteLength === 1) {
+            onLog(
+              `[Capability Probe] Candidate ${candidate.formatId} verified with HTTP 206 Range capability (${contentRange.trim()}).`
+            );
+            return candidate;
+          }
+        }
+      }
+      onLog(
+        `[Capability Probe] Candidate ${candidate.formatId} is not a publicly accessible Direct MP4 with Range capability (HTTP status ${res.status}). Skipping.`
+      );
+    } catch (err: any) {
+      onLog(
+        `[Capability Probe] Candidate ${candidate.formatId} capability probe error: ${err.message}. Skipping.`
+      );
+    }
+  }
+
+  throw new CapabilityMismatchError(
+    "No publicly available Direct MP4 rendition with verified HTTP 206 Range capability found."
+  );
 }

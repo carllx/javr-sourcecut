@@ -3,7 +3,7 @@ import path from "node:path";
 import type { HITLPauseResult, MediaRendition, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
-import { selectHqRendition } from "./hq-selector.js";
+import { selectHighestPublicHqRendition } from "./hq-selector.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
@@ -187,8 +187,11 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   const descriptor = await adapter.resolve(job.sourceUrl, fetchFn);
   onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
 
-  // 6. Select highest-quality Direct MP4 rendition (prefer AV1 in top resolution tier)
-  const selectedHq = selectHqRendition(descriptor.renditions);
+  // 6. Select highest publicly available Direct MP4 rendition with verified HTTP 206 capability
+  const selectedHq = await selectHighestPublicHqRendition(descriptor.renditions, {
+    fetchFn,
+    onLog,
+  });
   onLog(
     `[Resume 4/5] Selected HQ rendition: ${selectedHq.formatId} (${selectedHq.resolution}, ${selectedHq.vcodec.toUpperCase()}) directUrl=${selectedHq.directUrl}`
   );
