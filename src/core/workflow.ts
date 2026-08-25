@@ -123,6 +123,7 @@ export interface ResumeJobParams {
   jobPathOrDir: string;
   llcPath?: string;
   qualityTarget?: QualityTargetOptions;
+  budgetMultiplier?: number;
   cookiesPath?: string;
   sessionProvider?: SourceSessionProvider;
   adapters?: SourceAdapter[];
@@ -136,6 +137,7 @@ export interface ResumeJobResult {
   job: JobState;
   llcPath: string;
   timeRange: TimeRange;
+  timeRanges: TimeRange[];
   selectedHq: MediaRendition;
   hqSelectionResult: HqSelectionResult;
   discoveredRenditions: MediaRendition[];
@@ -154,6 +156,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     jobPathOrDir,
     llcPath: explicitLlcPath,
     qualityTarget,
+    budgetMultiplier,
     cookiesPath,
     sessionProvider: explicitSessionProvider,
     adapters = [new EpornerAdapter()],
@@ -190,10 +193,16 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     ? path.resolve(explicitLlcPath)
     : await findLlcFileInWorkspace(job.workspaceDir, job.expectedLlcPath);
 
-  const { timeRange } = await loadAndNormalizeLlc(resolvedLlcPath);
+  const { timeRange, timeRanges } = await loadAndNormalizeLlc(resolvedLlcPath);
   onLog(
-    `[Resume 2/5] Parsed cut segment [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s] (duration ${(timeRange.endSeconds - timeRange.startSeconds).toFixed(3)}s) from ${resolvedLlcPath}`
+    `[Resume 2/5] Parsed ${timeRanges.length} cut segment(s) from ${resolvedLlcPath}:`
   );
+  for (let i = 0; i < timeRanges.length; i++) {
+    const s = timeRanges[i];
+    onLog(
+      `  Segment ${i + 1}: [${s.startSeconds.toFixed(3)}s -> ${s.endSeconds.toFixed(3)}s] (duration ${(s.endSeconds - s.startSeconds).toFixed(3)}s)`
+    );
+  }
 
   // 4. Invariant: Do not overwrite existing final output file if present
   const outputClipPath = job.finalOutputPath;
@@ -253,13 +262,21 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   );
 
   // 7. Execute bounded MP4 index probe and HTTP 206 selective fetch
-  onLog(`[Resume 5/5] Executing selective fetch for [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]...`);
+  onLog(`[Resume 5/5] Executing selective fetch for ${timeRanges.length} cut segment(s)...`);
   const selectiveFetchResult = await runSelectiveFetch({
     sourceUrl: selectedHq.directUrl,
     timeRange,
+    timeRanges,
     outputClipPath,
     workDir: job.workspaceDir,
+    renditionIdentity: {
+      provider: job.provider,
+      providerAssetId: job.providerAssetId,
+      formatId: selectedHq.formatId,
+      fullFileBytes: selectedHq.contentLength || 0,
+    },
     options: {
+      budgetMultiplier,
       fetchFn: sessionFetch,
       onProgress: (percent, transferred, total) => {
         onProgress?.(transferred, total);
@@ -302,12 +319,15 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     );
   }
 
-  const expectedCutDuration = timeRange.endSeconds - timeRange.startSeconds;
+  const expectedCutDuration = timeRanges.reduce(
+    (sum, r) => sum + (r.endSeconds - r.startSeconds),
+    0
+  );
   const durationDiff = Math.abs(verifiedProbe.duration - expectedCutDuration);
-  const maxDurationTolerance = 5.0; // Fixed bounded keyframe alignment tolerance (<= 5s)
+  const maxDurationTolerance = 5.0 * timeRanges.length; // Fixed bounded keyframe alignment tolerance (<= 5s per segment)
   if (durationDiff > maxDurationTolerance) {
     throw new Error(
-      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds fixed tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
+      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC ${timeRanges.length} segments), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds fixed tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
     );
   }
 
@@ -348,6 +368,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     job,
     llcPath: resolvedLlcPath,
     timeRange,
+    timeRanges,
     selectedHq,
     hqSelectionResult,
     discoveredRenditions: descriptor.renditions,
@@ -361,3 +382,4 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     lifecycleSavingsPercent,
   };
 }
+

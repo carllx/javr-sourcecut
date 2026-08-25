@@ -1114,4 +1114,142 @@ describe("Workflow Resume E2E", () => {
     expect(result.selectedHq.formatId).toBe("2160p-av1");
     expect(result.outputClipPath).toBe(path.join(workspaceDir, "test.mp4"));
   });
+
+  // Slice 4: Multi-segment resume with authored order preservation
+  it("Slice 4: resumes multi-segment LLC preserving authored order and selected=true does not discard other cuts", async () => {
+    const workspaceDir = path.join(tmpDir, "multi-seg-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        cutSegments: [
+          { start: 10.0, end: 25.0, selected: false },
+          { start: 50.0, end: 65.0, selected: true },
+          { start: 100.0, end: 120.0 },
+        ],
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "multi-seg-test",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Multi Segment Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "1080p-av1", resolution: "1080p", height: 1080, vcodec: "av1", directUrl: "https://example.com/1080-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      })
+    );
+
+    const selectiveFetchSpy = vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "50.0" } as any, // 15s + 15s + 20s = 50s
+          videoStream: { index: 0, codec: "av1", width: 1920, height: 1080, fps: 30 },
+          duration: 50.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 1500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    const result = await resumeJobWorkflow({
+      jobPathOrDir: workspaceDir,
+      adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
+      sessionProvider: new NoopSessionProvider(),
+    });
+
+    expect(result.job.status).toBe("completed");
+    expect(result.timeRanges).toHaveLength(3);
+    expect(result.timeRanges[0]).toEqual({ startSeconds: 10.0, endSeconds: 25.0 });
+    expect(result.timeRanges[1]).toEqual({ startSeconds: 50.0, endSeconds: 65.0 });
+    expect(result.timeRanges[2]).toEqual({ startSeconds: 100.0, endSeconds: 120.0 });
+    expect(selectiveFetchSpy).toHaveBeenCalledOnce();
+  });
+
+  // Slice 4: Transfer Budget & Fail-Closed Abort
+  it("Slice 4: throws BudgetExceededError when transfer exceeds budget multiplier", async () => {
+    const { BudgetExceededError } = await import("../../src/core/mp4/types.js");
+    const workspaceDir = path.join(tmpDir, "budget-exceeded-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        cutSegments: [{ start: 10.0, end: 20.0 }],
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "budget-test",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Budget Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "1080p-av1", resolution: "1080p", height: 1080, vcodec: "av1", directUrl: "https://example.com/1080-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      })
+    );
+
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async () => {
+      throw new BudgetExceededError("Budget exceeded: prospective transfer exceeds maximum allowed budget");
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(BudgetExceededError);
+
+    const savedJob = await loadJob(workspaceDir);
+    expect(savedJob.status).not.toBe("completed");
+  });
 });
+

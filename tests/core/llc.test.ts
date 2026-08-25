@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseLlcContent, normalizeLlcCutSegments, parseRelaxedJson } from "../../src/core/llc.js";
+import {
+  parseLlcContent,
+  normalizeLlcCutSegments,
+  normalizeLlcMultiSegments,
+  parseRelaxedJson,
+} from "../../src/core/llc.js";
 
 describe("LLC Parser & Normalizer", () => {
   it("parses standard JSON LLC format", () => {
@@ -55,7 +60,7 @@ describe("LLC Parser & Normalizer", () => {
     expect(timeRange.endSeconds).toBeCloseTo(1451.572984);
   });
 
-  it("handles multiple segments and selects the one with selected: true", () => {
+  it("handles multiple segments and selects the one with selected: true for single-segment normalizer", () => {
     const relaxed = `
 {
   version: 2,
@@ -72,11 +77,58 @@ describe("LLC Parser & Normalizer", () => {
     expect(timeRange.endSeconds).toBe(80.5);
   });
 
+  it("normalizeLlcMultiSegments parses all authored cutSegments preserving order regardless of selected flag", () => {
+    const relaxed = `
+{
+  version: 2,
+  cutSegments: [
+    { start: 10.0, end: 20.0, name: 'seg1', selected: false },
+    { start: 50.5, end: 75.0, name: 'seg2', selected: true },
+    { start: 120.0, end: 150.0, name: 'seg3' }
+  ]
+}
+`;
+    const project = parseLlcContent(relaxed);
+    const multiSegments = normalizeLlcMultiSegments(project);
+
+    expect(multiSegments).toHaveLength(3);
+    expect(multiSegments[0]).toEqual({ startSeconds: 10.0, endSeconds: 20.0 });
+    expect(multiSegments[1]).toEqual({ startSeconds: 50.5, endSeconds: 75.0 });
+    expect(multiSegments[2]).toEqual({ startSeconds: 120.0, endSeconds: 150.0 });
+  });
+
+  it("normalizeLlcMultiSegments preserves authored order even when segments are not in chronological order", () => {
+    const relaxed = `
+{
+  version: 2,
+  cutSegments: [
+    { start: 100.0, end: 120.0 },
+    { start: 10.0, end: 25.0 }
+  ]
+}
+`;
+    const project = parseLlcContent(relaxed);
+    const multiSegments = normalizeLlcMultiSegments(project);
+
+    expect(multiSegments).toHaveLength(2);
+    expect(multiSegments[0]).toEqual({ startSeconds: 100.0, endSeconds: 120.0 });
+    expect(multiSegments[1]).toEqual({ startSeconds: 10.0, endSeconds: 25.0 });
+  });
+
   it("throws on empty cutSegments or invalid time range", () => {
     expect(() => parseLlcContent("")).toThrow("empty");
     expect(() => normalizeLlcCutSegments({ cutSegments: [] })).toThrow("does not contain any cutSegments");
     expect(() => normalizeLlcCutSegments({ cutSegments: [{ start: 50, end: 40 }] })).toThrow(
       "greater than start time"
     );
+    expect(() => normalizeLlcMultiSegments({ cutSegments: [] })).toThrow("does not contain any cutSegments");
+    expect(() =>
+      normalizeLlcMultiSegments({
+        cutSegments: [
+          { start: 10, end: 20 },
+          { start: 30, end: 25 },
+        ],
+      })
+    ).toThrow("greater than start time");
   });
 });

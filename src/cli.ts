@@ -28,6 +28,16 @@ export function validateHeight(heightStr: string): number {
   return parsed;
 }
 
+export function validateBudgetMultiplier(multiplierStr: string): number {
+  const parsed = parseFloat(multiplierStr);
+  if (isNaN(parsed) || !Number.isFinite(parsed) || parsed < 1.0) {
+    throw new Error(
+      `Invalid budget multiplier "${multiplierStr}". Expected a finite number >= 1.0 (e.g. 1.5, 2.0).`
+    );
+  }
+  return parsed;
+}
+
 async function isJobPath(p: string): Promise<boolean> {
   try {
     const resolved = path.resolve(p);
@@ -78,21 +88,22 @@ Usage:
   # Ingestion mode (Slice 1):
   javr-sourcecut <eporner-url> [root-directory] [--cookies <cookies.txt>]
 
-  # Resume mode (Slice 3):
+  # Resume mode (Slice 3/4):
   javr-sourcecut resume <job-directory-or-job.json> [options]
 
   # Dedicated browser authentication:
   javr-sourcecut auth eporner [--reset]
 
 Options:
-  --resume, resume     Resume an existing waiting-for-llc Job
-  --llc <path>         Explicit path to LosslessCut .llc project file
-  --cookies <path>     Path to Netscape/browser cookies.txt file
-  --height <number>    Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
-  --quality <string>   Target quality resolution (e.g. 2160p, 1440p, max)
-  --codec <string>     Preferred codec (av1, h264, hevc, other)
-  --reset              Reset dedicated browser profile (used with auth)
-  --help, -h           Show this help message
+  --resume, resume         Resume an existing waiting-for-llc Job
+  --llc <path>             Explicit path to LosslessCut .llc project file
+  --cookies <path>         Path to Netscape/browser cookies.txt file
+  --height <number>        Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
+  --quality <string>       Target quality resolution (e.g. 2160p, 1440p, max)
+  --codec <string>         Preferred codec (av1, h264, hevc, other)
+  --budget-multiplier <n>  Transfer budget multiplier (>= 1.0, default 1.5)
+  --reset                  Reset dedicated browser profile (used with auth)
+  --help, -h               Show this help message
 
 Examples:
   javr-sourcecut auth eporner
@@ -100,6 +111,7 @@ Examples:
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --cookies "./cookies.txt"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080 --codec av1
+  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --budget-multiplier 2.0
 `);
     process.exit(0);
   }
@@ -125,6 +137,7 @@ Examples:
   let jobPath = "";
   let llcPath: string | undefined;
   let cookiesPath: string | undefined;
+  let budgetMultiplier: number | undefined;
   let sourceUrl = "";
   let rootDir = process.cwd();
   const qualityTarget: QualityTargetOptions = {};
@@ -141,6 +154,11 @@ Examples:
         llcPath = args[++i];
       } else if (arg === "--cookies" && i + 1 < args.length) {
         cookiesPath = args[++i];
+      } else if (
+        (arg === "--budget-multiplier" || arg === "--budget") &&
+        i + 1 < args.length
+      ) {
+        budgetMultiplier = validateBudgetMultiplier(args[++i]);
       } else if (arg === "--height" && i + 1 < args.length) {
         qualityTarget.height = validateHeight(args[++i]);
       } else if (arg === "--quality" && i + 1 < args.length) {
@@ -184,6 +202,7 @@ Examples:
         jobPathOrDir: jobPath,
         llcPath,
         cookiesPath,
+        budgetMultiplier,
         qualityTarget: Object.keys(qualityTarget).length > 0 ? qualityTarget : undefined,
         onProgress: createCliProgressReporter("Selective fetch"),
         onLog: handleCliLog,
@@ -194,7 +213,11 @@ Examples:
       console.log("=======================================================");
       console.log(` Job ID:                 ${result.job.jobId}`);
       console.log(` Selected Rendition:     ${result.selectedHq.formatId} (${result.selectedHq.resolution}, ${result.selectedHq.vcodec.toUpperCase()})`);
-      console.log(` Cut Segment:            ${result.timeRange.startSeconds.toFixed(3)}s -> ${result.timeRange.endSeconds.toFixed(3)}s`);
+      console.log(` Cut Segments:           ${result.timeRanges.length} segment(s)`);
+      for (let sIdx = 0; sIdx < result.timeRanges.length; sIdx++) {
+        const seg = result.timeRanges[sIdx];
+        console.log(`   Segment ${sIdx + 1}:             ${seg.startSeconds.toFixed(3)}s -> ${seg.endSeconds.toFixed(3)}s (${(seg.endSeconds - seg.startSeconds).toFixed(3)}s)`);
+      }
       console.log(` Output File:            ${result.outputClipPath}`);
       console.log(` Full File Size:         ${(result.selectiveFetchResult.fullFileBytes / 1024 / 1024).toFixed(2)} MB`);
       console.log(` Selective Fetch Stage:  ${(result.selectiveFetchBytes / 1024 / 1024).toFixed(2)} MB (${result.selectiveFetchSavingsPercent}% savings)`);
@@ -204,6 +227,7 @@ Examples:
       console.error(`\nResume workflow failed: ${err.message || String(err)}`);
       process.exit(1);
     }
+
   } else {
     if (!sourceUrl) {
       console.error("Error: Missing video URL argument.");
