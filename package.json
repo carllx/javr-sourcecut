@@ -1,0 +1,23 @@
+{
+  "name": "javr-sourcecut",
+  "version": "0.1.0",
+  "description": "Bandwidth-efficient, multi-source video clipping and lossless assembly workflow",
+  "main": "dist/index.js",
+  "bin": {
+    "javr-sourcecut": "dist/cli.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
