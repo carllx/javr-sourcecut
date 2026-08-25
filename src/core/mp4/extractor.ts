@@ -142,48 +142,40 @@ export async function extractClipFromPlan(
     await fileHandle.close();
   }
 
-  // 4. Extract target segment via FFmpeg
+  // 4. Extract target segment via FFmpeg stream-copy
   const startSec = plan.targetTimeRange.startSeconds;
   const durationSec = plan.targetTimeRange.endSeconds - plan.targetTimeRange.startSeconds;
 
   try {
-    await execFileAsync("ffmpeg", [
-      "-y",
-      "-ss", startSec.toString(),
-      "-i", sparseMp4Path,
-      "-t", durationSec.toString(),
-      "-c", "copy",
-      "-movflags", "+faststart",
+    try {
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-ss", startSec.toString(),
+        "-i", sparseMp4Path,
+        "-t", durationSec.toString(),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        outputClipPath,
+      ]);
+    } catch (copyErr: any) {
+      throw new Error(
+        `FFmpeg stream-copy extraction failed: ${copyErr.message || copyErr}. Refusing to fallback to re-encoding.`
+      );
+    }
+
+    // 5. Verify extracted clip via ffprobe
+    const probeResult = await verifyMediaFile(outputClipPath);
+
+    return {
       outputClipPath,
-    ]);
-  } catch (copyErr) {
-    // Fallback to fast encode
-    await execFileAsync("ffmpeg", [
-      "-y",
-      "-ss", startSec.toString(),
-      "-i", sparseMp4Path,
-      "-t", durationSec.toString(),
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      "-crf", "18",
-      "-c:a", "aac",
-      "-movflags", "+faststart",
-      outputClipPath,
-    ]);
+      bytesFetched: totalBytesFetched,
+      probeResult,
+    };
+  } finally {
+    // Clean temporary reconstruction files
+    await fs.rm(mediaChunkPath, { force: true }).catch(() => {});
+    await fs.rm(headPath, { force: true }).catch(() => {});
+    await fs.rm(tailMoovPath, { force: true }).catch(() => {});
+    await fs.rm(sparseMp4Path, { force: true }).catch(() => {});
   }
-
-  // 5. Verify extracted clip via ffprobe
-  const probeResult = await verifyMediaFile(outputClipPath);
-
-  // Clean temporary reconstruction files
-  await fs.rm(mediaChunkPath, { force: true }).catch(() => {});
-  await fs.rm(headPath, { force: true }).catch(() => {});
-  await fs.rm(tailMoovPath, { force: true }).catch(() => {});
-  await fs.rm(sparseMp4Path, { force: true }).catch(() => {});
-
-  return {
-    outputClipPath,
-    bytesFetched: totalBytesFetched,
-    probeResult,
-  };
 }

@@ -277,7 +277,41 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     `Output verified: duration=${verifiedProbe.duration.toFixed(2)}s, codec=${verifiedProbe.videoStream.codec} (${verifiedProbe.videoStream.width}x${verifiedProbe.videoStream.height}), audio=${verifiedProbe.audioStream?.codec || "none"}`
   );
 
-  // 8. Invariant: Verify existing proxy was completely untouched
+  // 8. Enforce authoritative ffprobe invariants before completing job
+  const normalizeCodec = (c?: string) => {
+    if (!c) return "";
+    const lower = c.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (lower === "av01" || lower === "av1") return "av1";
+    if (lower === "avc1" || lower === "h264" || lower === "x264") return "h264";
+    if (lower === "h265" || lower === "hevc" || lower === "hev1" || lower === "hvc1") return "hevc";
+    if (lower === "vp9" || lower === "vp09") return "vp9";
+    return lower;
+  };
+
+  const actualCodec = normalizeCodec(verifiedProbe.videoStream.codec);
+  const expectedCodec = normalizeCodec(selectedHq.vcodec);
+  if (actualCodec !== expectedCodec) {
+    throw new Error(
+      `Output video codec mismatch: expected "${selectedHq.vcodec}" (${expectedCodec}), but ffprobe verified "${verifiedProbe.videoStream.codec}" (${actualCodec}). Refusing to complete job.`
+    );
+  }
+
+  if (verifiedProbe.videoStream.height !== selectedHq.height) {
+    throw new Error(
+      `Output video height mismatch: expected ${selectedHq.height}p, but ffprobe verified ${verifiedProbe.videoStream.height}p. Refusing to complete job.`
+    );
+  }
+
+  const expectedCutDuration = timeRange.endSeconds - timeRange.startSeconds;
+  const durationDiff = Math.abs(verifiedProbe.duration - expectedCutDuration);
+  const maxDurationTolerance = Math.max(5.0, expectedCutDuration * 0.1);
+  if (durationDiff > maxDurationTolerance) {
+    throw new Error(
+      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
+    );
+  }
+
+  // 9. Invariant: Verify existing proxy was completely untouched
   const proxyStatAfter = await fs.stat(job.proxyPath);
   if (
     proxyStatAfter.mtimeMs !== proxyStatBefore.mtimeMs ||
@@ -288,7 +322,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     );
   }
 
-  // 9. Aggregate lifecycle network ledger
+  // 10. Aggregate lifecycle network ledger
   const hqSelectionProbeBytes = hqSelectionResult.capabilitySelectionBytesTransferred;
   const selectiveFetchBytes = selectiveFetchResult.transferredBytes;
   const totalHqLifecycleBytes = hqSelectionProbeBytes + selectiveFetchBytes;
@@ -299,7 +333,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     Math.round((1 - totalHqLifecycleBytes / selectedFullFileBytes) * 100)
   );
 
-  // 10. Update job status to completed and save
+  // 11. Update job status to completed and save
   job.status = "completed";
   job.renditions = descriptor.renditions;
   job.qualityTarget = resolveJobQualityTargetMetadata(

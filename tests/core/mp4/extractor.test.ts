@@ -164,4 +164,34 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
     expect(probe.videoStream.codec).toBe("h264");
     expect(probe.audioStream?.codec).toBe("aac");
   });
+
+  it("fails closed without falling back to re-encoding if stream-copy fails", async () => {
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const probeResult = await probeMP4Index(videoUrl, { headProbeBytes: 64 * 1024 });
+    const index = probeResult.index;
+    const invalidPlan = {
+      sourceUrl: videoUrl,
+      targetTimeRange: { startSeconds: "invalid_time" as any, endSeconds: 10 },
+      keyframeAlignedTimeRange: { startSeconds: 0, endSeconds: 10 },
+      videoByteRange: { startByte: 0, endByte: 100 },
+      combinedByteRange: { startByte: 0, endByte: 100 },
+      segmentRanges: [{ startByte: 0, endByte: 100 }],
+      totalBytesToFetch: 101,
+      fullFileBytes: index.fileSize,
+      savingsRatio: 0.99,
+      isProvablePartial: true,
+    };
+
+    const outputClipPath = path.join(tempDir, "failed_clip.mp4");
+
+    await expect(
+      extractClipFromPlan({
+        plan: invalidPlan,
+        index,
+        outputClipPath,
+        workDir: path.join(tempDir, "fail-workdir"),
+        cachedHead: probeResult.cachedHead,
+      })
+    ).rejects.toThrow(/FFmpeg stream-copy extraction failed[\s\S]*Refusing to fallback to re-encoding/);
+  });
 });

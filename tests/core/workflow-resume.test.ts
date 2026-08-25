@@ -4,8 +4,43 @@ import path from "node:path";
 import os from "node:os";
 import { resumeJobWorkflow } from "../../src/core/workflow.js";
 import { NoopSessionProvider } from "../../src/core/session.js";
+import { saveJob, loadJob } from "../../src/core/job.js";
 import type { JobState, SourceAdapter, SourceDescriptor } from "../../src/types.js";
 import * as selectiveFetchModule from "../../src/core/mp4/selective-fetch.js";
+
+function createSampleJob(workspaceDir: string): JobState {
+  const proxyPath = path.join(workspaceDir, "test.proxy.mp4");
+  return {
+    jobId: "test-job",
+    status: "waiting-for-llc",
+    createdAt: "2026-08-25T10:00:00.000Z",
+    updatedAt: "2026-08-25T10:05:00.000Z",
+    sourceUrl: "https://example.com/video-test/",
+    provider: "eporner",
+    providerAssetId: "test",
+    identity: {
+      provider: "eporner",
+      providerAssetId: "test",
+      observedTitle: "Test",
+      searchAliases: ["test"],
+      performers: [],
+      confidence: "fallback",
+      baseName: "test",
+    },
+    workspaceDir,
+    selectedProxy: {
+      formatId: "480p-av1",
+      resolution: "480p",
+      height: 480,
+      vcodec: "av1",
+      directUrl: "https://example.com/proxy.mp4",
+    },
+    proxyPath,
+    expectedLlcPath: path.join(workspaceDir, "test.llc"),
+    finalOutputPath: path.join(workspaceDir, "test.mp4"),
+    renditions: [],
+  };
+}
 
 describe("Workflow Resume E2E", () => {
   let tmpDir: string;
@@ -755,5 +790,296 @@ describe("Workflow Resume E2E", () => {
 
     expect(result.job.status).toBe("completed");
     expect(process.env.JAVR_PROFILES_DIR).toBe(path.join(tmpDir, "profiles"));
+  });
+
+  it("Test G: rejects completed status if verified video codec does not match selected HQ codec (e.g. AV1 vs H264)", async () => {
+    const workspaceDir = path.join(tmpDir, "codec-mismatch-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        mediaFileName: "test.mp4",
+        cutSegments: [{ start: 10, end: 20 }],
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test-codec",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Codec Mismatch Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      });
+    });
+
+    // Simulate selective fetch returning H264 probeResult when AV1 was selected
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "10.0" } as any,
+          videoStream: { index: 0, codec: "h264", width: 1280, height: 720, fps: 30 },
+          duration: 10.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(/Output video codec mismatch: expected "av1"/);
+
+    // Verify job status was NOT set to completed
+    const savedJob = await loadJob(workspaceDir);
+    expect(savedJob.status).not.toBe("completed");
+  });
+
+  it("Test H: rejects completed status if verified video height does not match selected HQ height", async () => {
+    const workspaceDir = path.join(tmpDir, "height-mismatch-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        mediaFileName: "test.mp4",
+        cutSegments: [{ start: 10, end: 20 }],
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test-height",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Height Mismatch Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      });
+    });
+
+    // Simulate selective fetch returning 480p height when 720p was selected
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "10.0" } as any,
+          videoStream: { index: 0, codec: "av1", width: 854, height: 480, fps: 30 },
+          duration: 10.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(/Output video height mismatch: expected 720p, but ffprobe verified 480p/);
+
+    const savedJob = await loadJob(workspaceDir);
+    expect(savedJob.status).not.toBe("completed");
+  });
+
+  it("Test I: rejects completed status if verified duration deviates excessively from LLC timeRange", async () => {
+    const workspaceDir = path.join(tmpDir, "duration-mismatch-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        mediaFileName: "test.mp4",
+        cutSegments: [{ start: 10, end: 20 }], // 10s duration
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test-duration",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Duration Mismatch Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      });
+    });
+
+    // Simulate selective fetch returning 100s duration instead of 10s
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "100.0" } as any,
+          videoStream: { index: 0, codec: "av1", width: 1280, height: 720, fps: 30 },
+          duration: 100.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(/Output duration mismatch: expected ~10.000s/);
+
+    const savedJob = await loadJob(workspaceDir);
+    expect(savedJob.status).not.toBe("completed");
+  });
+
+  it("Test J: completes workflow when verified AV1 / 2160p / duration match expectations", async () => {
+    const workspaceDir = path.join(tmpDir, "valid-av1-workspace");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const job = createSampleJob(workspaceDir);
+    await saveJob(job);
+    await fs.writeFile(job.proxyPath, "proxy-content");
+    await fs.writeFile(
+      job.expectedLlcPath,
+      JSON.stringify({
+        version: 1,
+        mediaFileName: "test.mp4",
+        cutSegments: [{ start: 10, end: 20 }], // 10s
+      })
+    );
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test-valid-2160",
+      sourceUrl: job.sourceUrl,
+      rawTitle: "Valid 2160p Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-0/1000000", "Content-Type": "video/mp4", "Content-Length": "1" },
+      });
+    });
+
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "10.05" } as any,
+          videoStream: { index: 0, codec: "av01", width: 4320, height: 2160, fps: 60 },
+          duration: 10.05,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 500,
+        fullFileBytes: 1000000,
+        savingsPercent: 99,
+      };
+    });
+
+    const result = await resumeJobWorkflow({
+      jobPathOrDir: workspaceDir,
+      adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
+      sessionProvider: new NoopSessionProvider(),
+    });
+
+    expect(result.job.status).toBe("completed");
+    expect(result.selectedHq.formatId).toBe("2160p-av1");
+    expect(result.outputClipPath).toBe(path.join(workspaceDir, "test.mp4"));
   });
 });
