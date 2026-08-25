@@ -113,6 +113,7 @@ export function createByteRangeFetchPlan(
   const totalBytesToFetch = mediaBytes;
   const fullFileBytes = index.fileSize;
   const savingsRatio = Math.max(0, 1 - totalBytesToFetch / fullFileBytes);
+  const isProvablePartial = savingsRatio > 0 && totalBytesToFetch < fullFileBytes;
 
   return {
     sourceUrl,
@@ -121,9 +122,12 @@ export function createByteRangeFetchPlan(
     videoByteRange,
     audioByteRange,
     combinedByteRange,
+    segmentRanges: [combinedByteRange],
     totalBytesToFetch,
     fullFileBytes,
     savingsRatio,
+    isProvablePartial,
     moovByteRange,
   };
 }
+

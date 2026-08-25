@@ -46,9 +46,11 @@ export interface ByteRangeFetchPlan {
   videoByteRange: ByteRange;
   audioByteRange?: ByteRange;
   combinedByteRange: ByteRange;
+  segmentRanges: ByteRange[];
   totalBytesToFetch: number;
   fullFileBytes: number;
   savingsRatio: number;
+  isProvablePartial: boolean;
   moovByteRange?: ByteRange;
 }
 

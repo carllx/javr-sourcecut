@@ -9,6 +9,12 @@ export interface BoxHeader {
   fileOffset: number; // absolute offset in file
 }
 
+export function readUInt64BE(buffer: Buffer, offset: number): number {
+  const high = buffer.readUInt32BE(offset);
+  const low = buffer.readUInt32BE(offset + 4);
+  return high * 2 ** 32 + low;
+}
+
 export function readBoxes(buffer: Buffer, baseFileOffset: number = 0): BoxHeader[] {
   const boxes: BoxHeader[] = [];
   let pos = 0;
@@ -20,9 +26,7 @@ export function readBoxes(buffer: Buffer, baseFileOffset: number = 0): BoxHeader
 
     if (size === 1) {
       if (pos + 16 > buffer.length) break;
-      const high = buffer.readUInt32BE(pos + 8);
-      const low = buffer.readUInt32BE(pos + 12);
-      size = high * 2 ** 32 + low;
+      size = readUInt64BE(buffer, pos + 8);
       headerSize = 16;
     } else if (size === 0) {
       size = buffer.length - pos;
@@ -72,9 +76,7 @@ export function findBox(
       let headerSize = 8;
 
       if (size === 1 && boxOffset + 16 <= buffer.length) {
-        const high = buffer.readUInt32BE(boxOffset + 8);
-        const low = buffer.readUInt32BE(boxOffset + 12);
-        size = high * 2 ** 32 + low;
+        size = readUInt64BE(buffer, boxOffset + 8);
         headerSize = 16;
       }
 
@@ -125,9 +127,7 @@ export function parseMP4Buffer(
     const version = mvhdBox.data.readUInt8(0);
     if (version === 1) {
       movieTimescale = mvhdBox.data.readUInt32BE(20);
-      const high = mvhdBox.data.readUInt32BE(24);
-      const low = mvhdBox.data.readUInt32BE(28);
-      movieDuration = (high * 2 ** 32 + low) / movieTimescale;
+      movieDuration = readUInt64BE(mvhdBox.data, 24) / movieTimescale;
     } else {
       movieTimescale = mvhdBox.data.readUInt32BE(12);
       const durationTicks = mvhdBox.data.readUInt32BE(16);
@@ -212,9 +212,7 @@ function parseTrack(
     const version = mdhd.data.readUInt8(0);
     if (version === 1) {
       trackTimescale = mdhd.data.readUInt32BE(20);
-      const high = mdhd.data.readUInt32BE(24);
-      const low = mdhd.data.readUInt32BE(28);
-      trackDuration = (high * 2 ** 32 + low) / trackTimescale;
+      trackDuration = readUInt64BE(mdhd.data, 24) / trackTimescale;
     } else {
       trackTimescale = mdhd.data.readUInt32BE(12);
       const durationTicks = mdhd.data.readUInt32BE(16);
@@ -361,9 +359,7 @@ function parseTrack(
     const entryCount = co64.data.readUInt32BE(4);
     let offset = 8;
     for (let i = 0; i < entryCount && offset + 8 <= co64.data.length; i++) {
-      const high = co64.data.readUInt32BE(offset);
-      const low = co64.data.readUInt32BE(offset + 4);
-      chunkOffsets.push(high * 2 ** 32 + low);
+      chunkOffsets.push(readUInt64BE(co64.data, offset));
       offset += 8;
     }
   }
