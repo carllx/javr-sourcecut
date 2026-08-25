@@ -75,7 +75,7 @@ async function main() {
     console.log(`
 Usage:
   # Ingestion mode (Slice 1):
-  javr-sourcecut <eporner-url> [root-directory]
+  javr-sourcecut <eporner-url> [root-directory] [--cookies <cookies.txt>]
 
   # Resume mode (Slice 3):
   javr-sourcecut resume <job-directory-or-job.json> [options]
@@ -83,14 +83,15 @@ Usage:
 Options:
   --resume, resume     Resume an existing waiting-for-llc Job
   --llc <path>         Explicit path to LosslessCut .llc project file
+  --cookies <path>     Path to Netscape/browser cookies.txt file
   --height <number>    Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
   --quality <string>   Target quality resolution (e.g. 2160p, 1440p, max)
   --codec <string>     Preferred codec (av1, h264, hevc, other)
   --help, -h           Show this help message
 
 Examples:
-  javr-sourcecut "https://www.eporner.com/video-5n1ArXshUMZ/sample-video/" "./downloads"
-  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
+  javr-sourcecut "https://www.eporner.com/video-5n1ArXshUMZ/sample-video/" "./downloads" --cookies "./cookies.txt"
+  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --cookies "./cookies.txt"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080 --codec av1
 `);
     process.exit(0);
@@ -99,6 +100,7 @@ Examples:
   let isResume = false;
   let jobPath = "";
   let llcPath: string | undefined;
+  let cookiesPath: string | undefined;
   let sourceUrl = "";
   let rootDir = process.cwd();
   const qualityTarget: QualityTargetOptions = {};
@@ -113,6 +115,8 @@ Examples:
         }
       } else if (arg === "--llc" && i + 1 < args.length) {
         llcPath = args[++i];
+      } else if (arg === "--cookies" && i + 1 < args.length) {
+        cookiesPath = args[++i];
       } else if (arg === "--height" && i + 1 < args.length) {
         qualityTarget.height = validateHeight(args[++i]);
       } else if (arg === "--quality" && i + 1 < args.length) {
@@ -155,6 +159,7 @@ Examples:
       const result = await resumeJobWorkflow({
         jobPathOrDir: jobPath,
         llcPath,
+        cookiesPath,
         qualityTarget: Object.keys(qualityTarget).length > 0 ? qualityTarget : undefined,
         onProgress: createCliProgressReporter("Selective fetch"),
         onLog: handleCliLog,
@@ -187,6 +192,7 @@ Examples:
       await runTracerSlice({
         sourceUrl,
         rootDir: resolvedRoot,
+        cookiesPath,
         onProgress: createCliProgressReporter("Downloading proxy"),
         onLog: handleCliLog,
       });

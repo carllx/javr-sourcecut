@@ -8,6 +8,10 @@ import {
   resolveJobQualityTargetMetadata,
   type HqSelectionResult,
 } from "./hq-selector.js";
+import {
+  resolveSessionProvider,
+  type SourceSessionProvider,
+} from "./session.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
@@ -21,6 +25,8 @@ export interface TracerSliceParams {
   rootDir: string;
   adapters?: SourceAdapter[];
   fetchFn?: typeof fetch;
+  cookiesPath?: string;
+  sessionProvider?: SourceSessionProvider;
   verifierFn?: typeof verifyMediaFile;
   onProgress?: (transferredBytes: number, totalBytes?: number) => void;
   onLog?: (message: string) => void;
@@ -32,10 +38,16 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
     rootDir,
     adapters = [new EpornerAdapter()],
     fetchFn = fetch,
+    cookiesPath,
+    sessionProvider: explicitSessionProvider,
     verifierFn = verifyMediaFile,
     onProgress,
     onLog = () => {},
   } = params;
+
+  const sessionProvider =
+    explicitSessionProvider ?? (await resolveSessionProvider({ cookiesPath }));
+  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
 
   // 1. Adapter Selection
   const adapter = adapters.find((a) => a.canHandle(sourceUrl));
@@ -46,7 +58,7 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   onLog(`[1/5] Ingesting URL with adapter "${adapter.provider}"...`);
 
   // 2. Discover formats and metadata
-  const descriptor = await adapter.resolve(sourceUrl, fetchFn);
+  const descriptor = await adapter.resolve(sourceUrl, sessionFetch);
   onLog(`Discovered source: "${descriptor.rawTitle}" (${descriptor.renditions.length} renditions)`);
 
   // 3. Select proxy rendition
@@ -62,7 +74,7 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   await updateJobStatus(job, "proxy-downloading");
   onLog(`[2/5] Downloading proxy video to: ${job.proxyPath}`);
   await downloadFile(selectedProxy.directUrl, job.proxyPath, {
-    fetchFn,
+    fetchFn: sessionFetch,
     onProgress,
   });
 
@@ -111,6 +123,8 @@ export interface ResumeJobParams {
   jobPathOrDir: string;
   llcPath?: string;
   qualityTarget?: QualityTargetOptions;
+  cookiesPath?: string;
+  sessionProvider?: SourceSessionProvider;
   adapters?: SourceAdapter[];
   fetchFn?: typeof fetch;
   verifierFn?: typeof verifyMediaFile;
@@ -140,12 +154,18 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     jobPathOrDir,
     llcPath: explicitLlcPath,
     qualityTarget,
+    cookiesPath,
+    sessionProvider: explicitSessionProvider,
     adapters = [new EpornerAdapter()],
     fetchFn = fetch,
     verifierFn = verifyMediaFile,
     onProgress,
     onLog = () => {},
   } = params;
+
+  const sessionProvider =
+    explicitSessionProvider ?? (await resolveSessionProvider({ cookiesPath }));
+  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
 
   // 1. Load existing job.json from disk
   const job = await loadJob(jobPathOrDir);
@@ -197,7 +217,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   }
 
   onLog(`[Resume 3/5] Re-resolving live renditions from ${job.sourceUrl}...`);
-  const descriptor = await adapter.resolve(job.sourceUrl, fetchFn);
+  const descriptor = await adapter.resolve(job.sourceUrl, sessionFetch);
   onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
 
   // 6. Select highest publicly available Direct MP4 rendition in target tier
@@ -205,21 +225,25 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   try {
     hqSelectionResult = await selectHighestPublicHqRendition(descriptor.renditions, {
       target: qualityTarget,
-      fetchFn,
+      fetchFn: sessionFetch,
       onLog,
     });
   } catch (err: any) {
     // Quality target is inaccessible (e.g. requires authentication) -> enter needs-user-intervention
+    const reason = !sessionProvider.hasSession
+      ? `Authenticated session transport is not configured for runtime (e.g. pass --cookies). Target resolution requires an authenticated session: ${err.message}`
+      : err.message;
+
     job.status = "needs-user-intervention";
     job.renditions = descriptor.renditions;
-    job.interventionReason = err.message;
+    job.interventionReason = reason;
     job.qualityTarget = resolveJobQualityTargetMetadata(
       descriptor.renditions,
       qualityTarget,
-      err.message
+      reason
     );
     await saveJob(job);
-    onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId} requires user access / authentication: ${err.message}`);
+    onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId}: ${reason}`);
     throw err;
   }
 
@@ -236,7 +260,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     outputClipPath,
     workDir: job.workspaceDir,
     options: {
-      fetchFn,
+      fetchFn: sessionFetch,
       onProgress: (percent, transferred, total) => {
         onProgress?.(transferred, total);
       },
