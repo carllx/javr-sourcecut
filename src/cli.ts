@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { runTracerSlice, resumeJobWorkflow } from "./core/workflow.js";
+import type { QualityTargetOptions, VideoCodec } from "./types.js";
 
 async function isJobPath(p: string): Promise<boolean> {
   try {
@@ -55,16 +56,20 @@ Usage:
   javr-sourcecut <eporner-url> [root-directory]
 
   # Resume mode (Slice 3):
-  javr-sourcecut resume <job-directory-or-job.json> [--llc <losslesscut-file>]
+  javr-sourcecut resume <job-directory-or-job.json> [options]
 
 Options:
-  --resume, resume  Resume an existing waiting-for-llc Job
-  --llc <path>      Explicit path to LosslessCut .llc project file
-  --help, -h        Show this help message
+  --resume, resume     Resume an existing waiting-for-llc Job
+  --llc <path>         Explicit path to LosslessCut .llc project file
+  --height <number>    Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
+  --quality <string>   Target quality (default: max)
+  --codec <string>     Preferred codec (e.g. av1, h264)
+  --help, -h           Show this help message
 
 Examples:
   javr-sourcecut "https://www.eporner.com/video-5n1ArXshUMZ/sample-video/" "./downloads"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
+  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080
 `);
     process.exit(0);
   }
@@ -74,6 +79,7 @@ Examples:
   let llcPath: string | undefined;
   let sourceUrl = "";
   let rootDir = process.cwd();
+  const qualityTarget: QualityTargetOptions = {};
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -84,6 +90,15 @@ Examples:
       }
     } else if (arg === "--llc" && i + 1 < args.length) {
       llcPath = args[++i];
+    } else if (arg === "--height" && i + 1 < args.length) {
+      qualityTarget.height = parseInt(args[++i], 10);
+    } else if (arg === "--quality" && i + 1 < args.length) {
+      const q = args[++i];
+      if (q !== "max") {
+        qualityTarget.resolution = q;
+      }
+    } else if (arg === "--codec" && i + 1 < args.length) {
+      qualityTarget.codec = args[++i].toLowerCase() as VideoCodec;
     } else if (arg === "--url" && i + 1 < args.length) {
       sourceUrl = args[++i];
     } else if (arg === "--root" && i + 1 < args.length) {
@@ -111,6 +126,7 @@ Examples:
       const result = await resumeJobWorkflow({
         jobPathOrDir: jobPath,
         llcPath,
+        qualityTarget: Object.keys(qualityTarget).length > 0 ? qualityTarget : undefined,
         onProgress: createCliProgressReporter("Selective fetch"),
         onLog: handleCliLog,
       });
@@ -118,13 +134,13 @@ Examples:
       console.log("\n=======================================================");
       console.log(" Resume E2E Result Summary");
       console.log("=======================================================");
-      console.log(` Job ID:              ${result.job.jobId}`);
-      console.log(` Selected Rendition:  ${result.selectedHq.formatId} (${result.selectedHq.resolution}, ${result.selectedHq.vcodec.toUpperCase()})`);
-      console.log(` Cut Segment:         ${result.timeRange.startSeconds.toFixed(3)}s -> ${result.timeRange.endSeconds.toFixed(3)}s`);
-      console.log(` Output File:         ${result.outputClipPath}`);
-      console.log(` Full File Size:      ${(result.selectiveFetchResult.fullFileBytes / 1024 / 1024).toFixed(2)} MB`);
-      console.log(` Network Transferred: ${(result.selectiveFetchResult.transferredBytes / 1024 / 1024).toFixed(2)} MB`);
-      console.log(` Bandwidth Savings:   ${result.selectiveFetchResult.savingsPercent}%`);
+      console.log(` Job ID:                 ${result.job.jobId}`);
+      console.log(` Selected Rendition:     ${result.selectedHq.formatId} (${result.selectedHq.resolution}, ${result.selectedHq.vcodec.toUpperCase()})`);
+      console.log(` Cut Segment:            ${result.timeRange.startSeconds.toFixed(3)}s -> ${result.timeRange.endSeconds.toFixed(3)}s`);
+      console.log(` Output File:            ${result.outputClipPath}`);
+      console.log(` Full File Size:         ${(result.selectiveFetchResult.fullFileBytes / 1024 / 1024).toFixed(2)} MB`);
+      console.log(` Selective Fetch Stage:  ${(result.selectiveFetchBytes / 1024 / 1024).toFixed(2)} MB (${result.selectiveFetchSavingsPercent}% savings)`);
+      console.log(` Total Lifecycle Bytes:  ${(result.totalHqLifecycleBytes / 1024 / 1024).toFixed(2)} MB (${result.lifecycleSavingsPercent}% savings)`);
       console.log("=======================================================\n");
     } catch (err: any) {
       console.error(`\nResume workflow failed: ${err.message || String(err)}`);

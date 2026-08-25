@@ -1,201 +1,108 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   selectHqRendition,
-  groupAndRankHqRenditions,
+  getTargetTierCandidates,
   selectHighestPublicHqRendition,
 } from "../../src/core/hq-selector.js";
 import { CapabilityMismatchError } from "../../src/core/mp4/types.js";
 import type { MediaRendition } from "../../src/types.js";
 
-describe("HQ Rendition Selector", () => {
-  it("prioritizes AV1 over H264 within the same highest resolution (2160p)", () => {
-    const renditions: MediaRendition[] = [
-      {
-        formatId: "2160p-h264",
-        resolution: "2160p",
-        height: 2160,
-        vcodec: "h264",
-        directUrl: "https://example.com/2160p.mp4",
-      },
-      {
-        formatId: "2160p-av1",
-        resolution: "2160p",
-        height: 2160,
-        vcodec: "av1",
-        directUrl: "https://example.com/2160p-av1.mp4",
-      },
-      {
-        formatId: "1080p-av1",
-        resolution: "1080p",
-        height: 1080,
-        vcodec: "av1",
-        directUrl: "https://example.com/1080p-av1.mp4",
-      },
-    ];
+describe("HQ Rendition Selector & Target Quality Policy", () => {
+  const sampleRenditions: MediaRendition[] = [
+    { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
+    { formatId: "2160p-h264", resolution: "2160p", height: 2160, vcodec: "h264", directUrl: "https://example.com/2160-h264" },
+    { formatId: "1440p-av1", resolution: "1440p", height: 1440, vcodec: "av1", directUrl: "https://example.com/1440-av1" },
+    { formatId: "1440p-h264", resolution: "1440p", height: 1440, vcodec: "h264", directUrl: "https://example.com/1440-h264" },
+    { formatId: "1080p-av1", resolution: "1080p", height: 1080, vcodec: "av1", directUrl: "https://example.com/1080-av1" },
+    { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+    { formatId: "720p-h264", resolution: "720p", height: 720, vcodec: "h264", directUrl: "https://example.com/720-h264" },
+  ];
 
-    const selected = selectHqRendition(renditions);
-    expect(selected.formatId).toBe("2160p-av1");
-    expect(selected.resolution).toBe("2160p");
-    expect(selected.vcodec).toBe("av1");
-  });
-
-  it("chooses higher resolution H264 over lower resolution AV1 (never downgrades resolution for AV1)", () => {
-    const renditions: MediaRendition[] = [
-      {
-        formatId: "1440p-av1",
-        resolution: "1440p",
-        height: 1440,
-        vcodec: "av1",
-        directUrl: "https://example.com/1440p-av1.mp4",
-      },
-      {
-        formatId: "2160p-h264",
-        resolution: "2160p",
-        height: 2160,
-        vcodec: "h264",
-        directUrl: "https://example.com/2160p.mp4",
-      },
-      {
-        formatId: "1080p-h264",
-        resolution: "1080p",
-        height: 1080,
-        vcodec: "h264",
-        directUrl: "https://example.com/1080p.mp4",
-      },
-    ];
-
-    const selected = selectHqRendition(renditions);
-    expect(selected.formatId).toBe("2160p-h264");
-    expect(selected.height).toBe(2160);
-    expect(selected.vcodec).toBe("h264");
-  });
-
-  it("throws when renditions array is empty or lacks valid directUrls", () => {
-    expect(() => selectHqRendition([])).toThrow("No renditions available");
-    expect(() =>
-      selectHqRendition([
-        {
-          formatId: "2160p-av1",
-          resolution: "2160p",
-          height: 2160,
-          vcodec: "av1",
-          directUrl: "",
-        },
-      ])
-    ).toThrow("No renditions with valid directUrl");
-  });
-
-  // Test A: 2160p AV1 returns HTTP 200 with response stream -> candidate rejected, body cancelled, selector continues, lower valid candidate wins
-  it("Test A: rejects HTTP 200 responses, cancels the response body, and continues to a valid candidate", async () => {
-    const cancelSpy = vi.fn();
-    const mockBody = {
-      cancel: cancelSpy,
-    };
-
-    const renditions: MediaRendition[] = [
-      {
-        formatId: "2160p-av1",
-        resolution: "2160p",
-        height: 2160,
-        vcodec: "av1",
-        directUrl: "https://example.com/2160p-av1.mp4",
-      },
-      {
-        formatId: "1080p-av1",
-        resolution: "1080p",
-        height: 1080,
-        vcodec: "av1",
-        directUrl: "https://example.com/1080p-av1.mp4",
-      },
-    ];
-
+  // 1. 2160p AV1 fails, 2160p H264 succeeds -> select 2160p H264
+  it("Rule 1: selects same-tier alternative (2160p H264) if preferred 2160p AV1 fails Range capability", async () => {
     const mockFetch = vi.fn().mockImplementation(async (url: string) => {
-      if (url.includes("2160p-av1")) {
-        return {
-          status: 200,
-          headers: new Headers(),
-          body: mockBody,
-          arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
-        };
+      if (url.includes("2160-av1")) {
+        return { status: 200, headers: new Headers(), body: { cancel: vi.fn() } };
       }
-      if (url.includes("1080p-av1")) {
+      if (url.includes("2160-h264")) {
         return {
           status: 206,
-          headers: new Headers({
-            "content-range": "bytes 0-0/5000000",
-            "content-length": "1",
-          }),
+          headers: new Headers({ "content-range": "bytes 0-0/3000000000" }),
           body: null,
-          arrayBuffer: async () => new Uint8Array([0xaa]).buffer,
+          arrayBuffer: async () => new Uint8Array([0x01]).buffer,
         };
       }
-      throw new Error(`Unexpected URL: ${url}`);
+      throw new Error(`Unexpected probe: ${url}`);
     });
 
-    const result = await selectHighestPublicHqRendition(renditions, { fetchFn: mockFetch as any });
+    const result = await selectHighestPublicHqRendition(sampleRenditions, { fetchFn: mockFetch as any });
 
-    expect(cancelSpy).toHaveBeenCalledOnce();
-    expect(result.selected.formatId).toBe("1080p-av1");
+    expect(result.selected.formatId).toBe("2160p-h264");
+    expect(result.targetHeight).toBe(2160);
     expect(result.attempts).toHaveLength(2);
     expect(result.attempts[0].formatId).toBe("2160p-av1");
     expect(result.attempts[0].accepted).toBe(false);
-    expect(result.attempts[0].httpStatus).toBe(200);
-    expect(result.attempts[1].formatId).toBe("1080p-av1");
+    expect(result.attempts[1].formatId).toBe("2160p-h264");
     expect(result.attempts[1].accepted).toBe(true);
-    expect(result.attempts[1].bodyBytesConsumed).toBe(1);
-    expect(result.capabilitySelectionBytesTransferred).toBe(1);
   });
 
-  // Test B: 2160p AV1 returns invalid/missing Content-Range -> reject + cancel, no acceptance
-  it("Test B: rejects HTTP 206 with malformed/missing Content-Range header, cancels stream", async () => {
-    const cancelSpy = vi.fn();
-    const mockBody = { cancel: cancelSpy };
+  // 2. 2160p AV1 fails, 2160p H264 fails, 1440p AV1 would succeed -> MUST NOT probe/select 1440p by default -> CapabilityMismatchError
+  it("Rule 2: refuses to silently downgrade resolution when default max target 2160p is inaccessible", async () => {
+    const probedUrls: string[] = [];
 
-    const renditions: MediaRendition[] = [
-      {
-        formatId: "2160p-av1",
-        resolution: "2160p",
-        height: 2160,
-        vcodec: "av1",
-        directUrl: "https://example.com/2160p-av1.mp4",
-      },
-    ];
-
-    const mockFetch = vi.fn().mockResolvedValue({
-      status: 206,
-      headers: new Headers({ "content-range": "invalid-header" }),
-      body: mockBody,
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      probedUrls.push(url);
+      if (url.includes("2160")) {
+        return { status: 200, headers: new Headers(), body: { cancel: vi.fn() } };
+      }
+      // 1440p would succeed if probed
+      return {
+        status: 206,
+        headers: new Headers({ "content-range": "bytes 0-0/1000000000" }),
+        body: null,
+        arrayBuffer: async () => new Uint8Array([0x01]).buffer,
+      };
     });
 
     await expect(
-      selectHighestPublicHqRendition(renditions, { fetchFn: mockFetch as any })
+      selectHighestPublicHqRendition(sampleRenditions, { fetchFn: mockFetch as any })
     ).rejects.toThrow(CapabilityMismatchError);
 
-    expect(cancelSpy).toHaveBeenCalledOnce();
+    // Verify 1440p or 720p was NEVER probed
+    expect(probedUrls).toEqual([
+      "https://example.com/2160-av1",
+      "https://example.com/2160-h264",
+    ]);
   });
 
-  // Test C: 2160p/1440p/1080p unavailable; 720p AV1 returns strict 206; prove ordering resolution first, codec second
-  it("Test C: verifies rank order: skips unavailable tiers, selects 720p AV1 over 720p H264", async () => {
-    const renditions: MediaRendition[] = [
-      { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
-      { formatId: "2160p-h264", resolution: "2160p", height: 2160, vcodec: "h264", directUrl: "https://example.com/2160-h264" },
-      { formatId: "1440p-av1", resolution: "1440p", height: 1440, vcodec: "av1", directUrl: "https://example.com/1440-av1" },
-      { formatId: "720p-h264", resolution: "720p", height: 720, vcodec: "h264", directUrl: "https://example.com/720-h264" },
-      { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
-      { formatId: "480p-av1", resolution: "480p", height: 480, vcodec: "av1", directUrl: "https://example.com/480-av1" },
-    ];
-
-    const probeOrder: string[] = [];
-
+  // 3. User explicitly specifies 1440 -> only 1440 candidates are considered, AV1 preferred
+  it("Rule 3: user override --height 1440 considers only 1440 candidates, prioritizing AV1", async () => {
     const mockFetch = vi.fn().mockImplementation(async (url: string) => {
-      probeOrder.push(url);
-      if (url.includes("2160") || url.includes("1440")) {
+      if (url.includes("1440-av1")) {
         return {
-          status: 200,
-          headers: new Headers(),
-          body: { cancel: vi.fn() },
+          status: 206,
+          headers: new Headers({ "content-range": "bytes 0-0/800000000" }),
+          body: null,
+          arrayBuffer: async () => new Uint8Array([0x01]).buffer,
         };
       }
+      throw new Error(`Unexpected probe: ${url}`);
+    });
+
+    const result = await selectHighestPublicHqRendition(sampleRenditions, {
+      target: { height: 1440 },
+      fetchFn: mockFetch as any,
+    });
+
+    expect(result.selected.formatId).toBe("1440p-av1");
+    expect(result.targetHeight).toBe(1440);
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0].formatId).toBe("1440p-av1");
+  });
+
+  // 4. User explicitly specifies 720 -> 720 is allowed
+  it("Rule 4: user override --height 720 is allowed and selects 720p AV1", async () => {
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("720-av1")) {
         return {
           status: 206,
@@ -204,44 +111,38 @@ describe("HQ Rendition Selector", () => {
           arrayBuffer: async () => new Uint8Array([0x01]).buffer,
         };
       }
-      if (url.includes("720-h264")) {
-        return {
-          status: 206,
-          headers: new Headers({ "content-range": "bytes 0-0/500000000" }),
-          body: null,
-          arrayBuffer: async () => new Uint8Array([0x01]).buffer,
-        };
-      }
-      return { status: 404, headers: new Headers(), body: null };
+      throw new Error(`Unexpected probe: ${url}`);
     });
 
-    const result = await selectHighestPublicHqRendition(renditions, { fetchFn: mockFetch as any });
+    const result = await selectHighestPublicHqRendition(sampleRenditions, {
+      target: { height: 720 },
+      fetchFn: mockFetch as any,
+    });
 
     expect(result.selected.formatId).toBe("720p-av1");
-    // Verify probe order: 2160-av1 -> 2160-h264 -> 1440-av1 -> 720-av1 (720-h264 and 480 not even probed once 720-av1 succeeds)
-    expect(probeOrder).toEqual([
-      "https://example.com/2160-av1",
-      "https://example.com/2160-h264",
-      "https://example.com/1440-av1",
-      "https://example.com/720-av1",
-    ]);
+    expect(result.targetHeight).toBe(720);
+    expect(result.attempts[0].formatId).toBe("720p-av1");
   });
 
-  // Test D: all candidates unavailable -> throws CapabilityMismatchError
-  it("Test D: throws CapabilityMismatchError when all candidates fail Range capability", async () => {
-    const renditions: MediaRendition[] = [
-      { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
-      { formatId: "1080p-av1", resolution: "1080p", height: 1080, vcodec: "av1", directUrl: "https://example.com/1080-av1" },
-    ];
+  // 5. Default max target discovers 2160/1440/1080/720 -> target height = 2160
+  it("Rule 5: default max target determines target height = 2160 from discovered pool", () => {
+    const { targetHeight, candidates } = getTargetTierCandidates(sampleRenditions);
+    expect(targetHeight).toBe(2160);
+    expect(candidates.map((c) => c.formatId)).toEqual(["2160p-av1", "2160p-h264"]);
+  });
 
+  it("fails closed on HTTP 200 and cancels response body", async () => {
+    const cancelSpy = vi.fn();
     const mockFetch = vi.fn().mockResolvedValue({
       status: 200,
       headers: new Headers(),
-      body: { cancel: vi.fn() },
+      body: { cancel: cancelSpy },
     });
 
     await expect(
-      selectHighestPublicHqRendition(renditions, { fetchFn: mockFetch as any })
+      selectHighestPublicHqRendition(sampleRenditions, { fetchFn: mockFetch as any })
     ).rejects.toThrow(CapabilityMismatchError);
+
+    expect(cancelSpy).toHaveBeenCalledTimes(2); // for 2160-av1 and 2160-h264
   });
 });

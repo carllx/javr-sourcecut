@@ -215,6 +215,90 @@ describe("Workflow Resume E2E", () => {
     expect(savedJobJson.status).toBe("completed");
   });
 
+  // Rule 6: Job is NOT set to completed when target quality is inaccessible (status becomes needs-user-intervention)
+  it("Rule 6: persists status as needs-user-intervention when target quality is inaccessible", async () => {
+    const workspaceDir = path.join(tmpDir, "eporner-intervention-test");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "test.proxy.mp4");
+    await fs.writeFile(proxyPath, "dummy-proxy");
+
+    const llcPath = path.join(workspaceDir, "test.proxy-proj.llc");
+    await fs.writeFile(llcPath, JSON.stringify({ cutSegments: [{ start: 10, end: 20 }] }));
+
+    const jobState: JobState = {
+      jobId: "eporner-intervention-test",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      provider: "eporner",
+      providerAssetId: "test",
+      identity: {
+        provider: "eporner",
+        providerAssetId: "test",
+        observedTitle: "Test",
+        searchAliases: ["test"],
+        performers: [],
+        confidence: "fallback",
+        baseName: "test",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "480p-av1",
+        resolution: "480p",
+        height: 480,
+        vcodec: "av1",
+        directUrl: "https://www.eporner.com/dload/proxy.mp4",
+      },
+      proxyPath,
+      expectedLlcPath: path.join(workspaceDir, "test.llc"),
+      finalOutputPath: path.join(workspaceDir, "test.mp4"),
+      renditions: [],
+    };
+
+    const jobJsonPath = path.join(workspaceDir, "job.json");
+    await fs.writeFile(jobJsonPath, JSON.stringify(jobState, null, 2));
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      rawTitle: "Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
+        { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    // 2160p-av1 returns 200 (login required)
+    const mockFetch = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers(),
+      body: { cancel: vi.fn() },
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+      })
+    ).rejects.toThrow("All candidates at target resolution 2160p failed live Range capability");
+
+    const savedJob = JSON.parse(await fs.readFile(jobJsonPath, "utf-8"));
+    expect(savedJob.status).toBe("needs-user-intervention");
+    expect(savedJob.qualityTarget?.targetHeight).toBe(2160);
+    expect(savedJob.interventionReason).toContain("2160p");
+  });
+
   // Test E: Workflow ledger: hqSelectionProbeBytes + selectiveFetchBytes = totalHqLifecycleBytes
   it("Test E: enforces workflow network ledger: hqSelectionProbeBytes + selectiveFetchBytes === totalHqLifecycleBytes", async () => {
     const workspaceDir = path.join(tmpDir, "eporner-ledger-test");
@@ -268,7 +352,6 @@ describe("Workflow Resume E2E", () => {
       rawTitle: "Test",
       declaredPerformers: [],
       renditions: [
-        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
         { formatId: "720p-av1", resolution: "720p", height: 720, vcodec: "av1", directUrl: "https://example.com/720-av1" },
       ],
     };
@@ -280,9 +363,6 @@ describe("Workflow Resume E2E", () => {
     };
 
     const mockFetch = vi.fn().mockImplementation(async (url: string) => {
-      if (url.includes("2160-av1")) {
-        return { status: 200, headers: new Headers(), body: { cancel: vi.fn() } };
-      }
       if (url.includes("720-av1")) {
         return {
           status: 206,
@@ -340,6 +420,7 @@ describe("Workflow Resume E2E", () => {
     const result = await resumeJobWorkflow({
       jobPathOrDir: workspaceDir,
       adapters: [mockAdapter],
+      qualityTarget: { height: 720 },
       fetchFn: mockFetch as any,
     });
 
@@ -447,6 +528,7 @@ describe("Workflow Resume E2E", () => {
     await expect(
       resumeJobWorkflow({
         jobPathOrDir: workspaceDir,
+        qualityTarget: { height: 480 },
       })
     ).rejects.toThrow("Final output file already exists");
   });

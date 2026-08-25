@@ -1,14 +1,19 @@
-import type { MediaRendition, VideoCodec } from "../types.js";
+import type { MediaRendition, QualityTargetOptions, VideoCodec } from "../types.js";
 import { compareCodecs } from "./proxy-selector.js";
 import { CapabilityMismatchError } from "./mp4/types.js";
 
 /**
- * Ranks renditions strictly by:
- * 1. Highest resolution (height descending)
- * 2. Within the same resolution tier, prioritize AV1 > H264 > HEVC > other
- * 3. Never downgrade resolution for AV1 (e.g. 2160p H264 > 1440p AV1).
+ * Resolves candidates within the target quality tier.
+ * Rules:
+ * 1. If qualityTarget specifies height/resolution/formatId, only that tier is considered.
+ * 2. If qualityTarget is omitted or "max", the highest discovered resolution (maximum height) is the target tier.
+ * 3. Within the target tier, candidates are ranked with AV1 first, then other codecs.
+ * 4. Lower resolution tiers are NEVER included in the candidate pool by default.
  */
-export function groupAndRankHqRenditions(renditions: MediaRendition[]): MediaRendition[] {
+export function getTargetTierCandidates(
+  renditions: MediaRendition[],
+  target?: QualityTargetOptions
+): { targetHeight: number; candidates: MediaRendition[] } {
   if (!renditions || renditions.length === 0) {
     throw new Error("No renditions available for high-quality selection");
   }
@@ -18,22 +23,67 @@ export function groupAndRankHqRenditions(renditions: MediaRendition[]): MediaRen
     throw new Error("No renditions with valid directUrl available for HQ selection");
   }
 
-  return [...valid].sort((a, b) => {
-    const heightA = a.height || 0;
-    const heightB = b.height || 0;
-    if (heightA !== heightB) {
-      return heightB - heightA;
+  let filtered = valid;
+
+  // Explicit formatId
+  if (target?.formatId) {
+    filtered = filtered.filter((r) => r.formatId.toLowerCase() === target.formatId?.toLowerCase());
+    if (filtered.length === 0) {
+      throw new CapabilityMismatchError(
+        `No rendition matching requested formatId "${target.formatId}" found.`
+      );
     }
-    return compareCodecs(a.vcodec, b.vcodec);
-  });
+  }
+
+  // Explicit height / resolution
+  let targetHeight: number;
+  if (target?.height && target.height > 0) {
+    targetHeight = target.height;
+    filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
+  } else if (target?.resolution) {
+    const parsed = parseInt(target.resolution.replace(/\D/g, ""), 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      targetHeight = parsed;
+      filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
+    } else {
+      targetHeight = Math.max(...valid.map((r) => r.height || 0));
+      filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
+    }
+  } else {
+    // Default max quality: maximum discovered height
+    targetHeight = Math.max(...valid.map((r) => r.height || 0));
+    filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
+  }
+
+  if (filtered.length === 0) {
+    throw new CapabilityMismatchError(
+      `No rendition available for target resolution tier ${targetHeight}p.`
+    );
+  }
+
+  // Optional codec filter
+  if (target?.codec) {
+    const byCodec = filtered.filter((r) => r.vcodec === target.codec);
+    if (byCodec.length > 0) {
+      filtered = byCodec;
+    }
+  }
+
+  // Rank within target tier: AV1 first, then H264, HEVC, other
+  const candidates = [...filtered].sort((a, b) => compareCodecs(a.vcodec, b.vcodec));
+
+  return { targetHeight, candidates };
 }
 
 /**
- * Pure synchronous selector picking the statically highest ranked rendition.
+ * Pure synchronous selector picking the statically highest ranked rendition in target tier.
  */
-export function selectHqRendition(renditions: MediaRendition[]): MediaRendition {
-  const ranked = groupAndRankHqRenditions(renditions);
-  return ranked[0];
+export function selectHqRendition(
+  renditions: MediaRendition[],
+  target?: QualityTargetOptions
+): MediaRendition {
+  const { candidates } = getTargetTierCandidates(renditions, target);
+  return candidates[0];
 }
 
 export interface HqCandidateProbeAttempt {
@@ -50,6 +100,7 @@ export interface HqCandidateProbeAttempt {
 
 export interface HqSelectionResult {
   selected: MediaRendition;
+  targetHeight: number;
   attempts: HqCandidateProbeAttempt[];
   capabilitySelectionBytesTransferred: number;
 }
@@ -65,29 +116,29 @@ async function cancelResponseBody(res: Response): Promise<void> {
 }
 
 /**
- * Discovers the highest publicly available Direct MP4 rendition from a list of renditions,
- * verifying live HTTP 206 Range capability in strict rank order (highest resolution first,
- * then AV1 within the same tier).
+ * Discovers the highest-quality Direct MP4 rendition from the target resolution tier,
+ * verifying live HTTP 206 Range capability in strict rank order (AV1 first, then same-tier alternatives).
  *
- * Implements fail-closed immediate cancellation of response streams for rejected candidates.
+ * Never silently downgrades to a lower resolution tier if the target tier is inaccessible.
  */
 export async function selectHighestPublicHqRendition(
   renditions: MediaRendition[],
   options?: {
+    target?: QualityTargetOptions;
     fetchFn?: typeof fetch;
     onLog?: (msg: string) => void;
   }
 ): Promise<HqSelectionResult> {
-  const ranked = groupAndRankHqRenditions(renditions);
+  const { targetHeight, candidates } = getTargetTierCandidates(renditions, options?.target);
   const fetchFn = options?.fetchFn ?? fetch;
   const onLog = options?.onLog ?? (() => {});
 
   const attempts: HqCandidateProbeAttempt[] = [];
   let totalSelectionBytesTransferred = 0;
 
-  for (const candidate of ranked) {
+  for (const candidate of candidates) {
     onLog(
-      `[Capability Probe] Verifying candidate ${candidate.formatId} (${candidate.resolution}, ${candidate.vcodec.toUpperCase()})...`
+      `[Capability Probe] Verifying target tier candidate ${candidate.formatId} (${candidate.resolution}, ${candidate.vcodec.toUpperCase()})...`
     );
 
     let res: Response;
@@ -119,7 +170,7 @@ export async function selectHighestPublicHqRendition(
     if (httpStatus !== 206) {
       await cancelResponseBody(res);
       onLog(
-        `[Capability Probe] Candidate ${candidate.formatId} rejected: HTTP ${httpStatus} is not 206 Partial Content. Cancelled stream.`
+        `[Capability Probe] Candidate ${candidate.formatId} rejected: HTTP ${httpStatus} is not 206 Partial Content (likely requires authentication/session access). Cancelled stream.`
       );
       attempts.push({
         formatId: candidate.formatId,
@@ -129,7 +180,7 @@ export async function selectHighestPublicHqRendition(
         httpStatus,
         contentRange,
         accepted: false,
-        reason: `HTTP ${httpStatus} is not 206 Partial Content`,
+        reason: `HTTP ${httpStatus} is not 206 Partial Content (requires authentication or unsupported range)`,
         bodyBytesConsumed: 0,
       });
       continue;
@@ -214,12 +265,13 @@ export async function selectHighestPublicHqRendition(
 
     return {
       selected: candidate,
+      targetHeight,
       attempts,
       capabilitySelectionBytesTransferred: totalSelectionBytesTransferred,
     };
   }
 
   throw new CapabilityMismatchError(
-    "No publicly available Direct MP4 rendition with verified HTTP 206 Range capability found."
+    `All candidates at target resolution ${targetHeight}p failed live Range capability verification (e.g. login/session gated). Silent downgrade to lower resolutions is prohibited.`
   );
 }

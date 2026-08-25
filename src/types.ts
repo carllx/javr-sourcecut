@@ -42,8 +42,16 @@ export type JobStatus =
   | "discovering"
   | "proxy-downloading"
   | "waiting-for-llc"
+  | "needs-user-intervention"
   | "completed"
   | "failed";
+
+export interface QualityTargetOptions {
+  height?: number;
+  resolution?: string; // e.g. "2160p", "1440p", "1080p", "720p"
+  codec?: VideoCodec;
+  formatId?: string;
+}
 
 export interface JobState {
   jobId: string;
@@ -60,6 +68,13 @@ export interface JobState {
   expectedLlcPath: string;
   finalOutputPath: string;
   renditions: MediaRendition[];
+  interventionReason?: string;
+  qualityTarget?: {
+    targetHeight?: number;
+    preferredCodec?: VideoCodec;
+    explicitOverride?: boolean;
+    reason?: string;
+  };
 }
 
 export interface SourceAdapter {

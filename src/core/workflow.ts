@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { HITLPauseResult, MediaRendition, SourceAdapter } from "../types.js";
+import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
 import { selectHighestPublicHqRendition, type HqSelectionResult } from "./hq-selector.js";
@@ -106,6 +106,7 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
 export interface ResumeJobParams {
   jobPathOrDir: string;
   llcPath?: string;
+  qualityTarget?: QualityTargetOptions;
   adapters?: SourceAdapter[];
   fetchFn?: typeof fetch;
   verifierFn?: typeof verifyMediaFile;
@@ -134,6 +135,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   const {
     jobPathOrDir,
     llcPath: explicitLlcPath,
+    qualityTarget,
     adapters = [new EpornerAdapter()],
     fetchFn = fetch,
     verifierFn = verifyMediaFile,
@@ -194,11 +196,31 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   const descriptor = await adapter.resolve(job.sourceUrl, fetchFn);
   onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
 
-  // 6. Select highest publicly available Direct MP4 rendition with verified HTTP 206 capability
-  const hqSelectionResult = await selectHighestPublicHqRendition(descriptor.renditions, {
-    fetchFn,
-    onLog,
-  });
+  // 6. Select highest publicly available Direct MP4 rendition in target tier
+  let hqSelectionResult: HqSelectionResult;
+  try {
+    hqSelectionResult = await selectHighestPublicHqRendition(descriptor.renditions, {
+      target: qualityTarget,
+      fetchFn,
+      onLog,
+    });
+  } catch (err: any) {
+    // Quality target is inaccessible (e.g. requires authentication) -> enter needs-user-intervention
+    const targetHeight = qualityTarget?.height ?? Math.max(...descriptor.renditions.map((r) => r.height || 0));
+    job.status = "needs-user-intervention";
+    job.renditions = descriptor.renditions;
+    job.interventionReason = err.message;
+    job.qualityTarget = {
+      targetHeight,
+      preferredCodec: "av1",
+      explicitOverride: Boolean(qualityTarget?.height || qualityTarget?.resolution),
+      reason: err.message,
+    };
+    await saveJob(job);
+    onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId} requires user access / authentication: ${err.message}`);
+    throw err;
+  }
+
   const selectedHq = hqSelectionResult.selected;
   onLog(
     `[Resume 4/5] Selected HQ rendition: ${selectedHq.formatId} (${selectedHq.resolution}, ${selectedHq.vcodec.toUpperCase()}) directUrl=${selectedHq.directUrl}`
@@ -254,6 +276,11 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   // 10. Update job status to completed and save
   job.status = "completed";
   job.renditions = descriptor.renditions;
+  job.qualityTarget = {
+    targetHeight: selectedHq.height,
+    preferredCodec: selectedHq.vcodec,
+    explicitOverride: Boolean(qualityTarget?.height || qualityTarget?.resolution),
+  };
   await saveJob(job);
 
   onLog(`\n[SUCCESS] Eporner Resume E2E completed successfully! Output: ${outputClipPath}`);
