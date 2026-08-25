@@ -76,7 +76,14 @@ export class UnprovablePartialPlanError extends Error {
   }
 }
 
-export class Http206RequiredError extends Error {
+export class CapabilityMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CapabilityMismatchError";
+  }
+}
+
+export class Http206RequiredError extends CapabilityMismatchError {
   constructor(message: string) {
     super(message);
     this.name = "Http206RequiredError";

@@ -3,3 +3,14 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# Secrets & Sessions
+*.cookies.txt
+cookies.txt
+*.cookie
+.session/
+*.key
+*.token
+
+# Local Acceptance Artifacts
+acceptance-*.json
