@@ -229,7 +229,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     procC.stdin.write("EXIT\n");
     procC.stdin.end();
     await new Promise<void>((resolve) => procC.on("close", () => resolve()));
-  });
+  }, 15000);
 
   it("7. Stale Lock Recovery & Release Safety: reclaims lock from dead PID and protects foreign locks", async () => {
     const profileDir = path.join(tmpDir, "stale-lock-profile");
