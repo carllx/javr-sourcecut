@@ -129,6 +129,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     llcPath: explicitLlcPath,
     adapters = [new EpornerAdapter()],
     fetchFn = fetch,
+    verifierFn = verifyMediaFile,
     onProgress,
     onLog = () => {},
   } = params;
@@ -165,7 +166,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   const outputClipPath = job.finalOutputPath;
   try {
     const outStat = await fs.stat(outputClipPath);
-    if (outStat.isFile() && outStat.size > 0) {
+    if (outStat.isFile()) {
       throw new Error(
         `Final output file already exists at "${outputClipPath}". Refusing to overwrite existing file.`
       );
@@ -206,6 +207,16 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
       },
     },
   });
+
+  // Verify final output using verifierFn (defaults to probeResult verified by selective-fetch)
+  const verifiedProbe =
+    verifierFn !== verifyMediaFile
+      ? await verifierFn(outputClipPath)
+      : selectiveFetchResult.probeResult;
+
+  onLog(
+    `Output verified: duration=${verifiedProbe.duration.toFixed(2)}s, codec=${verifiedProbe.videoStream.codec} (${verifiedProbe.videoStream.width}x${verifiedProbe.videoStream.height}), audio=${verifiedProbe.audioStream?.codec || "none"}`
+  );
 
   // 8. Invariant: Verify existing proxy was completely untouched
   const proxyStatAfter = await fs.stat(job.proxyPath);

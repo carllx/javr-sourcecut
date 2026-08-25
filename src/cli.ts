@@ -22,6 +22,29 @@ async function isJobPath(p: string): Promise<boolean> {
   return false;
 }
 
+function createCliProgressReporter(label: string) {
+  return (transferred: number, total?: number) => {
+    if (total && total > 0) {
+      const pct = ((transferred / total) * 100).toFixed(1);
+      process.stdout.write(
+        `\r${label}: ${pct}% (${(transferred / 1024 / 1024).toFixed(2)} MB / ${(total / 1024 / 1024).toFixed(2)} MB)`
+      );
+    } else {
+      process.stdout.write(
+        `\r${label}: ${(transferred / 1024 / 1024).toFixed(2)} MB transferred`
+      );
+    }
+  };
+}
+
+function handleCliLog(msg: string) {
+  if (msg.startsWith("\r")) {
+    process.stdout.write(msg);
+  } else {
+    console.log(`\n${msg}`);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -66,7 +89,6 @@ Examples:
     } else if (arg === "--root" && i + 1 < args.length) {
       rootDir = args[++i];
     } else if (!sourceUrl && !jobPath) {
-      // Check if this positional arg is a job path
       if (await isJobPath(arg)) {
         isResume = true;
         jobPath = arg;
@@ -89,25 +111,8 @@ Examples:
       const result = await resumeJobWorkflow({
         jobPathOrDir: jobPath,
         llcPath,
-        onProgress: (transferred, total) => {
-          if (total && total > 0) {
-            const pct = ((transferred / total) * 100).toFixed(1);
-            process.stdout.write(
-              `\rSelective fetch: ${pct}% (${(transferred / 1024 / 1024).toFixed(2)} MB / ${(total / 1024 / 1024).toFixed(2)} MB)`
-            );
-          } else {
-            process.stdout.write(
-              `\rSelective fetch: ${(transferred / 1024 / 1024).toFixed(2)} MB transferred`
-            );
-          }
-        },
-        onLog: (msg) => {
-          if (msg.startsWith("\r")) {
-            process.stdout.write(msg);
-          } else {
-            console.log(`\n${msg}`);
-          }
-        },
+        onProgress: createCliProgressReporter("Selective fetch"),
+        onLog: handleCliLog,
       });
 
       console.log("\n=======================================================");
@@ -137,23 +142,8 @@ Examples:
       await runTracerSlice({
         sourceUrl,
         rootDir: resolvedRoot,
-        onProgress: (transferred, total) => {
-          if (total) {
-            const pct = ((transferred / total) * 100).toFixed(1);
-            process.stdout.write(
-              `\rDownloading proxy: ${pct}% (${(transferred / 1024 / 1024).toFixed(1)} MB / ${(total / 1024 / 1024).toFixed(1)} MB)`
-            );
-          } else {
-            process.stdout.write(`\rDownloading proxy: ${(transferred / 1024 / 1024).toFixed(1)} MB transferred`);
-          }
-        },
-        onLog: (msg) => {
-          if (msg.startsWith("\r")) {
-            process.stdout.write(msg);
-          } else {
-            console.log(`\n${msg}`);
-          }
-        },
+        onProgress: createCliProgressReporter("Downloading proxy"),
+        onLog: handleCliLog,
       });
 
       console.log("\n");
