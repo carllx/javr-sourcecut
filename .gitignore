@@ -11,3 +11,6 @@ cookies.txt
 .session/
 *.key
 *.token
+
+# Local Acceptance Artifacts
+acceptance-*.json
