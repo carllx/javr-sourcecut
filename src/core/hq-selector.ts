@@ -1,19 +1,33 @@
-import type { MediaRendition, QualityTargetOptions, VideoCodec } from "../types.js";
+import type {
+  JobQualityTarget,
+  MediaRendition,
+  QualityTargetOptions,
+  VideoCodec,
+} from "../types.js";
 import { compareCodecs } from "./proxy-selector.js";
 import { CapabilityMismatchError } from "./mp4/types.js";
 
 /**
- * Resolves candidates within the target quality tier.
+ * Resolves candidate renditions strictly within the target quality tier.
+ *
  * Rules:
- * 1. If qualityTarget specifies height/resolution/formatId, only that tier is considered.
- * 2. If qualityTarget is omitted or "max", the highest discovered resolution (maximum height) is the target tier.
- * 3. Within the target tier, candidates are ranked with AV1 first, then other codecs.
- * 4. Lower resolution tiers are NEVER included in the candidate pool by default.
+ * 1. If formatId is specified:
+ *    - Locates that exact rendition;
+ *    - Validates against any conflicting explicit height/resolution/codec;
+ *    - That rendition authoritatively defines the target tier.
+ * 2. If height or resolution is specified:
+ *    - Restricts candidates strictly to that height tier.
+ * 3. If codec is specified:
+ *    - Filters strictly to that codec. If missing in the target tier, throws CapabilityMismatchError without falling back.
+ * 4. If no target specified (default max quality):
+ *    - Determines maximum discovered height across available renditions;
+ *    - Candidates are ranked with AV1 first, then same-tier alternatives.
+ * 5. Lower resolution tiers are NEVER considered unless explicitly requested.
  */
 export function getTargetTierCandidates(
   renditions: MediaRendition[],
   target?: QualityTargetOptions
-): { targetHeight: number; candidates: MediaRendition[] } {
+): { targetHeight: number; preferredCodec: VideoCodec; candidates: MediaRendition[] } {
   if (!renditions || renditions.length === 0) {
     throw new Error("No renditions available for high-quality selection");
   }
@@ -23,56 +37,92 @@ export function getTargetTierCandidates(
     throw new Error("No renditions with valid directUrl available for HQ selection");
   }
 
-  let filtered = valid;
-
-  // Explicit formatId
+  // 1. Authoritative formatId override
   if (target?.formatId) {
-    filtered = filtered.filter((r) => r.formatId.toLowerCase() === target.formatId?.toLowerCase());
-    if (filtered.length === 0) {
+    const matched = valid.find(
+      (r) => r.formatId.toLowerCase() === target.formatId?.toLowerCase()
+    );
+    if (!matched) {
       throw new CapabilityMismatchError(
         `No rendition matching requested formatId "${target.formatId}" found.`
       );
     }
+
+    // Fail-closed validation for conflicting target options
+    if (target.height && target.height > 0 && target.height !== matched.height) {
+      throw new CapabilityMismatchError(
+        `Conflicting quality target options: formatId "${target.formatId}" has height ${matched.height}p, but explicit height ${target.height}p was requested.`
+      );
+    }
+    if (target.resolution) {
+      const parsed = parseInt(target.resolution.replace(/\D/g, ""), 10);
+      if (!isNaN(parsed) && parsed > 0 && parsed !== matched.height) {
+        throw new CapabilityMismatchError(
+          `Conflicting quality target options: formatId "${target.formatId}" has height ${matched.height}p, but explicit resolution "${target.resolution}" was requested.`
+        );
+      }
+    }
+    if (target.codec && target.codec.toLowerCase() !== matched.vcodec.toLowerCase()) {
+      throw new CapabilityMismatchError(
+        `Conflicting quality target options: formatId "${target.formatId}" has codec "${matched.vcodec}", but explicit codec "${target.codec}" was requested.`
+      );
+    }
+
+    return {
+      targetHeight: matched.height,
+      preferredCodec: matched.vcodec,
+      candidates: [matched],
+    };
   }
 
-  // Explicit height / resolution
+  // 2. Resolve target height
   let targetHeight: number;
   if (target?.height && target.height > 0) {
     targetHeight = target.height;
-    filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
   } else if (target?.resolution) {
     const parsed = parseInt(target.resolution.replace(/\D/g, ""), 10);
-    if (!isNaN(parsed) && parsed > 0) {
-      targetHeight = parsed;
-      filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
-    } else {
-      targetHeight = Math.max(...valid.map((r) => r.height || 0));
-      filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
+    if (isNaN(parsed) || parsed <= 0) {
+      throw new CapabilityMismatchError(
+        `Invalid target resolution string: "${target.resolution}". Expected e.g. "2160p", "1440p", "1080p", "720p".`
+      );
     }
+    targetHeight = parsed;
   } else {
     // Default max quality: maximum discovered height
     targetHeight = Math.max(...valid.map((r) => r.height || 0));
-    filtered = filtered.filter((r) => (r.height || 0) === targetHeight);
   }
 
-  if (filtered.length === 0) {
+  let tierCandidates = valid.filter((r) => (r.height || 0) === targetHeight);
+  if (tierCandidates.length === 0) {
     throw new CapabilityMismatchError(
       `No rendition available for target resolution tier ${targetHeight}p.`
     );
   }
 
-  // Optional codec filter
+  // 3. Strict codec filter if specified
   if (target?.codec) {
-    const byCodec = filtered.filter((r) => r.vcodec === target.codec);
-    if (byCodec.length > 0) {
-      filtered = byCodec;
+    const exactCodec = tierCandidates.filter((r) => r.vcodec === target.codec);
+    if (exactCodec.length === 0) {
+      throw new CapabilityMismatchError(
+        `No rendition available with requested codec "${target.codec}" in target resolution tier ${targetHeight}p.`
+      );
     }
+    return {
+      targetHeight,
+      preferredCodec: target.codec,
+      candidates: exactCodec,
+    };
   }
 
-  // Rank within target tier: AV1 first, then H264, HEVC, other
-  const candidates = [...filtered].sort((a, b) => compareCodecs(a.vcodec, b.vcodec));
+  // 4. Default ranking within tier: AV1 first, then H.264, HEVC, other
+  tierCandidates.sort((a, b) => compareCodecs(a.vcodec, b.vcodec));
+  const preferredCodec = tierCandidates[0]?.vcodec ?? "av1";
 
-  return { targetHeight, candidates };
+  return {
+    targetHeight,
+    preferredCodec,
+    candidates: tierCandidates,
+  };
 }
 
 /**
@@ -274,4 +324,56 @@ export async function selectHighestPublicHqRendition(
   throw new CapabilityMismatchError(
     `All candidates at target resolution ${targetHeight}p failed live Range capability verification (e.g. login/session gated). Silent downgrade to lower resolutions is prohibited.`
   );
+}
+
+/**
+ * Resolves comprehensive structured JobQualityTarget metadata for persistence.
+ */
+export function resolveJobQualityTargetMetadata(
+  renditions: MediaRendition[],
+  target?: QualityTargetOptions,
+  reason?: string
+): JobQualityTarget {
+  const isExplicit = Boolean(
+    target?.height || target?.resolution || target?.codec || target?.formatId
+  );
+
+  let targetHeight: number | undefined;
+  let preferredCodec: VideoCodec | undefined = target?.codec;
+
+  if (target?.formatId) {
+    const matched = renditions.find(
+      (r) => r.formatId.toLowerCase() === target.formatId?.toLowerCase()
+    );
+    if (matched) {
+      targetHeight = matched.height;
+      if (!preferredCodec) preferredCodec = matched.vcodec;
+    }
+  } else if (target?.height && target.height > 0) {
+    targetHeight = target.height;
+  } else if (target?.resolution) {
+    const parsed = parseInt(target.resolution.replace(/\D/g, ""), 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      targetHeight = parsed;
+    }
+  } else if (renditions.length > 0) {
+    const valid = renditions.filter((r) => Boolean(r.directUrl) && (r.height || 0) > 0);
+    if (valid.length > 0) {
+      targetHeight = Math.max(...valid.map((r) => r.height || 0));
+    }
+  }
+
+  if (!preferredCodec) {
+    preferredCodec = "av1";
+  }
+
+  return {
+    targetHeight,
+    preferredCodec,
+    requestedResolution: target?.resolution,
+    requestedFormatId: target?.formatId,
+    requestedCodec: target?.codec,
+    explicitOverride: isExplicit,
+    reason,
+  };
 }

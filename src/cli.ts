@@ -5,6 +5,28 @@ import process from "node:process";
 import { runTracerSlice, resumeJobWorkflow } from "./core/workflow.js";
 import type { QualityTargetOptions, VideoCodec } from "./types.js";
 
+const VALID_CODECS: VideoCodec[] = ["av1", "h264", "hevc", "other"];
+
+export function validateCodec(codecStr: string): VideoCodec {
+  const normalized = codecStr.toLowerCase().trim() as VideoCodec;
+  if (!VALID_CODECS.includes(normalized)) {
+    throw new Error(
+      `Invalid codec "${codecStr}". Supported codecs: ${VALID_CODECS.join(", ")}.`
+    );
+  }
+  return normalized;
+}
+
+export function validateHeight(heightStr: string): number {
+  const parsed = parseInt(heightStr, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid height "${heightStr}". Expected a positive integer (e.g. 2160, 1440, 1080, 720).`
+    );
+  }
+  return parsed;
+}
+
 async function isJobPath(p: string): Promise<boolean> {
   try {
     const resolved = path.resolve(p);
@@ -62,14 +84,14 @@ Options:
   --resume, resume     Resume an existing waiting-for-llc Job
   --llc <path>         Explicit path to LosslessCut .llc project file
   --height <number>    Explicit target resolution height (e.g. 2160, 1440, 1080, 720)
-  --quality <string>   Target quality (default: max)
-  --codec <string>     Preferred codec (e.g. av1, h264)
+  --quality <string>   Target quality resolution (e.g. 2160p, 1440p, max)
+  --codec <string>     Preferred codec (av1, h264, hevc, other)
   --help, -h           Show this help message
 
 Examples:
   javr-sourcecut "https://www.eporner.com/video-5n1ArXshUMZ/sample-video/" "./downloads"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
-  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080
+  javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080 --codec av1
 `);
     process.exit(0);
   }
@@ -81,38 +103,45 @@ Examples:
   let rootDir = process.cwd();
   const qualityTarget: QualityTargetOptions = {};
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "resume" || arg === "--resume") {
-      isResume = true;
-      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
-        jobPath = args[++i];
-      }
-    } else if (arg === "--llc" && i + 1 < args.length) {
-      llcPath = args[++i];
-    } else if (arg === "--height" && i + 1 < args.length) {
-      qualityTarget.height = parseInt(args[++i], 10);
-    } else if (arg === "--quality" && i + 1 < args.length) {
-      const q = args[++i];
-      if (q !== "max") {
-        qualityTarget.resolution = q;
-      }
-    } else if (arg === "--codec" && i + 1 < args.length) {
-      qualityTarget.codec = args[++i].toLowerCase() as VideoCodec;
-    } else if (arg === "--url" && i + 1 < args.length) {
-      sourceUrl = args[++i];
-    } else if (arg === "--root" && i + 1 < args.length) {
-      rootDir = args[++i];
-    } else if (!sourceUrl && !jobPath) {
-      if (await isJobPath(arg)) {
+  try {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "resume" || arg === "--resume") {
         isResume = true;
-        jobPath = arg;
-      } else {
-        sourceUrl = arg;
+        if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+          jobPath = args[++i];
+        }
+      } else if (arg === "--llc" && i + 1 < args.length) {
+        llcPath = args[++i];
+      } else if (arg === "--height" && i + 1 < args.length) {
+        qualityTarget.height = validateHeight(args[++i]);
+      } else if (arg === "--quality" && i + 1 < args.length) {
+        const q = args[++i];
+        if (q !== "max") {
+          qualityTarget.resolution = q;
+        }
+      } else if (arg === "--codec" && i + 1 < args.length) {
+        qualityTarget.codec = validateCodec(args[++i]);
+      } else if (arg === "--format" && i + 1 < args.length) {
+        qualityTarget.formatId = args[++i];
+      } else if (arg === "--url" && i + 1 < args.length) {
+        sourceUrl = args[++i];
+      } else if (arg === "--root" && i + 1 < args.length) {
+        rootDir = args[++i];
+      } else if (!sourceUrl && !jobPath) {
+        if (await isJobPath(arg)) {
+          isResume = true;
+          jobPath = arg;
+        } else {
+          sourceUrl = arg;
+        }
+      } else if (!rootDir) {
+        rootDir = arg;
       }
-    } else if (!rootDir) {
-      rootDir = arg;
     }
+  } catch (err: any) {
+    console.error(`\nError: ${err.message}`);
+    process.exit(1);
   }
 
   if (isResume || jobPath) {
@@ -170,4 +199,7 @@ Examples:
   }
 }
 
-main();
+// Only execute main if run directly as CLI
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("cli.js") || process.argv[1]?.endsWith("cli.ts")) {
+  main();
+}

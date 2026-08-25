@@ -53,6 +53,16 @@ export interface QualityTargetOptions {
   formatId?: string;
 }
 
+export interface JobQualityTarget {
+  targetHeight?: number;
+  preferredCodec?: VideoCodec;
+  requestedResolution?: string;
+  requestedFormatId?: string;
+  requestedCodec?: VideoCodec;
+  explicitOverride?: boolean;
+  reason?: string;
+}
+
 export interface JobState {
   jobId: string;
   status: JobStatus;
@@ -69,12 +79,7 @@ export interface JobState {
   finalOutputPath: string;
   renditions: MediaRendition[];
   interventionReason?: string;
-  qualityTarget?: {
-    targetHeight?: number;
-    preferredCodec?: VideoCodec;
-    explicitOverride?: boolean;
-    reason?: string;
-  };
+  qualityTarget?: JobQualityTarget;
 }
 
 export interface SourceAdapter {

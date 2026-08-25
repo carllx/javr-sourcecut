@@ -3,7 +3,11 @@ import path from "node:path";
 import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
-import { selectHighestPublicHqRendition, type HqSelectionResult } from "./hq-selector.js";
+import {
+  selectHighestPublicHqRendition,
+  resolveJobQualityTargetMetadata,
+  type HqSelectionResult,
+} from "./hq-selector.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
@@ -206,16 +210,14 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     });
   } catch (err: any) {
     // Quality target is inaccessible (e.g. requires authentication) -> enter needs-user-intervention
-    const targetHeight = qualityTarget?.height ?? Math.max(...descriptor.renditions.map((r) => r.height || 0));
     job.status = "needs-user-intervention";
     job.renditions = descriptor.renditions;
     job.interventionReason = err.message;
-    job.qualityTarget = {
-      targetHeight,
-      preferredCodec: "av1",
-      explicitOverride: Boolean(qualityTarget?.height || qualityTarget?.resolution),
-      reason: err.message,
-    };
+    job.qualityTarget = resolveJobQualityTargetMetadata(
+      descriptor.renditions,
+      qualityTarget,
+      err.message
+    );
     await saveJob(job);
     onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId} requires user access / authentication: ${err.message}`);
     throw err;
@@ -276,11 +278,10 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   // 10. Update job status to completed and save
   job.status = "completed";
   job.renditions = descriptor.renditions;
-  job.qualityTarget = {
-    targetHeight: selectedHq.height,
-    preferredCodec: selectedHq.vcodec,
-    explicitOverride: Boolean(qualityTarget?.height || qualityTarget?.resolution),
-  };
+  job.qualityTarget = resolveJobQualityTargetMetadata(
+    descriptor.renditions,
+    qualityTarget
+  );
   await saveJob(job);
 
   onLog(`\n[SUCCESS] Eporner Resume E2E completed successfully! Output: ${outputClipPath}`);

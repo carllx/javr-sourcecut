@@ -296,7 +296,93 @@ describe("Workflow Resume E2E", () => {
     const savedJob = JSON.parse(await fs.readFile(jobJsonPath, "utf-8"));
     expect(savedJob.status).toBe("needs-user-intervention");
     expect(savedJob.qualityTarget?.targetHeight).toBe(2160);
+    expect(savedJob.qualityTarget?.preferredCodec).toBe("av1");
     expect(savedJob.interventionReason).toContain("2160p");
+  });
+
+  // Test D: explicit resolution override persists requested target on intervention
+  it("Test D: persists requested targetHeight=1440 when 1440p resolution is requested but inaccessible", async () => {
+    const workspaceDir = path.join(tmpDir, "eporner-1440-intervention");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "test.proxy.mp4");
+    await fs.writeFile(proxyPath, "dummy-proxy");
+
+    const llcPath = path.join(workspaceDir, "test.proxy-proj.llc");
+    await fs.writeFile(llcPath, JSON.stringify({ cutSegments: [{ start: 10, end: 20 }] }));
+
+    const jobState: JobState = {
+      jobId: "eporner-1440-intervention",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      provider: "eporner",
+      providerAssetId: "test",
+      identity: {
+        provider: "eporner",
+        providerAssetId: "test",
+        observedTitle: "Test",
+        searchAliases: ["test"],
+        performers: [],
+        confidence: "fallback",
+        baseName: "test",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "480p-av1",
+        resolution: "480p",
+        height: 480,
+        vcodec: "av1",
+        directUrl: "https://www.eporner.com/dload/proxy.mp4",
+      },
+      proxyPath,
+      expectedLlcPath: path.join(workspaceDir, "test.llc"),
+      finalOutputPath: path.join(workspaceDir, "test.mp4"),
+      renditions: [],
+    };
+
+    const jobJsonPath = path.join(workspaceDir, "job.json");
+    await fs.writeFile(jobJsonPath, JSON.stringify(jobState, null, 2));
+
+    const mockDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "test",
+      sourceUrl: "https://www.eporner.com/video-test/sample/",
+      rawTitle: "Test",
+      declaredPerformers: [],
+      renditions: [
+        { formatId: "2160p-av1", resolution: "2160p", height: 2160, vcodec: "av1", directUrl: "https://example.com/2160-av1" },
+        { formatId: "1440p-av1", resolution: "1440p", height: 1440, vcodec: "av1", directUrl: "https://example.com/1440-av1" },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "eporner",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers(),
+      body: { cancel: vi.fn() },
+    });
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        qualityTarget: { resolution: "1440p" },
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+      })
+    ).rejects.toThrow("All candidates at target resolution 1440p failed live Range capability");
+
+    const savedJob = JSON.parse(await fs.readFile(jobJsonPath, "utf-8"));
+    expect(savedJob.status).toBe("needs-user-intervention");
+    expect(savedJob.qualityTarget?.targetHeight).toBe(1440);
+    expect(savedJob.qualityTarget?.requestedResolution).toBe("1440p");
+    expect(savedJob.qualityTarget?.explicitOverride).toBe(true);
   });
 
   // Test E: Workflow ledger: hqSelectionProbeBytes + selectiveFetchBytes = totalHqLifecycleBytes
