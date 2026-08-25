@@ -152,29 +152,110 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(profileDir.toLowerCase()).toContain("javr-sourcecut");
   });
 
-  it("6. Profile Ownership Lock Safety: first owner acquires, second owner fails closed", async () => {
-    const profileDir = path.join(tmpDir, "locked-test-profile");
-    const lock1 = new ProfileLock(profileDir);
-    const lock2 = new ProfileLock(profileDir);
+  it("6. Real Two-Process Contention: first process acquires, concurrent process fails closed, release enables succession", async () => {
+    const profileDir = path.join(tmpDir, "cross-process-profile");
+    const sessionModuleUrl = new URL("../../dist/core/session.js", import.meta.url).href;
 
-    // Lock 1 acquires
-    await lock1.acquire();
+    const workerScript = `
+      import { ProfileLock } from "${sessionModuleUrl}";
+      const lock = new ProfileLock(process.argv[2]);
+      try {
+        await lock.acquire();
+        process.stdout.write("LOCK_ACQUIRED\\n");
+        process.stdin.resume();
+        await new Promise((resolve) => {
+          process.stdin.on("data", resolve);
+          process.stdin.on("end", resolve);
+        });
+        await lock.release();
+        process.exit(0);
+      } catch (err) {
+        process.stderr.write(err.message + "\\n");
+        process.exit(1);
+      }
+    `;
+
+    const scriptPath = path.join(tmpDir, "lock-worker.mjs");
+    await fs.writeFile(scriptPath, workerScript);
+
+    // 1. Spawn Process A: acquires lock
+    const procA = spawn(process.execPath, [scriptPath, profileDir], { stdio: ["pipe", "pipe", "pipe"] });
+    let outputA = "";
+    procA.stdout.on("data", (d) => (outputA += d.toString()));
+
+    for (let i = 0; i < 30; i++) {
+      if (outputA.includes("LOCK_ACQUIRED")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(outputA).toContain("LOCK_ACQUIRED");
     expect(await isProfileLocked(profileDir)).toBe(true);
 
-    // Lock 2 attempts acquire and fails closed
-    await expect(lock2.acquire()).rejects.toThrow(/currently in use by process PID/);
+    // 2. Spawn Process B: attempts acquire on same profileDir and must fail closed
+    const procB = spawn(process.execPath, [scriptPath, profileDir], { stdio: ["pipe", "pipe", "pipe"] });
+    let stderrB = "";
+    let stdoutB = "";
+    procB.stdout.on("data", (d) => (stdoutB += d.toString()));
+    procB.stderr.on("data", (d) => (stderrB += d.toString()));
 
-    // Lock 1 releases
-    await lock1.release();
+    const exitCodeB = await new Promise<number | null>((resolve) => procB.on("close", resolve));
+    expect(exitCodeB).toBe(1);
+    expect(stdoutB).not.toContain("LOCK_ACQUIRED");
+    expect(stderrB).toMatch(/currently in use by process PID/);
+
+    // 3. Terminate Process A
+    procA.stdin.write("EXIT\n");
+    procA.stdin.end();
+    await new Promise<void>((resolve) => procA.on("close", () => resolve()));
     expect(await isProfileLocked(profileDir)).toBe(false);
 
-    // Lock 2 can now acquire
-    await lock2.acquire();
-    expect(await isProfileLocked(profileDir)).toBe(true);
-    await lock2.release();
+    // 4. Spawn Process C: acquires lock successfully
+    const procC = spawn(process.execPath, [scriptPath, profileDir], { stdio: ["pipe", "pipe", "pipe"] });
+    let outputC = "";
+    procC.stdout.on("data", (d) => (outputC += d.toString()));
+
+    for (let i = 0; i < 30; i++) {
+      if (outputC.includes("LOCK_ACQUIRED")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(outputC).toContain("LOCK_ACQUIRED");
+
+    // Teardown Process C
+    procC.stdin.write("EXIT\n");
+    procC.stdin.end();
+    await new Promise<void>((resolve) => procC.on("close", () => resolve()));
   });
 
-  it("7. Precedence Hierarchy: explicit --cookies overrides dedicated browser profile", async () => {
+  it("7. Stale Lock Recovery & Release Safety: reclaims lock from dead PID and protects foreign locks", async () => {
+    const profileDir = path.join(tmpDir, "stale-lock-profile");
+    await fs.mkdir(profileDir, { recursive: true });
+
+    // Write a lock file with a dead PID (e.g. 9999999)
+    const lockFile = path.join(profileDir, ".javr-profile.lock");
+    await fs.writeFile(
+      lockFile,
+      JSON.stringify({
+        pid: 9999999,
+        ownerToken: "dead-token-123",
+        acquiredAt: new Date(Date.now() - 3600000).toISOString(),
+        provider: "stale-lock-profile",
+      })
+    );
+
+    expect(await isProfileLocked(profileDir)).toBe(false);
+
+    const lock = new ProfileLock(profileDir);
+    await lock.acquire();
+    expect(await isProfileLocked(profileDir)).toBe(true);
+
+    const acquiredContent = JSON.parse(await fs.readFile(lockFile, "utf-8"));
+    expect(acquiredContent.pid).toBe(process.pid);
+    expect(acquiredContent.ownerToken).not.toBe("dead-token-123");
+
+    await lock.release();
+    expect(await isProfileLocked(profileDir)).toBe(false);
+  });
+
+  it("8. Precedence Hierarchy: explicit --cookies overrides dedicated browser profile", async () => {
     const cookieFilePath = path.join(tmpDir, "custom-cookies.txt");
     await fs.writeFile(
       cookieFilePath,
@@ -191,7 +272,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(header).toBe("FROM_FILE=file_value");
   });
 
-  it("8. Auth --reset resets only dedicated provider profile", async () => {
+  it("9. Auth --reset resets only dedicated provider profile", async () => {
     const testProfile = path.join(tmpDir, "profiles", "eporner");
     await fs.mkdir(testProfile, { recursive: true });
     await fs.writeFile(path.join(testProfile, "dummy.txt"), "data");
@@ -210,8 +291,8 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(exists).toBe(false);
   });
 
-  // 9. Real Local CDP Protocol Smoke Test
-  it("9. Real CDP Smoke Test: verifies DevToolsActivePort, page target connection, URL-scoped cookies, and graceful shutdown", async () => {
+  // 10. Real Local CDP Protocol Smoke Test
+  it("10. Real CDP Smoke Test: verifies DevToolsActivePort, page target connection, URL-scoped cookies, and graceful shutdown", async () => {
     const testProfile = path.join(tmpDir, "cdp-smoke-profile");
     await fs.mkdir(testProfile, { recursive: true });
 
@@ -303,16 +384,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
       initProc.once("close", () => r());
     });
     browserWs.send(JSON.stringify({ id: 999, method: "Browser.close" }));
-    browserWs.close();
-    await Promise.race([closePromise, new Promise((r) => setTimeout(r, 2000))]);
-    if (!initProc.killed) {
-      try {
-        initProc.kill();
-      } catch {}
-    }
-
-    // Await process teardown to ensure Windows profile lock is released
-    await new Promise((r) => setTimeout(r, 400));
+    await closePromise;
 
     // 2. Now run the production extractEpornerCookiesFromProfile helper on the profile
     const extracted = await extractEpornerCookiesFromProfile(testProfile);
@@ -320,5 +392,5 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     // Verify URL scoping: Eporner cookie included, unrelated domain excluded
     expect(extracted.some((c) => c.name === "EPRNS_TEST")).toBe(true);
     expect(extracted.some((c) => c.name === "OTHER_COOKIE")).toBe(false);
-  }, 20000);
+  }, 25000);
 });

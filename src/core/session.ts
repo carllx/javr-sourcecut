@@ -3,7 +3,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 
 export interface NetscapeCookie {
   domain: string;
@@ -28,6 +28,7 @@ export interface BrowserExecutableInfo {
 
 export interface ProfileLockInfo {
   pid: number;
+  ownerToken: string;
   acquiredAt: string;
   provider: string;
 }
@@ -46,51 +47,73 @@ export function isPidRunning(pid: number): boolean {
 }
 
 /**
- * Process-scoped lock manager for dedicated browser profiles.
+ * Process-scoped atomic lock manager for dedicated browser profiles.
+ * Uses atomic exclusive file creation (O_CREAT | O_EXCL via "wx") to prevent TOCTOU races.
  * Ensures strict single-owner access and fails closed if profile is currently in use.
  */
 export class ProfileLock {
   readonly profileDir: string;
   readonly lockFilePath: string;
   private handle: fs.FileHandle | null = null;
+  private ownerToken: string | null = null;
 
   constructor(profileDir: string) {
     this.profileDir = profileDir;
     this.lockFilePath = path.join(profileDir, ".javr-profile.lock");
   }
 
-  async acquire(): Promise<void> {
+  async acquire(maxStaleRetries = 3): Promise<void> {
     await fs.mkdir(this.profileDir, { recursive: true });
 
-    // Check if active lock file exists with a currently running process
-    try {
-      const content = await fs.readFile(this.lockFilePath, "utf-8");
-      const info: ProfileLockInfo = JSON.parse(content);
-      if (info.pid && isPidRunning(info.pid)) {
+    for (let attempt = 0; attempt < maxStaleRetries; attempt++) {
+      try {
+        // 1. Atomic exclusive file creation
+        this.handle = await fs.open(this.lockFilePath, "wx");
+        const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        this.ownerToken = token;
+
+        const lockData: ProfileLockInfo = {
+          pid: process.pid,
+          ownerToken: token,
+          acquiredAt: new Date().toISOString(),
+          provider: path.basename(this.profileDir),
+        };
+
+        await this.handle.writeFile(JSON.stringify(lockData, null, 2), "utf-8");
+        return; // Atomically acquired
+      } catch (err: any) {
+        if (err.code === "EEXIST") {
+          // Lock exists: inspect owner PID
+          let existingInfo: ProfileLockInfo | null = null;
+          try {
+            const content = await fs.readFile(this.lockFilePath, "utf-8");
+            existingInfo = JSON.parse(content);
+          } catch {
+            // Unparseable or transient read
+          }
+
+          if (existingInfo?.pid && isPidRunning(existingInfo.pid)) {
+            throw new Error(
+              `Dedicated browser profile at "${this.profileDir}" is currently in use by process PID ${existingInfo.pid} (acquired at ${existingInfo.acquiredAt}). Please close the running browser or wait for process completion.`
+            );
+          }
+
+          // Existing lock is stale (owner PID dead): remove and retry atomic exclusive create
+          try {
+            await fs.rm(this.lockFilePath, { force: true });
+          } catch {}
+          continue;
+        }
+
         throw new Error(
-          `Dedicated browser profile at "${this.profileDir}" is currently in use by process PID ${info.pid} (acquired at ${info.acquiredAt}). Please close the running browser or wait for process completion.`
+          `Failed to acquire lock for dedicated browser profile at "${this.profileDir}": ${err.message}`
         );
       }
-    } catch (err: any) {
-      if (err.message?.includes("currently in use by process PID")) {
-        throw err;
-      }
-      // Stale or non-existent lock is safely overwritten
     }
 
-    try {
-      this.handle = await fs.open(this.lockFilePath, "w");
-      const lockData: ProfileLockInfo = {
-        pid: process.pid,
-        acquiredAt: new Date().toISOString(),
-        provider: path.basename(this.profileDir),
-      };
-      await this.handle.writeFile(JSON.stringify(lockData, null, 2), "utf-8");
-    } catch (err: any) {
-      throw new Error(
-        `Failed to acquire lock for dedicated browser profile at "${this.profileDir}": ${err.message}`
-      );
-    }
+    throw new Error(
+      `Failed to acquire lock for dedicated browser profile at "${this.profileDir}" after ${maxStaleRetries} attempts.`
+    );
   }
 
   async release(): Promise<void> {
@@ -100,9 +123,23 @@ export class ProfileLock {
       } catch {}
       this.handle = null;
     }
+
+    if (!this.ownerToken) {
+      return;
+    }
+
     try {
-      await fs.rm(this.lockFilePath, { force: true });
-    } catch {}
+      const content = await fs.readFile(this.lockFilePath, "utf-8");
+      const info: ProfileLockInfo = JSON.parse(content);
+      // Release safety: only remove if it still belongs to this exact process and ownerToken
+      if (info.ownerToken === this.ownerToken && info.pid === process.pid) {
+        await fs.rm(this.lockFilePath, { force: true });
+      }
+    } catch {
+      // If file was already removed or modified, safely ignore
+    } finally {
+      this.ownerToken = null;
+    }
   }
 }
 
@@ -517,19 +554,26 @@ export async function extractEpornerCookiesFromProfile(
           proc.once("close", () => resolve());
         });
         browserWs.send(JSON.stringify({ id: 999, method: "Browser.close" }));
-        browserWs.close();
 
         // Await graceful process exit with 2s timeout
         await Promise.race([
           exitPromise,
           new Promise((resolve) => setTimeout(resolve, 2000)),
         ]);
+        try {
+          browserWs.close();
+        } catch {}
       } catch {}
     }
 
     // Fallback force kill only if process has not exited
     try {
-      if (!proc.killed) {
+      if (proc && !proc.killed) {
+        if (process.platform === "win32" && proc.pid) {
+          try {
+            execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" });
+          } catch {}
+        }
         proc.kill();
       }
     } catch {}
