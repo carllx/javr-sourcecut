@@ -88,10 +88,12 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
         resolve();
       });
     });
-  });
+  }, 30000);
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 

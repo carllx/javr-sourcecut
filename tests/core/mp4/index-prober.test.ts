@@ -16,6 +16,7 @@ describe("Bounded MP4 Index Prober", () => {
   let tailMp4Path: string;
   let server: http.Server;
   let serverUrl: string;
+  let networkRequestLog: { url: string; rangeHeader?: string }[] = [];
 
   beforeAll(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "sc-prober-test-"));
@@ -48,6 +49,8 @@ describe("Bounded MP4 Index Prober", () => {
 
     server = http.createServer((req, res) => {
       const url = req.url || "";
+      const rangeHeader = req.headers.range;
+      networkRequestLog.push({ url, rangeHeader });
       const targetBuffer = url.includes("tail") ? tailBuffer : faststartBuffer;
       const totalSize = targetBuffer.length;
 
@@ -121,7 +124,6 @@ describe("Bounded MP4 Index Prober", () => {
         return;
       }
 
-      const rangeHeader = req.headers.range;
       if (!rangeHeader) {
         res.writeHead(200, {
           "Content-Type": "video/mp4",
@@ -158,10 +160,12 @@ describe("Bounded MP4 Index Prober", () => {
         resolve();
       });
     });
-  });
+  }, 30000);
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -180,7 +184,8 @@ describe("Bounded MP4 Index Prober", () => {
     expect(result.cachedHead?.range.startByte).toBe(0);
   });
 
-  it("probes index from tail MP4 and counts both head and tail transferred bytes", async () => {
+  it("probes index from tail MP4 and counts both head and tail transferred bytes when probe budgets are explicitly bounded", async () => {
+    networkRequestLog = [];
     const result = await probeMP4Index(`${serverUrl}/tail.mp4`, {
       headProbeBytes: 1024, // head probe won't find moov
       tailProbeBytes: 64 * 1024,
@@ -196,6 +201,24 @@ describe("Bounded MP4 Index Prober", () => {
     );
     expect(result.cachedTail).toBeDefined();
     expect(result.cachedTail?.range.endByte).toBe(result.index.fileSize - 1);
+  });
+
+  it("fails closed before issuing tail request when default probe budgets would cover full file on small tail MP4", async () => {
+    networkRequestLog = [];
+    await expect(
+      probeMP4Index(`${serverUrl}/tail.mp4`) // uses default 512KB head + 2MB tail
+    ).rejects.toThrow(UnprovablePartialPlanError);
+
+    // Verify: Stage A capability (0-0) happened, Stage B head (0-headEnd) happened
+    expect(networkRequestLog.length).toBe(2);
+    expect(networkRequestLog[0].rangeHeader).toBe("bytes=0-0");
+    expect(networkRequestLog[1].rangeHeader).toMatch(/^bytes=0-/);
+
+    // Verify: Tail probe request was NEVER issued
+    const tailRequests = networkRequestLog.filter((r) =>
+      r.rangeHeader && !r.rangeHeader.startsWith("bytes=0-")
+    );
+    expect(tailRequests.length).toBe(0);
   });
 
   it("fails closed with Http206RequiredError when server returns 200 OK", async () => {

@@ -203,15 +203,25 @@ export async function probeMP4Index(
 
   // =========================================================================
   // Stage C: Bounded Tail Probe (if moov not in head)
-  // Ensure tail probe does not overlap head probe to span the full file
+  // Ensure tail probe does not overlap head probe and aggregate probes stay strictly within partial budget
   // =========================================================================
   const tailBudget = Math.min(configuredTailProbeBytes, Math.floor(fileSize * 0.5));
   const tailStart = fileSize - tailBudget;
   const tailEnd = fileSize - 1;
 
-  if (tailStart <= headEnd || tailStart <= 0) {
+  const prospectiveProbeBytes =
+    capabilityProbeBytesTransferred + headProbeBytesTransferred + tailBudget;
+  const prospectiveProbeRatio = prospectiveProbeBytes / fileSize;
+
+  if (
+    tailStart <= headEnd ||
+    tailStart <= 0 ||
+    prospectiveProbeBytes >= fileSize ||
+    prospectiveProbeRatio > 0.95 ||
+    (1 - prospectiveProbeRatio) <= 0.05
+  ) {
     throw new UnprovablePartialPlanError(
-      `Cannot execute bounded tail probe: tailStart (${tailStart}) <= headEnd (${headEnd}). Probe would span full file (${fileSize}B). Refusing full-file probe.`
+      `Cannot execute bounded tail probe for ${url}: aggregate prospective probe transfer (${prospectiveProbeBytes}B) would consume ${(prospectiveProbeRatio * 100).toFixed(1)}% of total file size (${fileSize}B), violating the no-full-file probe invariant and partial budget threshold. Refusing full-file probe.`
     );
   }
 
