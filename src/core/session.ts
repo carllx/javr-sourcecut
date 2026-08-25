@@ -833,22 +833,42 @@ export async function launchAuthBrowser(
   console.log(` Browser: ${browser.executablePath}`);
   console.log(`\nPlease log into Eporner in the opened browser window. When finished, you may close the browser.`);
 
-  const proc = spawn(
-    browser.executablePath,
-    [
-      `--user-data-dir=${profileDir}`,
-      "--remote-debugging-port=0",
-      "--remote-debugging-address=127.0.0.1",
-      "--no-first-run",
-      "--no-default-browser-check",
-      loginUrl,
-    ],
-    { stdio: "ignore" }
-  );
+  let proc: any;
+  if (process.platform === "win32") {
+    proc = spawn(
+      "cmd.exe",
+      [
+        "/c",
+        "start",
+        "/wait",
+        `"${browser.type}"`,
+        browser.executablePath,
+        `--user-data-dir=${profileDir}`,
+        "--new-window",
+        "--no-first-run",
+        "--no-default-browser-check",
+        loginUrl,
+      ],
+      { stdio: "ignore", windowsHide: false }
+    );
+  } else {
+    proc = spawn(
+      browser.executablePath,
+      [
+        `--user-data-dir=${profileDir}`,
+        "--new-window",
+        "--no-first-run",
+        "--no-default-browser-check",
+        loginUrl,
+      ],
+      { stdio: "ignore" }
+    );
+  }
 
   try {
     await new Promise<void>((resolve) => {
       proc.on("close", () => resolve());
+      proc.on("exit", () => resolve());
     });
   } finally {
     await lock.release();
