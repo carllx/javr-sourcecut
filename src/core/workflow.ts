@@ -1,10 +1,16 @@
+import fs from "node:fs/promises";
 import path from "node:path";
-import type { HITLPauseResult, SourceAdapter } from "../types.js";
+import type { HITLPauseResult, MediaRendition, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
-import { createJob, saveJob, updateJobStatus } from "./job.js";
+import { selectHqRendition } from "./hq-selector.js";
+import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
+import { loadAndNormalizeLlc, findLlcFileInWorkspace } from "./llc.js";
+import { runSelectiveFetch, type SelectiveFetchResult } from "./mp4/selective-fetch.js";
+import type { TimeRange } from "./mp4/types.js";
+import type { JobState } from "../types.js";
 
 export interface TracerSliceParams {
   sourceUrl: string;
@@ -94,5 +100,138 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
     status: "waiting-for-llc",
     instructions,
     job,
+  };
+}
+
+export interface ResumeJobParams {
+  jobPathOrDir: string;
+  llcPath?: string;
+  adapters?: SourceAdapter[];
+  fetchFn?: typeof fetch;
+  verifierFn?: typeof verifyMediaFile;
+  onProgress?: (transferredBytes: number, totalBytes?: number) => void;
+  onLog?: (message: string) => void;
+}
+
+export interface ResumeJobResult {
+  job: JobState;
+  llcPath: string;
+  timeRange: TimeRange;
+  selectedHq: MediaRendition;
+  discoveredRenditions: MediaRendition[];
+  outputClipPath: string;
+  selectiveFetchResult: SelectiveFetchResult;
+}
+
+export async function resumeJobWorkflow(params: ResumeJobParams): Promise<ResumeJobResult> {
+  const {
+    jobPathOrDir,
+    llcPath: explicitLlcPath,
+    adapters = [new EpornerAdapter()],
+    fetchFn = fetch,
+    onProgress,
+    onLog = () => {},
+  } = params;
+
+  // 1. Load existing job.json from disk
+  const job = await loadJob(jobPathOrDir);
+  onLog(`[Resume 1/5] Loaded Job "${job.jobId}" from ${job.workspaceDir} (status: ${job.status})`);
+
+  // 2. Invariant: Existing proxy must exist on disk and MUST NOT be re-downloaded or modified
+  let proxyStatBefore: { mtimeMs: number; size: number };
+  try {
+    const stat = await fs.stat(job.proxyPath);
+    if (!stat.isFile()) {
+      throw new Error(`Proxy path is not a file: ${job.proxyPath}`);
+    }
+    proxyStatBefore = { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch (err: any) {
+    throw new Error(
+      `Proxy video file not found at "${job.proxyPath}". Refusing to resume or re-download: ${err.message}`
+    );
+  }
+
+  // 3. Locate and Parse LosslessCut .llc file
+  const resolvedLlcPath = explicitLlcPath
+    ? path.resolve(explicitLlcPath)
+    : await findLlcFileInWorkspace(job.workspaceDir, job.expectedLlcPath);
+
+  const { timeRange } = await loadAndNormalizeLlc(resolvedLlcPath);
+  onLog(
+    `[Resume 2/5] Parsed cut segment [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s] (duration ${(timeRange.endSeconds - timeRange.startSeconds).toFixed(3)}s) from ${resolvedLlcPath}`
+  );
+
+  // 4. Invariant: Do not overwrite existing final output file if present
+  const outputClipPath = job.finalOutputPath;
+  try {
+    const outStat = await fs.stat(outputClipPath);
+    if (outStat.isFile() && outStat.size > 0) {
+      throw new Error(
+        `Final output file already exists at "${outputClipPath}". Refusing to overwrite existing file.`
+      );
+    }
+  } catch (err: any) {
+    if (err.code !== "ENOENT") {
+      throw err;
+    }
+  }
+
+  // 5. Re-resolve current live Eporner renditions (do not trust stale direct URLs in job.json)
+  const adapter = adapters.find((a) => a.canHandle(job.sourceUrl));
+  if (!adapter) {
+    throw new Error(`No compatible source adapter found for source URL: ${job.sourceUrl}`);
+  }
+
+  onLog(`[Resume 3/5] Re-resolving live renditions from ${job.sourceUrl}...`);
+  const descriptor = await adapter.resolve(job.sourceUrl, fetchFn);
+  onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
+
+  // 6. Select highest-quality Direct MP4 rendition (prefer AV1 in top resolution tier)
+  const selectedHq = selectHqRendition(descriptor.renditions);
+  onLog(
+    `[Resume 4/5] Selected HQ rendition: ${selectedHq.formatId} (${selectedHq.resolution}, ${selectedHq.vcodec.toUpperCase()}) directUrl=${selectedHq.directUrl}`
+  );
+
+  // 7. Execute bounded MP4 index probe and HTTP 206 selective fetch
+  onLog(`[Resume 5/5] Executing selective fetch for [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]...`);
+  const selectiveFetchResult = await runSelectiveFetch({
+    sourceUrl: selectedHq.directUrl,
+    timeRange,
+    outputClipPath,
+    workDir: job.workspaceDir,
+    options: {
+      fetchFn,
+      onProgress: (percent, transferred, total) => {
+        onProgress?.(transferred, total);
+      },
+    },
+  });
+
+  // 8. Invariant: Verify existing proxy was completely untouched
+  const proxyStatAfter = await fs.stat(job.proxyPath);
+  if (
+    proxyStatAfter.mtimeMs !== proxyStatBefore.mtimeMs ||
+    proxyStatAfter.size !== proxyStatBefore.size
+  ) {
+    throw new Error(
+      `Invariant violation: Proxy file "${job.proxyPath}" was modified during resume execution!`
+    );
+  }
+
+  // 9. Update job status to completed and save
+  job.status = "completed";
+  job.renditions = descriptor.renditions;
+  await saveJob(job);
+
+  onLog(`\n[SUCCESS] Eporner Resume E2E completed successfully! Output: ${outputClipPath}`);
+
+  return {
+    job,
+    llcPath: resolvedLlcPath,
+    timeRange,
+    selectedHq,
+    discoveredRenditions: descriptor.renditions,
+    outputClipPath,
+    selectiveFetchResult,
   };
 }
