@@ -9,7 +9,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/*.browser.test.ts'",
+    "test:browser": "vitest run tests/core/session.browser.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

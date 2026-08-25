@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runTracerSlice } from "../../src/core/workflow.js";
+import { NoopSessionProvider } from "../../src/core/session.js";
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -12,6 +13,7 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
 
   beforeEach(async () => {
     tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sc-tracer-test-"));
+    vi.stubEnv("JAVR_PROFILES_DIR", path.join(tempRoot, "profiles"));
 
     server = http.createServer((req, res) => {
       if (req.url?.startsWith("/video-sample123")) {
@@ -84,6 +86,7 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(tempRoot, { recursive: true, force: true });
   });
@@ -106,6 +109,7 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
     const result = await runTracerSlice({
       sourceUrl: epornerVideoUrl,
       rootDir: tempRoot,
+      sessionProvider: new NoopSessionProvider(),
       verifierFn: mockVerifier,
     });
 
