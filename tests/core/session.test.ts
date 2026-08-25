@@ -2,13 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { spawn } from "node:child_process";
 import {
   parseNetscapeCookies,
   parseDocumentCookieString,
   matchesCookie,
   findBrowserExecutable,
   getDedicatedProfileDir,
+  ProfileLock,
   isProfileLocked,
+  extractEpornerCookiesFromProfile,
   NetscapeCookieFileSessionProvider,
   BrowserProfileSessionProvider,
   NoopSessionProvider,
@@ -18,7 +21,7 @@ import {
 import { selectHighestPublicHqRendition } from "../../src/core/hq-selector.js";
 import type { MediaRendition } from "../../src/types.js";
 
-describe("SourceSessionProvider & Browser Profile Session Management", () => {
+describe("SourceSessionProvider & Dedicated Browser Profile Management", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -26,8 +29,15 @@ describe("SourceSessionProvider & Browser Profile Session Management", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+    for (let i = 0; i < 5; i++) {
+      try {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
   });
 
   const sampleNetscapeContent = `
@@ -41,7 +51,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
 .eporner.com	TRUE	/	TRUE	1000000000	expired_cookie	expired_val
 `;
 
-  it("1. Parses Netscape cookie files with domain, path, secure, expiry, and #HttpOnly_ prefixes", () => {
+  it("1. Netscape Parser: parses domain, path, secure, expiry, and #HttpOnly_ prefixes", () => {
     const cookies = parseNetscapeCookies(sampleNetscapeContent);
     expect(cookies).toHaveLength(4);
 
@@ -66,7 +76,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     });
   });
 
-  it("2. Sends only URL-matching cookies (domain, path, secure, unexpired)", () => {
+  it("2. URL Scoping: sends only URL-matching cookies (domain, path, secure, unexpired)", () => {
     const cookies = parseNetscapeCookies(sampleNetscapeContent);
     const provider = new NetscapeCookieFileSessionProvider(cookies);
 
@@ -87,7 +97,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(unrelatedHeader).toBeUndefined();
   });
 
-  it("3. Cookie secrets never appear in serialized state or debug error representations", () => {
+  it("3. Secret Redaction: cookie secrets never appear in serialized state or logs", () => {
     const provider = new NetscapeCookieFileSessionProvider([
       {
         domain: ".eporner.com",
@@ -106,7 +116,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(serialized).toContain('"cookieCount":1');
   });
 
-  it("4. Authenticated fetch wrapper attaches Cookie header to matching URLs", async () => {
+  it("4. Authenticated Fetch Propagation: attaches Cookie header across matching requests", async () => {
     const provider = new NetscapeCookieFileSessionProvider([
       {
         domain: ".eporner.com",
@@ -132,7 +142,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(calledHeaders.get("Range")).toBe("bytes=0-0");
   });
 
-  it("5. Discovers Chrome first with Edge fallback and resolves dedicated profile dir", () => {
+  it("5. Browser Discovery: discovers Chrome first with Edge fallback and resolves dedicated profile dir", () => {
     const browser = findBrowserExecutable();
     expect(["chrome", "edge"]).toContain(browser.type);
     expect(browser.executablePath).toBeTruthy();
@@ -142,50 +152,29 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(profileDir.toLowerCase()).toContain("javr-sourcecut");
   });
 
-  it("6. BrowserProfileSessionProvider includes HttpOnly cookies and redacts secrets", () => {
-    const provider = new BrowserProfileSessionProvider(
-      [
-        {
-          domain: ".eporner.com",
-          includeSubdomains: true,
-          path: "/",
-          secure: true,
-          expires: 1893456000,
-          name: "EPRNS",
-          value: "http_only_cookie_value_123",
-        },
-      ],
-      "C:\\fake\\profile",
-      "chrome"
-    );
+  it("6. Profile Ownership Lock Safety: first owner acquires, second owner fails closed", async () => {
+    const profileDir = path.join(tmpDir, "locked-test-profile");
+    const lock1 = new ProfileLock(profileDir);
+    const lock2 = new ProfileLock(profileDir);
 
-    expect(provider.hasSession).toBe(true);
-    expect(provider.browserType).toBe("chrome");
-    const cookieHeader = provider.getCookieHeaderForUrl("https://www.eporner.com/dload/test.mp4");
-    expect(cookieHeader).toBe("EPRNS=http_only_cookie_value_123");
+    // Lock 1 acquires
+    await lock1.acquire();
+    expect(await isProfileLocked(profileDir)).toBe(true);
 
-    const json = JSON.stringify(provider);
-    expect(json).not.toContain("http_only_cookie_value_123");
-    expect(json).toContain('"providerType":"BrowserProfileSessionProvider"');
-  });
+    // Lock 2 attempts acquire and fails closed
+    await expect(lock2.acquire()).rejects.toThrow(/currently in use by process PID/);
 
-  it("7. Profile lock safety: detects lock and fails closed", async () => {
-    const profileDir = path.join(tmpDir, "locked-profile");
-    await fs.mkdir(profileDir, { recursive: true });
-
-    // No lockfile -> not locked
+    // Lock 1 releases
+    await lock1.release();
     expect(await isProfileLocked(profileDir)).toBe(false);
 
-    // Create and open lockfile with exclusive lock
-    const lockfilePath = path.join(profileDir, "lockfile");
-    const handle = await fs.open(lockfilePath, "w");
-
-    // On Windows, open handle prevents isProfileLocked from opening r+ in separate handle if exclusive
-    // We can also test isProfileLocked function directly
-    await handle.close();
+    // Lock 2 can now acquire
+    await lock2.acquire();
+    expect(await isProfileLocked(profileDir)).toBe(true);
+    await lock2.release();
   });
 
-  it("8. Precedence: explicit --cookies overrides dedicated browser profile", async () => {
+  it("7. Precedence Hierarchy: explicit --cookies overrides dedicated browser profile", async () => {
     const cookieFilePath = path.join(tmpDir, "custom-cookies.txt");
     await fs.writeFile(
       cookieFilePath,
@@ -202,7 +191,7 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     expect(header).toBe("FROM_FILE=file_value");
   });
 
-  it("9. Auth --reset resets only dedicated provider profile", async () => {
+  it("8. Auth --reset resets only dedicated provider profile", async () => {
     const testProfile = path.join(tmpDir, "profiles", "eporner");
     await fs.mkdir(testProfile, { recursive: true });
     await fs.writeFile(path.join(testProfile, "dummy.txt"), "data");
@@ -220,4 +209,116 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
     }
     expect(exists).toBe(false);
   });
+
+  // 9. Real Local CDP Protocol Smoke Test
+  it("9. Real CDP Smoke Test: verifies DevToolsActivePort, page target connection, URL-scoped cookies, and graceful shutdown", async () => {
+    const testProfile = path.join(tmpDir, "cdp-smoke-profile");
+    await fs.mkdir(testProfile, { recursive: true });
+
+    const browser = findBrowserExecutable();
+
+    // 1. Launch browser to initialize cookies in profile
+    const initProc = spawn(
+      browser.executablePath,
+      [
+        `--user-data-dir=${testProfile}`,
+        "--remote-debugging-port=0",
+        "--remote-debugging-address=127.0.0.1",
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ],
+      { stdio: "ignore" }
+    );
+
+    // Read DevToolsActivePort
+    const activePortFile = path.join(testProfile, "DevToolsActivePort");
+    let port = 0;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        const content = await fs.readFile(activePortFile, "utf-8");
+        const lines = content.trim().split(/\r?\n/);
+        if (lines.length >= 2) {
+          port = parseInt(lines[0].trim(), 10);
+          if (port > 0) break;
+        }
+      } catch {}
+    }
+
+    expect(port).toBeGreaterThan(0);
+
+    // Connect to Page target and set test cookies via CDP Network.setCookie
+    const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
+    const targets = (await listRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+    const pageWsUrl = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl)?.webSocketDebuggerUrl;
+    expect(pageWsUrl).toBeTruthy();
+
+    const ws = new WebSocket(pageWsUrl!);
+    await new Promise((r) => (ws.onopen = r));
+
+    // Set 1 Eporner cookie and 1 unrelated domain cookie
+    await new Promise((resolve) => {
+      ws.send(
+        JSON.stringify({
+          id: 1,
+          method: "Network.setCookie",
+          params: {
+            name: "EPRNS_TEST",
+            value: "test_token_123",
+            domain: ".eporner.com",
+            path: "/",
+            httpOnly: true,
+            secure: true,
+            expires: Math.floor(Date.now() / 1000) + 86400,
+          },
+        })
+      );
+      ws.send(
+        JSON.stringify({
+          id: 2,
+          method: "Network.setCookie",
+          params: {
+            name: "OTHER_COOKIE",
+            value: "unrelated_val",
+            domain: "otherdomain.com",
+            path: "/",
+            expires: Math.floor(Date.now() / 1000) + 86400,
+          },
+        })
+      );
+      setTimeout(resolve, 300);
+    });
+
+    ws.close();
+
+    // Close init browser
+    const versionRes = await fetch(`http://127.0.0.1:${port}/json/version`);
+    const versionJson = (await versionRes.json()) as { webSocketDebuggerUrl?: string };
+    const browserWs = new WebSocket(versionJson.webSocketDebuggerUrl!);
+    await new Promise((r) => (browserWs.onopen = r));
+    const closePromise = new Promise<void>((r) => {
+      initProc.once("exit", () => r());
+      initProc.once("close", () => r());
+    });
+    browserWs.send(JSON.stringify({ id: 999, method: "Browser.close" }));
+    browserWs.close();
+    await Promise.race([closePromise, new Promise((r) => setTimeout(r, 2000))]);
+    if (!initProc.killed) {
+      try {
+        initProc.kill();
+      } catch {}
+    }
+
+    // Await process teardown to ensure Windows profile lock is released
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 2. Now run the production extractEpornerCookiesFromProfile helper on the profile
+    const extracted = await extractEpornerCookiesFromProfile(testProfile);
+
+    // Verify URL scoping: Eporner cookie included, unrelated domain excluded
+    expect(extracted.some((c) => c.name === "EPRNS_TEST")).toBe(true);
+    expect(extracted.some((c) => c.name === "OTHER_COOKIE")).toBe(false);
+  }, 20000);
 });

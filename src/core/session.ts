@@ -26,6 +26,86 @@ export interface BrowserExecutableInfo {
   executablePath: string;
 }
 
+export interface ProfileLockInfo {
+  pid: number;
+  acquiredAt: string;
+  provider: string;
+}
+
+/**
+ * Checks if a process with the given PID is currently active.
+ */
+export function isPidRunning(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err.code === "EPERM"; // Process exists, insufficient permissions to signal
+  }
+}
+
+/**
+ * Process-scoped lock manager for dedicated browser profiles.
+ * Ensures strict single-owner access and fails closed if profile is currently in use.
+ */
+export class ProfileLock {
+  readonly profileDir: string;
+  readonly lockFilePath: string;
+  private handle: fs.FileHandle | null = null;
+
+  constructor(profileDir: string) {
+    this.profileDir = profileDir;
+    this.lockFilePath = path.join(profileDir, ".javr-profile.lock");
+  }
+
+  async acquire(): Promise<void> {
+    await fs.mkdir(this.profileDir, { recursive: true });
+
+    // Check if active lock file exists with a currently running process
+    try {
+      const content = await fs.readFile(this.lockFilePath, "utf-8");
+      const info: ProfileLockInfo = JSON.parse(content);
+      if (info.pid && isPidRunning(info.pid)) {
+        throw new Error(
+          `Dedicated browser profile at "${this.profileDir}" is currently in use by process PID ${info.pid} (acquired at ${info.acquiredAt}). Please close the running browser or wait for process completion.`
+        );
+      }
+    } catch (err: any) {
+      if (err.message?.includes("currently in use by process PID")) {
+        throw err;
+      }
+      // Stale or non-existent lock is safely overwritten
+    }
+
+    try {
+      this.handle = await fs.open(this.lockFilePath, "w");
+      const lockData: ProfileLockInfo = {
+        pid: process.pid,
+        acquiredAt: new Date().toISOString(),
+        provider: path.basename(this.profileDir),
+      };
+      await this.handle.writeFile(JSON.stringify(lockData, null, 2), "utf-8");
+    } catch (err: any) {
+      throw new Error(
+        `Failed to acquire lock for dedicated browser profile at "${this.profileDir}": ${err.message}`
+      );
+    }
+  }
+
+  async release(): Promise<void> {
+    if (this.handle) {
+      try {
+        await this.handle.close();
+      } catch {}
+      this.handle = null;
+    }
+    try {
+      await fs.rm(this.lockFilePath, { force: true });
+    } catch {}
+  }
+}
+
 /**
  * Discovers installed Google Chrome or Microsoft Edge browser executable paths on the system.
  * Chrome is prioritized first, with Edge as fallback.
@@ -94,18 +174,15 @@ export function getDedicatedProfileDir(provider = "eporner"): string {
 }
 
 /**
- * Checks whether the profile directory is currently locked by a running browser instance.
+ * Checks whether the profile directory is currently locked by javr-sourcecut or another active process.
  */
 export async function isProfileLocked(profileDir: string): Promise<boolean> {
-  const lockfilePath = path.join(profileDir, "lockfile");
+  const lockfilePath = path.join(profileDir, ".javr-profile.lock");
   try {
-    const handle = await fs.open(lockfilePath, "r+");
-    await handle.close();
-    return false;
-  } catch (err: any) {
-    if (err.code === "EBUSY" || err.code === "EPERM" || err.code === "EACCES") {
-      return true;
-    }
+    const content = await fs.readFile(lockfilePath, "utf-8");
+    const info: ProfileLockInfo = JSON.parse(content);
+    return Boolean(info.pid && isPidRunning(info.pid));
+  } catch {
     return false;
   }
 }
@@ -250,7 +327,9 @@ export function matchesCookie(
 
 /**
  * Extracts URL-scoped cookies from a dedicated persistent Chrome/Edge profile via native CDP.
- * Bound strictly to localhost (127.0.0.1).
+ * Uses --remote-debugging-port=0 to bind exclusively to localhost (127.0.0.1) on an OS-assigned port.
+ * Connects to the page target, queries Network.getCookies for explicit target URLs,
+ * and performs graceful browser shutdown via CDP Browser.close.
  */
 export async function extractEpornerCookiesFromProfile(
   profileDir: string,
@@ -266,11 +345,8 @@ export async function extractEpornerCookiesFromProfile(
     return [];
   }
 
-  if (await isProfileLocked(profileDir)) {
-    throw new Error(
-      `Dedicated browser profile at "${profileDir}" is currently locked or in use. Please close the browser window before resuming.`
-    );
-  }
+  const lock = new ProfileLock(profileDir);
+  await lock.acquire();
 
   const browser = findBrowserExecutable();
   const targetUrls = options?.urls ?? [
@@ -279,54 +355,114 @@ export async function extractEpornerCookiesFromProfile(
     "https://www.eporner.com/login/",
   ];
 
-  // Pick an ephemeral port on 127.0.0.1
-  const port = Math.floor(Math.random() * 500) + 9400;
-
-  const proc = spawn(
-    browser.executablePath,
-    [
-      `--user-data-dir=${profileDir}`,
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      "--headless=new",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "about:blank",
-    ],
-    { stdio: "ignore" }
-  );
+  let proc: any = null;
+  let browserWs: WebSocket | null = null;
+  let pageWs: WebSocket | null = null;
 
   try {
-    let versionJson: { webSocketDebuggerUrl?: string } | null = null;
-    const timeout = options?.timeoutMs ?? 6000;
-    const startTime = Date.now();
+    const activePortFile = path.join(profileDir, "DevToolsActivePort");
+    let port = 0;
+    let browserWsPath = "";
 
-    while (Date.now() - startTime < timeout) {
-      await new Promise((r) => setTimeout(r, 150));
-      try {
-        const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-        if (res.ok) {
-          versionJson = (await res.json()) as { webSocketDebuggerUrl?: string };
-          break;
+    const maxRetries = 4;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      await fs.rm(activePortFile, { force: true }).catch(() => {});
+
+      let procExited = false;
+      let exitCode: number | null = null;
+
+      proc = spawn(
+        browser.executablePath,
+        [
+          `--user-data-dir=${profileDir}`,
+          "--remote-debugging-port=0",
+          "--remote-debugging-address=127.0.0.1",
+          "--headless=new",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "about:blank",
+        ],
+        { stdio: "ignore" }
+      );
+
+      proc.once("exit", (code: number | null) => {
+        procExited = true;
+        exitCode = code;
+      });
+
+      const startTime = Date.now();
+      const pollTimeout = 6000;
+      while (Date.now() - startTime < pollTimeout) {
+        if (procExited) {
+          if (exitCode === 21 && attempt < maxRetries - 1) {
+            // Profile in use by closing background process; wait for OS file lock release and retry
+            await new Promise((r) => setTimeout(r, 600));
+            break;
+          }
+          throw new Error(
+            `Browser process exited prematurely with code ${exitCode} (profile in use or launch failure).`
+          );
         }
-      } catch {
-        // continue polling
+        await new Promise((r) => setTimeout(r, 100));
+        try {
+          const content = await fs.readFile(activePortFile, "utf-8");
+          const lines = content.trim().split(/\r?\n/);
+          if (lines.length >= 2) {
+            port = parseInt(lines[0].trim(), 10);
+            browserWsPath = lines[1].trim();
+            if (port > 0) break;
+          }
+        } catch {}
+      }
+
+      if (port > 0) {
+        break;
       }
     }
 
-    if (!versionJson?.webSocketDebuggerUrl) {
-      throw new Error("Failed to connect to browser CDP debugger endpoint on 127.0.0.1.");
+    if (port <= 0) {
+      throw new Error("Failed to discover assigned DevTools port from DevToolsActivePort on 127.0.0.1.");
     }
 
-    const ws = new WebSocket(versionJson.webSocketDebuggerUrl);
+    // Connect to browser target WebSocket
+    const browserWsUrl = `ws://127.0.0.1:${port}${browserWsPath.startsWith("/") ? browserWsPath : "/" + browserWsPath}`;
+    browserWs = new WebSocket(browserWsUrl);
     await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      ws.onerror = (err) => reject(new Error(`WebSocket connection failed: ${err}`));
+      if (!browserWs) return reject(new Error("Browser WebSocket not initialized"));
+      browserWs.onopen = () => resolve();
+      browserWs.onerror = (err) => reject(new Error(`Browser WebSocket error: ${err}`));
     });
 
+    // Discover or create page target
+    const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
+    const targets = (await listRes.json()) as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+    const pageTarget = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+
+    let pageWsUrl = pageTarget?.webSocketDebuggerUrl;
+    if (!pageWsUrl) {
+      // Create new page target via browser target
+      const newPageRes = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" });
+      const newPage = (await newPageRes.json()) as { webSocketDebuggerUrl?: string };
+      pageWsUrl = newPage.webSocketDebuggerUrl;
+    }
+
+    if (!pageWsUrl) {
+      throw new Error("Failed to locate or create a Page target in headless browser.");
+    }
+
+    // Connect to Page target WebSocket
+    pageWs = new WebSocket(pageWsUrl);
+    await new Promise<void>((resolve, reject) => {
+      if (!pageWs) return reject(new Error("Page WebSocket not initialized"));
+      pageWs.onopen = () => resolve();
+      pageWs.onerror = (err) => reject(new Error(`Page WebSocket connection failed: ${err}`));
+    });
+
+    // Query Network.getCookies with explicit URL scope
     const cookiesResponse = await new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("CDP Network.getCookies timed out")), 4000);
-      ws.onmessage = (event) => {
+      if (!pageWs) return reject(new Error("Page WebSocket closed"));
+      pageWs.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data.toString());
           if (msg.id === 101) {
@@ -335,7 +471,7 @@ export async function extractEpornerCookiesFromProfile(
           }
         } catch {}
       };
-      ws.send(
+      pageWs.send(
         JSON.stringify({
           id: 101,
           method: "Network.getCookies",
@@ -343,8 +479,6 @@ export async function extractEpornerCookiesFromProfile(
         })
       );
     });
-
-    ws.close();
 
     const rawCookies: any[] = cookiesResponse?.result?.cookies ?? [];
     const cookies: NetscapeCookie[] = [];
@@ -369,7 +503,38 @@ export async function extractEpornerCookiesFromProfile(
 
     return cookies;
   } finally {
-    proc.kill("SIGKILL");
+    if (pageWs) {
+      try {
+        pageWs.close();
+      } catch {}
+    }
+
+    // Graceful browser shutdown via CDP Browser.close
+    if (browserWs && browserWs.readyState === WebSocket.OPEN) {
+      try {
+        const exitPromise = new Promise<void>((resolve) => {
+          proc.once("exit", () => resolve());
+          proc.once("close", () => resolve());
+        });
+        browserWs.send(JSON.stringify({ id: 999, method: "Browser.close" }));
+        browserWs.close();
+
+        // Await graceful process exit with 2s timeout
+        await Promise.race([
+          exitPromise,
+          new Promise((resolve) => setTimeout(resolve, 2000)),
+        ]);
+      } catch {}
+    }
+
+    // Fallback force kill only if process has not exited
+    try {
+      if (!proc.killed) {
+        proc.kill();
+      }
+    } catch {}
+
+    await lock.release();
   }
 }
 
@@ -585,7 +750,7 @@ export async function resolveSessionProvider(options?: {
     }
   } catch (err: any) {
     // If profile is locked, rethrow lock safety error
-    if (err.message?.includes("locked or in use")) {
+    if (err.message?.includes("currently in use by process PID") || err.message?.includes("Failed to acquire lock")) {
       throw err;
     }
   }
@@ -614,14 +779,10 @@ export async function launchAuthBrowser(
   const profileDir = getDedicatedProfileDir(provider);
   await fs.mkdir(profileDir, { recursive: true });
 
-  if (await isProfileLocked(profileDir)) {
-    throw new Error(
-      `Dedicated browser profile at "${profileDir}" is currently open or locked. Please close any open browser windows for this profile.`
-    );
-  }
+  const lock = new ProfileLock(profileDir);
+  await lock.acquire();
 
   const browser = findBrowserExecutable();
-  const port = Math.floor(Math.random() * 500) + 9400;
 
   console.log(`\nLaunching visible ${browser.type.toUpperCase()} with dedicated profile:`);
   console.log(` Profile: ${profileDir}`);
@@ -632,7 +793,7 @@ export async function launchAuthBrowser(
     browser.executablePath,
     [
       `--user-data-dir=${profileDir}`,
-      `--remote-debugging-port=${port}`,
+      "--remote-debugging-port=0",
       "--remote-debugging-address=127.0.0.1",
       "--no-first-run",
       "--no-default-browser-check",
@@ -641,9 +802,13 @@ export async function launchAuthBrowser(
     { stdio: "ignore" }
   );
 
-  await new Promise<void>((resolve) => {
-    proc.on("close", () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve) => {
+      proc.on("close", () => resolve());
+    });
+  } finally {
+    await lock.release();
+  }
 
   console.log(`\nBrowser session profile saved.`);
   console.log(`Dedicated profile directory: ${profileDir}\n`);
@@ -656,12 +821,13 @@ export async function launchAuthBrowser(
  */
 export async function resetAuthProfile(provider = "eporner"): Promise<string> {
   const profileDir = getDedicatedProfileDir(provider);
-  if (await isProfileLocked(profileDir)) {
-    throw new Error(
-      `Dedicated browser profile at "${profileDir}" is currently open. Please close the browser window before resetting.`
-    );
+  const lock = new ProfileLock(profileDir);
+  await lock.acquire();
+  try {
+    await fs.rm(profileDir, { recursive: true, force: true });
+  } finally {
+    await lock.release();
   }
-  await fs.rm(profileDir, { recursive: true, force: true });
   console.log(`Dedicated ${provider} browser profile reset: ${profileDir}`);
   return profileDir;
 }
