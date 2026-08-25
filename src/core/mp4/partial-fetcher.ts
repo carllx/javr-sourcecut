@@ -22,6 +22,15 @@ export interface PartialFetchResult {
   contentType?: string;
 }
 
+function cancelResponseBody(response: Response) {
+  try {
+    if (response.body) {
+      const reader = response.body.getReader();
+      reader.cancel().catch(() => {});
+    }
+  } catch {}
+}
+
 export async function fetchByteRange(
   url: string,
   range: ByteRange,
@@ -68,44 +77,56 @@ export async function fetchByteRange(
 
   // Strict Fail-Closed Check 1: Must be HTTP 206
   if (response.status === 200) {
-    // Abort reading stream immediately to prevent full file download
-    try {
-      if (response.body) {
-        const reader = response.body.getReader();
-        reader.cancel().catch(() => {});
-      }
-    } catch {}
+    cancelResponseBody(response);
     throw new Http206RequiredError(
       `Server returned HTTP 200 OK instead of 206 Partial Content for range ${range.startByte}-${range.endByte} on ${url}. Byte-range requests are ignored or unsupported by server.`
     );
   }
 
   if (response.status !== 206) {
+    cancelResponseBody(response);
     throw new Http206RequiredError(
       `Partial fetch failed with HTTP ${response.status} ${response.statusText} for ${url}`
     );
   }
 
-  // Strict Fail-Closed Check 2: Must have Content-Range
+  // Strict Fail-Closed Check 2: Content-Range format & bounds
   const contentRange = response.headers.get("content-range");
   if (!contentRange) {
+    cancelResponseBody(response);
     throw new Http206RequiredError(
       `Missing Content-Range header in response from ${url}`
     );
   }
 
-  const crMatch = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+  const crMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
   if (!crMatch) {
+    cancelResponseBody(response);
     throw new Http206RequiredError(
       `Malformed Content-Range header: "${contentRange}" on ${url}`
     );
   }
 
+  if (crMatch[3] === "*") {
+    cancelResponseBody(response);
+    throw new Http206RequiredError(
+      `Content-Range total file size cannot be wildcard (*) on ${url}`
+    );
+  }
+
   const returnedStart = parseInt(crMatch[1], 10);
   const returnedEnd = parseInt(crMatch[2], 10);
-  const totalFileSize = crMatch[3] !== "*" ? parseInt(crMatch[3], 10) : -1;
+  const totalFileSize = parseInt(crMatch[3], 10);
+
+  if (isNaN(totalFileSize) || totalFileSize <= 0) {
+    cancelResponseBody(response);
+    throw new Http206RequiredError(
+      `Invalid total file size "${crMatch[3]}" in Content-Range on ${url}`
+    );
+  }
 
   if (returnedStart !== range.startByte || returnedEnd !== range.endByte) {
+    cancelResponseBody(response);
     throw new Http206RequiredError(
       `Server returned mismatched byte range: expected ${range.startByte}-${range.endByte}, received ${returnedStart}-${returnedEnd}`
     );
@@ -129,6 +150,14 @@ export async function fetchByteRange(
     });
 
     await pipeline(nodeReadable, writeStream);
+
+    // Strict Fail-Closed Check 3: Transferred body bytes must exactly match expected bytes
+    if (transferredBytes !== expectedBytes) {
+      await fsp.rm(partPath, { force: true }).catch(() => {});
+      throw new Http206RequiredError(
+        `Partial fetch body length mismatch: expected ${expectedBytes} bytes, received ${transferredBytes} bytes`
+      );
+    }
 
     await fsp.rename(partPath, destinationPath);
 

@@ -45,10 +45,11 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
         return;
       }
 
-      const match = rangeHeader.match(/bytes=(\d+)-(\d+)/);
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
       if (match) {
         const start = parseInt(match[1], 10);
-        const end = parseInt(match[2], 10);
+        const requestedEnd = match[2] ? parseInt(match[2], 10) : fileBuffer.length - 1;
+        const end = Math.min(requestedEnd, fileBuffer.length - 1);
         const chunk = fileBuffer.subarray(start, end + 1);
 
         res.writeHead(206, {
@@ -80,7 +81,8 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
 
   it("fetches partial bytes and extracts verified clip of 4.0s - 7.5s", async () => {
     const videoUrl = `${serverUrl}/source.mp4`;
-    const index = await probeMP4Index(videoUrl);
+    const probeResult = await probeMP4Index(videoUrl);
+    const index = probeResult.index;
     const targetRange = { startSeconds: 4.0, endSeconds: 7.5 };
     const plan = createByteRangeFetchPlan(index, targetRange, videoUrl);
 
@@ -91,6 +93,7 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
       index,
       outputClipPath,
       workDir: tempDir,
+      cachedHeadBuffer: probeResult.cachedHeadBuffer,
     });
 
     expect(result.outputClipPath).toBe(outputClipPath);

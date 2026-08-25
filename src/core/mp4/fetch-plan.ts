@@ -113,7 +113,11 @@ export function createByteRangeFetchPlan(
   const totalBytesToFetch = mediaBytes;
   const fullFileBytes = index.fileSize;
   const savingsRatio = Math.max(0, 1 - totalBytesToFetch / fullFileBytes);
-  const isProvablePartial = savingsRatio > 0 && totalBytesToFetch < fullFileBytes;
+  const durationSpan = targetTimeRange.endSeconds - targetTimeRange.startSeconds;
+  const isFullSpan =
+    durationSpan >= index.duration - 0.2 ||
+    (startSeconds <= 0.1 && endSeconds >= index.duration - 0.2);
+  const isProvablePartial = !isFullSpan && savingsRatio > 0.05 && totalBytesToFetch < fullFileBytes;
 
   return {
     sourceUrl,

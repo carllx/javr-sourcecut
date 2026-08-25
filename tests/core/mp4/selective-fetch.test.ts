@@ -16,6 +16,7 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
   let server: http.Server;
   let serverUrl: string;
   let fileBuffer: Buffer;
+  let networkRequestLog: { url: string; rangeHeader?: string }[] = [];
 
   beforeAll(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "sc-orchestrator-test-"));
@@ -36,23 +37,32 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
 
     server = http.createServer((req, res) => {
       const url = req.url || "";
-      if (url.includes("server-sends-200")) {
-        res.writeHead(200, { "Content-Length": fileBuffer.length.toString(), "Content-Type": "video/mp4" });
-        res.end(fileBuffer);
-        return;
-      }
-
       const rangeHeader = req.headers.range;
-      if (!rangeHeader) {
-        res.writeHead(200, { "Content-Length": fileBuffer.length.toString(), "Content-Type": "video/mp4" });
+      networkRequestLog.push({ url, rangeHeader });
+
+      if (url.includes("server-sends-200")) {
+        res.writeHead(200, {
+          "Content-Length": fileBuffer.length.toString(),
+          "Content-Type": "video/mp4",
+        });
         res.end(fileBuffer);
         return;
       }
 
-      const match = rangeHeader.match(/bytes=(\d+)-(\d+)/);
+      if (!rangeHeader) {
+        res.writeHead(200, {
+          "Content-Length": fileBuffer.length.toString(),
+          "Content-Type": "video/mp4",
+        });
+        res.end(fileBuffer);
+        return;
+      }
+
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
       if (match) {
         const start = parseInt(match[1], 10);
-        const end = parseInt(match[2], 10);
+        const requestedEnd = match[2] ? parseInt(match[2], 10) : fileBuffer.length - 1;
+        const end = Math.min(requestedEnd, fileBuffer.length - 1);
         const chunk = fileBuffer.subarray(start, end + 1);
 
         res.writeHead(206, {
@@ -82,7 +92,8 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
-  it("executes full selective-fetch tracer slice and verifies output clip with ffprobe", async () => {
+  it("executes full selective-fetch tracer slice, accounts for probe bytes, and verifies output clip with ffprobe", async () => {
+    networkRequestLog = [];
     const videoUrl = `${serverUrl}/video.mp4`;
     const outputClipPath = path.join(tempDir, "clip_10_13.mp4");
 
@@ -91,12 +102,20 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
       timeRange: { startSeconds: 10.0, endSeconds: 13.5 },
       outputClipPath,
       workDir: tempDir,
+      options: { headProbeBytes: 64 * 1024 },
     });
 
     expect(result.outputClipPath).toBe(outputClipPath);
     expect(result.plan.targetTimeRange).toEqual({ startSeconds: 10.0, endSeconds: 13.5 });
-    expect(result.transferredBytes).toBeLessThan(fileBuffer.length * 0.4);
-    expect(result.savingsPercent).toBeGreaterThan(60);
+    expect(result.plan.isProvablePartial).toBe(true);
+
+    // Total transferred network bytes includes head probe + media fetch
+    expect(result.indexProbeResult.headProbeBytesTransferred).toBeGreaterThan(0);
+    expect(result.transferredBytes).toBeGreaterThan(
+      result.indexProbeResult.totalProbeBytesTransferred
+    );
+    expect(result.transferredBytes).toBeLessThan(fileBuffer.length * 0.5);
+    expect(result.savingsPercent).toBeGreaterThan(50);
 
     // ffprobe verified
     expect(result.probeResult.isValid).toBe(true);
@@ -104,6 +123,26 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
     expect(result.probeResult.duration).toBeLessThanOrEqual(4.0);
     expect(result.probeResult.videoStream.codec).toBe("h264");
     expect(result.probeResult.audioStream?.codec).toBe("aac");
+  });
+
+  it("fails closed before media fetch when time range spans full file (not provably partial)", async () => {
+    networkRequestLog = [];
+    const videoUrl = `${serverUrl}/full-span-video.mp4`;
+    const outputClipPath = path.join(tempDir, "failed_full_span.mp4");
+
+    // Full 20s span
+    await expect(
+      runSelectiveFetch({
+        sourceUrl: videoUrl,
+        timeRange: { startSeconds: 0.0, endSeconds: 20.0 },
+        outputClipPath,
+        workDir: tempDir,
+      })
+    ).rejects.toThrow(UnprovablePartialPlanError);
+
+    // Ensure only head probe occurred; NO media payload fetch was performed
+    expect(networkRequestLog.length).toBe(1);
+    expect(networkRequestLog[0].rangeHeader).toMatch(/bytes=0-/);
   });
 
   it("fails closed when remote server returns 200 OK (no silent full-file fallback)", async () => {

@@ -13,6 +13,8 @@ export interface ExtractClipParams {
   index: MP4Index;
   outputClipPath: string;
   workDir: string;
+  cachedHeadBuffer?: Buffer;
+  cachedTailBuffer?: Buffer;
   fetchFn?: typeof fetch;
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
 }
@@ -26,7 +28,16 @@ export interface ExtractClipResult {
 export async function extractClipFromPlan(
   params: ExtractClipParams
 ): Promise<ExtractClipResult> {
-  const { plan, index, outputClipPath, workDir, fetchFn = fetch, onProgress } = params;
+  const {
+    plan,
+    index,
+    outputClipPath,
+    workDir,
+    cachedHeadBuffer,
+    cachedTailBuffer,
+    fetchFn = fetch,
+    onProgress,
+  } = params;
 
   await fs.mkdir(workDir, { recursive: true });
   await fs.mkdir(path.dirname(outputClipPath), { recursive: true });
@@ -50,37 +61,46 @@ export async function extractClipFromPlan(
   );
   totalBytesFetched += mediaFetch.bytesDownloaded;
 
-  // 2. Fetch Header / Container Metadata
-  // Always fetch from byte 0 so ftyp is present
+  // 2. Obtain Header / Container Metadata (use cached or fetch)
   const headEndByte = index.hasMoovAtStart
     ? index.moovOffset + index.moovSize - 1
     : Math.min(index.fileSize - 1, 1024);
 
-  const headFetch = await fetchByteRange(
-    plan.sourceUrl,
-    { startByte: 0, endByte: headEndByte },
-    headPath,
-    { fetchFn, allowOverwrite: true }
-  );
-  totalBytesFetched += headFetch.bytesDownloaded;
-
-  let tailMoovFetchBytes = 0;
-  if (!index.hasMoovAtStart) {
-    const tailFetch = await fetchByteRange(
+  let headBuffer: Buffer;
+  if (cachedHeadBuffer && cachedHeadBuffer.length >= headEndByte + 1) {
+    headBuffer = cachedHeadBuffer.subarray(0, headEndByte + 1);
+  } else {
+    const headFetch = await fetchByteRange(
       plan.sourceUrl,
-      {
-        startByte: index.moovOffset,
-        endByte: Math.min(index.fileSize - 1, index.moovOffset + index.moovSize - 1),
-      },
-      tailMoovPath,
+      { startByte: 0, endByte: headEndByte },
+      headPath,
       { fetchFn, allowOverwrite: true }
     );
-    tailMoovFetchBytes = tailFetch.bytesDownloaded;
-    totalBytesFetched += tailMoovFetchBytes;
+    totalBytesFetched += headFetch.bytesDownloaded;
+    headBuffer = await fs.readFile(headPath);
+  }
+
+  let tailBuffer: Buffer | undefined;
+  if (!index.hasMoovAtStart) {
+    const tailStart = index.moovOffset;
+    const tailEnd = Math.min(index.fileSize - 1, index.moovOffset + index.moovSize - 1);
+    const tailExpectedLength = tailEnd - tailStart + 1;
+
+    if (cachedTailBuffer && cachedTailBuffer.length >= tailExpectedLength) {
+      tailBuffer = cachedTailBuffer;
+    } else {
+      const tailFetch = await fetchByteRange(
+        plan.sourceUrl,
+        { startByte: tailStart, endByte: tailEnd },
+        tailMoovPath,
+        { fetchFn, allowOverwrite: true }
+      );
+      totalBytesFetched += tailFetch.bytesDownloaded;
+      tailBuffer = await fs.readFile(tailMoovPath);
+    }
   }
 
   // 3. Assemble sparse MP4 with original offsets preserved
-  const headBuffer = await fs.readFile(headPath);
   const mediaBuffer = await fs.readFile(mediaChunkPath);
 
   const fileHandle = await fs.open(sparseMp4Path, "w+");
@@ -89,8 +109,7 @@ export async function extractClipFromPlan(
     await fileHandle.write(headBuffer, 0, headBuffer.length, 0);
 
     // If moov is at tail, write tail moov buffer at moovOffset
-    if (!index.hasMoovAtStart) {
-      const tailBuffer = await fs.readFile(tailMoovPath);
+    if (!index.hasMoovAtStart && tailBuffer) {
       await fileHandle.write(tailBuffer, 0, tailBuffer.length, index.moovOffset);
     }
 
