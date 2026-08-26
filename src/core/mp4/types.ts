@@ -153,8 +153,10 @@ export interface TransferLedger {
   transactions: LedgerChunkEntry[];
   cumulativeHistoricalSpentBytes?: number; // Monotonic total of all network bytes spent for this logical transfer
   cumulativeFailedBytes: number;
+  estimatedBudgetBytes?: number; // Persisted envelope: estimated total bytes for the logical transfer
   updatedAt: string;
 }
+
 
 export interface TransferBudgetOptions {
   budgetMultiplier?: number; // default 1.5, >= 1.0

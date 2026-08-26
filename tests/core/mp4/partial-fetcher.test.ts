@@ -91,6 +91,43 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
         return;
       }
 
+      if (url.includes("missing-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          // No ETag header sent
+        });
+        res.end(chunk);
+        return;
+      }
+
+      if (url.includes("weak-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": 'W/"weak-etag-value"',
+        });
+        res.end(chunk);
+        return;
+      }
+
+      if (url.includes("different-strong-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": '"different-strong-etag"',
+        });
+        res.end(chunk);
+        return;
+      }
+
+
       const rangeHeader = req.headers.range;
       if (!rangeHeader) {
         res.writeHead(200, {
@@ -405,7 +442,88 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
         })
       ).rejects.toThrow(RenditionVersionMismatchError);
     });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is missing", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "missing_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_missing.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/missing-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is weak (W/...)", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "weak_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_weak.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/weak-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is different strong ETag", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "different_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_diff.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/different-strong-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("passes when expectedEtag is strong and chunk response ETag is exactly equal", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+
+      const testDir = path.join(tempDir, "matching_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_matching.bin");
+
+      const result = await fetchByteRange(
+        `${serverUrl}/valid-video.mp4`, // server returns "mock-strong-etag"
+        { startByte: 0, endByte: 9 },
+        destPath,
+        {
+          expectedEtag: '"mock-strong-etag"',
+        }
+      );
+
+      expect(result.bytesDownloaded).toBe(10);
+      expect(result.etag).toBe('"mock-strong-etag"');
+    });
   });
 });
+
 
 

@@ -144,6 +144,42 @@ describe("Bounded MP4 Index Prober", () => {
         return;
       }
 
+      if (url.includes("cap-vs-head-etag-mismatch")) {
+        const etag = rangeHeader === "bytes=0-0" ? '"cap-strong-v1"' : '"head-strong-v2"';
+        const match = rangeHeader ? rangeHeader.match(/bytes=(\d+)-(\d*)/) : null;
+        const start = match ? parseInt(match[1], 10) : 0;
+        const requestedEnd = match && match[2] ? parseInt(match[2], 10) : totalSize - 1;
+        const end = Math.min(requestedEnd, totalSize - 1);
+        const chunk = targetBuffer.subarray(start, end + 1);
+        res.writeHead(206, {
+          "Content-Type": "video/mp4",
+          "Content-Range": `bytes ${start}-${end}/${totalSize}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": etag,
+        });
+        res.end(chunk);
+        return;
+      }
+
+      if (url.includes("head-vs-tail-etag-mismatch")) {
+        const isTail = rangeHeader && !rangeHeader.startsWith("bytes=0-");
+        const etag = isTail ? '"tail-strong-v2"' : '"head-strong-v1"';
+        const match = rangeHeader ? rangeHeader.match(/bytes=(\d+)-(\d*)/) : null;
+        const start = match ? parseInt(match[1], 10) : 0;
+        const requestedEnd = match && match[2] ? parseInt(match[2], 10) : totalSize - 1;
+        const end = Math.min(requestedEnd, totalSize - 1);
+        const chunk = targetBuffer.subarray(start, end + 1);
+        res.writeHead(206, {
+          "Content-Type": "video/mp4",
+          "Content-Range": `bytes ${start}-${end}/${totalSize}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": etag,
+        });
+        res.end(chunk);
+        return;
+      }
+
+
 
 
       if (!rangeHeader) {
@@ -267,5 +303,40 @@ describe("Bounded MP4 Index Prober", () => {
       probeMP4Index(`${serverUrl}/conflicting-head-total.mp4`)
     ).rejects.toThrow(RenditionVersionMismatchError);
   });
+
+  it("fails closed with RenditionVersionMismatchError when capability vs head strong ETags mismatch", async () => {
+    const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+    await expect(
+      probeMP4Index(`${serverUrl}/cap-vs-head-etag-mismatch.mp4`)
+    ).rejects.toThrow(RenditionVersionMismatchError);
+  });
+
+  it("fails closed with RenditionVersionMismatchError when head vs tail strong ETags mismatch", async () => {
+    const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+    await expect(
+      probeMP4Index(`${serverUrl}/head-vs-tail-etag-mismatch.mp4`, {
+        headProbeBytes: 1024,
+        tailProbeBytes: 64 * 1024,
+      })
+    ).rejects.toThrow(RenditionVersionMismatchError);
+  });
+
+  it("fails prospectively with BudgetExceededError before issuing probe requests when budget is exhausted", async () => {
+    const { TransferBudgetTracker } = await import("../../../src/core/mp4/budget.js");
+    const { BudgetExceededError } = await import("../../../src/core/mp4/types.js");
+
+    const budgetTracker = new TransferBudgetTracker({
+      estimatedBytes: 1000,
+      budgetMultiplier: 1.5, // max: 1500
+      historicalTransferredBytes: 1500, // already fully exhausted!
+    });
+
+    await expect(
+      probeMP4Index(`${serverUrl}/faststart.mp4`, {
+        budgetTracker,
+      })
+    ).rejects.toThrow(BudgetExceededError);
+  });
 });
+
 

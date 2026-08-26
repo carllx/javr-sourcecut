@@ -62,6 +62,10 @@ export class TransferLedgerManager {
     return this._ledger?.cumulativeHistoricalSpentBytes || 0;
   }
 
+  get estimatedBudgetBytes(): number | undefined {
+    return this._ledger?.estimatedBudgetBytes;
+  }
+
   /**
    * Cumulative historical network bytes across all successful, failed, and probe attempts for this logical transfer.
    * Monotonically persists across restarts and cache invalidations.
@@ -91,6 +95,19 @@ export class TransferLedgerManager {
     await this.saveLedger();
   }
 
+  /**
+   * Persists or updates the estimated total budget bytes envelope for this logical transfer.
+   */
+  async updateEstimatedBudgetBytes(estimatedBudgetBytes: number): Promise<void> {
+    if (!estimatedBudgetBytes || estimatedBudgetBytes <= 0) return;
+    if (!this._ledger) {
+      await this.loadOrCreateLedger();
+    }
+    if (this.ledger.estimatedBudgetBytes === estimatedBudgetBytes) return;
+    this.ledger.estimatedBudgetBytes = estimatedBudgetBytes;
+    await this.saveLedger();
+  }
+
   async loadOrCreateLedger(): Promise<TransferLedger> {
     await fsp.mkdir(this.workspaceDir, { recursive: true });
     await fsp.mkdir(this.chunksDir, { recursive: true });
@@ -111,10 +128,12 @@ export class TransferLedgerManager {
         0
       ) + (existingLedger?.cumulativeFailedBytes || 0));
     const preservedFailedBytes = existingLedger?.cumulativeFailedBytes || 0;
+    const preservedEstimatedBudgetBytes = existingLedger?.estimatedBudgetBytes;
 
     if (existingLedger && existingLedger.logicalRenditionId === this.logicalRenditionId) {
       this._ledger = existingLedger;
       this._ledger.cumulativeHistoricalSpentBytes = preservedHistoricalSpentBytes;
+      this._ledger.estimatedBudgetBytes = preservedEstimatedBudgetBytes;
 
       // Check if remote strong ETag has changed
       const existingEtag = existingLedger.rendition.etag;
@@ -125,11 +144,12 @@ export class TransferLedgerManager {
         isStrongEtag(currentEtag) &&
         existingEtag !== currentEtag
       ) {
-        // Strong ETag changed -> invalidate cached chunk transactions, but PRESERVE monotonic historical spend
+        // Strong ETag changed -> invalidate cached chunk transactions, but PRESERVE monotonic historical spend & budget envelope
         this._ledger.transactions = [];
         this._ledger.rendition = this.rendition;
         this._ledger.cumulativeHistoricalSpentBytes = preservedHistoricalSpentBytes;
         this._ledger.cumulativeFailedBytes = preservedFailedBytes;
+        this._ledger.estimatedBudgetBytes = preservedEstimatedBudgetBytes;
         this._ledger.updatedAt = new Date().toISOString();
         await this.saveLedger();
       } else if (currentEtag && existingLedger.rendition.etag !== currentEtag) {
@@ -145,6 +165,7 @@ export class TransferLedgerManager {
         transactions: [],
         cumulativeHistoricalSpentBytes: preservedHistoricalSpentBytes,
         cumulativeFailedBytes: preservedFailedBytes,
+        estimatedBudgetBytes: preservedEstimatedBudgetBytes,
         updatedAt: new Date().toISOString(),
       };
       await this.saveLedger();
@@ -152,6 +173,7 @@ export class TransferLedgerManager {
 
     return this._ledger;
   }
+
 
   /**
    * Updates remote rendition ETag if observed during index probing or HTTP response.

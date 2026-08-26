@@ -5,13 +5,16 @@ import {
   UnprovablePartialPlanError,
 } from "./types.js";
 import { parseMP4Buffer } from "./box-parser.js";
-
+import { isStrongEtag, type TransferLedgerManager } from "./ledger.js";
+import type { TransferBudgetTracker } from "./budget.js";
 
 export interface IndexProbeOptions {
   fetchFn?: typeof fetch;
   headProbeBytes?: number;
   tailProbeBytes?: number;
   headers?: Record<string, string>;
+  budgetTracker?: TransferBudgetTracker;
+  ledgerManager?: TransferLedgerManager;
 }
 
 function cancelResponseBody(response: Response) {
@@ -34,6 +37,9 @@ export async function probeMP4Index(
   // =========================================================================
   // Stage A: 1-Byte Capability & File Size Probe (Range: bytes=0-0)
   // =========================================================================
+  // Prospective budget check before capability probe
+  options.budgetTracker?.checkProspectiveBudget(1);
+
   const capRes = await fetchFn(url, {
     headers: {
       Range: "bytes=0-0",
@@ -96,6 +102,8 @@ export async function probeMP4Index(
     );
   }
 
+  const capEtag = capRes.headers.get("etag") || undefined;
+
   const capArrayBuffer = await capRes.arrayBuffer();
   const capBuffer = Buffer.from(capArrayBuffer);
   if (capBuffer.length !== 1) {
@@ -106,18 +114,32 @@ export async function probeMP4Index(
 
   const capabilityProbeBytesTransferred = capBuffer.length;
 
+  // Record Stage A spend incrementally
+  options.budgetTracker?.recordBytes(capabilityProbeBytesTransferred);
+  if (options.ledgerManager) {
+    await options.ledgerManager.recordNetworkSpend(capabilityProbeBytesTransferred);
+    await options.ledgerManager.updateAuthoritativeFileSize(fileSize);
+    if (capEtag) {
+      await options.ledgerManager.updateRenditionEtag(capEtag);
+    }
+  }
+
   // =========================================================================
   // Stage B: Bounded Head Probe
   // Calculate head probe boundary strictly < fileSize (never download full file)
   // =========================================================================
   const headBudget = Math.min(configuredHeadProbeBytes, Math.floor(fileSize * 0.5));
   const headEnd = Math.max(0, headBudget - 1);
+  const expectedHeadLength = headEnd + 1;
 
   if (headEnd >= fileSize - 1 || headBudget < 8) {
     throw new UnprovablePartialPlanError(
       `File size (${fileSize}B) is too small to execute a bounded partial head probe without requesting the full file. Refusing full-file probe.`
     );
   }
+
+  // Prospective budget check before head probe
+  options.budgetTracker?.checkProspectiveBudget(expectedHeadLength);
 
   const headRes = await fetchFn(url, {
     headers: {
@@ -163,10 +185,9 @@ export async function probeMP4Index(
   if (returnedHeadTotal !== fileSize) {
     cancelResponseBody(headRes);
     throw new RenditionVersionMismatchError(
-      `Head probe returned conflicting total file size: ${returnedHeadTotal} vs initial ${fileSize}`
+      `Head probe returned conflicting total file size: ${returnedHeadTotal} vs capability probe ${fileSize} on ${url}`
     );
   }
-
 
   if (returnedHeadStart !== 0 || returnedHeadEnd !== headEnd) {
     cancelResponseBody(headRes);
@@ -175,9 +196,18 @@ export async function probeMP4Index(
     );
   }
 
+  const headEtag = headRes.headers.get("etag") || undefined;
+
+  // Source-version strong ETag consistency: capability vs head
+  if (isStrongEtag(capEtag) && isStrongEtag(headEtag) && capEtag !== headEtag) {
+    cancelResponseBody(headRes);
+    throw new RenditionVersionMismatchError(
+      `Head probe returned conflicting strong ETag: "${headEtag}" vs capability probe strong ETag "${capEtag}" on ${url}`
+    );
+  }
+
   const headArrayBuffer = await headRes.arrayBuffer();
   const headBuffer = Buffer.from(headArrayBuffer);
-  const expectedHeadLength = headEnd + 1;
 
   if (headBuffer.length !== expectedHeadLength) {
     throw new Http206RequiredError(
@@ -186,7 +216,22 @@ export async function probeMP4Index(
   }
 
   const headProbeBytesTransferred = headBuffer.length;
-  const observedEtag = headRes.headers.get("etag") || undefined;
+
+  // Record Stage B spend incrementally
+  options.budgetTracker?.recordBytes(headProbeBytesTransferred);
+  if (options.ledgerManager) {
+    await options.ledgerManager.recordNetworkSpend(headProbeBytesTransferred);
+  }
+
+  const establishedEtag =
+    (isStrongEtag(capEtag) ? capEtag : undefined) ||
+    (isStrongEtag(headEtag) ? headEtag : undefined) ||
+    headEtag ||
+    capEtag;
+
+  if (options.ledgerManager && establishedEtag) {
+    await options.ledgerManager.updateRenditionEtag(establishedEtag);
+  }
 
   // Try parsing from head probe buffer
   try {
@@ -197,7 +242,7 @@ export async function probeMP4Index(
       headProbeBytesTransferred,
       tailProbeBytesTransferred: 0,
       totalProbeBytesTransferred: capabilityProbeBytesTransferred + headProbeBytesTransferred,
-      etag: observedEtag,
+      etag: establishedEtag,
       cachedHead: {
         buffer: headBuffer,
         range: { startByte: 0, endByte: headEnd },
@@ -209,7 +254,6 @@ export async function probeMP4Index(
     }
   }
 
-
   // =========================================================================
   // Stage C: Bounded Tail Probe (if moov not in head)
   // Ensure tail probe does not overlap head probe and aggregate probes stay strictly within partial budget
@@ -217,6 +261,7 @@ export async function probeMP4Index(
   const tailBudget = Math.min(configuredTailProbeBytes, Math.floor(fileSize * 0.5));
   const tailStart = fileSize - tailBudget;
   const tailEnd = fileSize - 1;
+  const expectedTailBodyLength = tailEnd - tailStart + 1;
 
   const prospectiveProbeBytes =
     capabilityProbeBytesTransferred + headProbeBytesTransferred + tailBudget;
@@ -233,6 +278,9 @@ export async function probeMP4Index(
       `Cannot execute bounded tail probe for ${url}: aggregate prospective probe transfer (${prospectiveProbeBytes}B) would consume ${(prospectiveProbeRatio * 100).toFixed(1)}% of total file size (${fileSize}B), violating the no-full-file probe invariant and partial budget threshold. Refusing full-file probe.`
     );
   }
+
+  // Prospective budget check before tail probe
+  options.budgetTracker?.checkProspectiveBudget(expectedTailBodyLength);
 
   const tailRes = await fetchFn(url, {
     headers: {
@@ -278,10 +326,9 @@ export async function probeMP4Index(
   if (returnedTailTotal !== fileSize) {
     cancelResponseBody(tailRes);
     throw new RenditionVersionMismatchError(
-      `Tail probe returned conflicting total file size: ${returnedTailTotal} vs initial ${fileSize}`
+      `Tail probe returned conflicting total file size: ${returnedTailTotal} vs initial ${fileSize} on ${url}`
     );
   }
-
 
   if (returnedTailStart !== tailStart || returnedTailEnd !== tailEnd) {
     cancelResponseBody(tailRes);
@@ -290,9 +337,22 @@ export async function probeMP4Index(
     );
   }
 
+  const tailEtag = tailRes.headers.get("etag") || undefined;
+
+  // Source-version strong ETag consistency: established probe strong ETag vs tail
+  const priorStrongEtag =
+    (isStrongEtag(capEtag) ? capEtag : undefined) ||
+    (isStrongEtag(headEtag) ? headEtag : undefined);
+
+  if (priorStrongEtag && isStrongEtag(tailEtag) && tailEtag !== priorStrongEtag) {
+    cancelResponseBody(tailRes);
+    throw new RenditionVersionMismatchError(
+      `Tail probe returned conflicting strong ETag: "${tailEtag}" vs established probe strong ETag "${priorStrongEtag}" on ${url}`
+    );
+  }
+
   const tailArrayBuffer = await tailRes.arrayBuffer();
   const tailBuffer = Buffer.from(tailArrayBuffer);
-  const expectedTailBodyLength = tailEnd - tailStart + 1;
 
   if (tailBuffer.length !== expectedTailBodyLength) {
     throw new Http206RequiredError(
@@ -301,6 +361,22 @@ export async function probeMP4Index(
   }
 
   const tailProbeBytesTransferred = tailBuffer.length;
+
+  // Record Stage C spend incrementally
+  options.budgetTracker?.recordBytes(tailProbeBytesTransferred);
+  if (options.ledgerManager) {
+    await options.ledgerManager.recordNetworkSpend(tailProbeBytesTransferred);
+  }
+
+  const finalEffectiveEtag =
+    priorStrongEtag ||
+    (isStrongEtag(tailEtag) ? tailEtag : undefined) ||
+    tailEtag ||
+    establishedEtag;
+
+  if (options.ledgerManager && finalEffectiveEtag) {
+    await options.ledgerManager.updateRenditionEtag(finalEffectiveEtag);
+  }
 
   try {
     const index = parseMP4Buffer(tailBuffer, fileSize, tailStart);
@@ -311,7 +387,7 @@ export async function probeMP4Index(
       tailProbeBytesTransferred,
       totalProbeBytesTransferred:
         capabilityProbeBytesTransferred + headProbeBytesTransferred + tailProbeBytesTransferred,
-      etag: tailRes.headers.get("etag") || observedEtag,
+      etag: finalEffectiveEtag,
       cachedHead: {
         buffer: headBuffer,
         range: { startByte: 0, endByte: headEnd },
@@ -322,9 +398,9 @@ export async function probeMP4Index(
       },
     };
   } catch (err: any) {
-
     throw new UnprovablePartialPlanError(
       `Could not locate complete moov atom within bounded head (${headBudget}B) or tail (${tailBudget}B) probes for ${url}. Refusing unbounded full-file download.`
     );
   }
 }
+

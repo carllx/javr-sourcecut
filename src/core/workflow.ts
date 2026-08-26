@@ -17,7 +17,9 @@ import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
 import { loadAndNormalizeLlc, findLlcFileInWorkspace } from "./llc.js";
 import { runSelectiveFetch, type SelectiveFetchResult } from "./mp4/selective-fetch.js";
+import { normalizeCodecName } from "./mp4/extractor.js";
 import type { TimeRange } from "./mp4/types.js";
+
 import type { JobState } from "../types.js";
 
 export interface TracerSliceParams {
@@ -295,23 +297,14 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   );
 
   // 8. Enforce authoritative ffprobe invariants before completing job
-  const normalizeCodec = (c?: string) => {
-    if (!c) return "";
-    const lower = c.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (lower === "av01" || lower === "av1") return "av1";
-    if (lower === "avc1" || lower === "h264" || lower === "x264") return "h264";
-    if (lower === "h265" || lower === "hevc" || lower === "hev1" || lower === "hvc1") return "hevc";
-    if (lower === "vp9" || lower === "vp09") return "vp9";
-    return lower;
-  };
-
-  const actualCodec = normalizeCodec(verifiedProbe.videoStream.codec);
-  const expectedCodec = normalizeCodec(selectedHq.vcodec);
+  const actualCodec = normalizeCodecName(verifiedProbe.videoStream.codec);
+  const expectedCodec = normalizeCodecName(selectedHq.vcodec);
   if (actualCodec !== expectedCodec) {
     throw new Error(
       `Output video codec mismatch: expected "${selectedHq.vcodec}" (${expectedCodec}), but ffprobe verified "${verifiedProbe.videoStream.codec}" (${actualCodec}). Refusing to complete job.`
     );
   }
+
 
   if (verifiedProbe.videoStream.height !== selectedHq.height) {
     throw new Error(

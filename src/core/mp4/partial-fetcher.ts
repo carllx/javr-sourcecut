@@ -184,11 +184,29 @@ export async function fetchByteRange(
     );
   }
 
-  // Strict Fail-Closed Check 4: Strong ETag match
+  // Strict Fail-Closed Check 4: Authoritative strong ETag must be present and match on every chunk
   const responseEtag = response.headers.get("etag") || undefined;
-  if (
+  if (options.expectedEtag && isStrongEtag(options.expectedEtag)) {
+    if (!responseEtag) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Authoritative strong ETag "${options.expectedEtag}" is required, but chunk response for ${url} (bytes ${range.startByte}-${range.endByte}) is missing an ETag header.`
+      );
+    }
+    if (!isStrongEtag(responseEtag)) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Authoritative strong ETag "${options.expectedEtag}" is required, but chunk response for ${url} (bytes ${range.startByte}-${range.endByte}) returned a weak ETag: "${responseEtag}".`
+      );
+    }
+    if (responseEtag !== options.expectedEtag) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Strong ETag changed during transfer for ${url}: expected "${options.expectedEtag}", received "${responseEtag}". Aborting without assembly.`
+      );
+    }
+  } else if (
     options.expectedEtag &&
-    isStrongEtag(options.expectedEtag) &&
     responseEtag &&
     isStrongEtag(responseEtag) &&
     responseEtag !== options.expectedEtag
@@ -198,6 +216,7 @@ export async function fetchByteRange(
       `Strong ETag changed during transfer: expected ${options.expectedEtag}, received ${responseEtag} from ${url}`
     );
   }
+
 
   if (!response.body) {
     throw new Error(`Response body is empty for range ${range.startByte}-${range.endByte} on ${url}`);

@@ -68,12 +68,35 @@ export async function runSelectiveFetch(
     throw new UnprovablePartialPlanError("No target time range specified for selective fetch.");
   }
 
-  // 1. Probe MP4 Index (2-stage capability + bounded head & tail probe)
-  const indexProbeResult = await probeMP4Index(sourceUrl, options);
+  // 1. Initialize Transfer Ledger & Pre-Probe Budget Tracker before issuing probe traffic
+  let ledgerManager = options.ledgerManager;
+  if (!ledgerManager && renditionIdentity) {
+    ledgerManager = new TransferLedgerManager({
+      workspaceDir: workDir,
+      rendition: renditionIdentity,
+    });
+    await ledgerManager.loadOrCreateLedger();
+  }
+
+  let budgetTracker: TransferBudgetTracker | undefined = undefined;
+  if (ledgerManager && ledgerManager.estimatedBudgetBytes) {
+    budgetTracker = new TransferBudgetTracker({
+      estimatedBytes: ledgerManager.estimatedBudgetBytes,
+      budgetMultiplier: options.budgetMultiplier ?? 1.5,
+      historicalTransferredBytes: ledgerManager.cumulativeHistoricalSpentBytes,
+    });
+  }
+
+  // 2. Probe MP4 Index (2-stage capability + bounded head & tail probe with incremental budget & spend tracking)
+  const indexProbeResult = await probeMP4Index(sourceUrl, {
+    ...options,
+    budgetTracker,
+    ledgerManager,
+  });
   const index = indexProbeResult.index;
   const fullFileBytes = index.fileSize;
 
-  // 2. Build structurally proven Fetch Plan
+  // 3. Build structurally proven Fetch Plan
   const multiPlan =
     targetSegments.length > 1
       ? createMultiSegmentFetchPlan(index, targetSegments, sourceUrl)
@@ -85,7 +108,7 @@ export async function runSelectiveFetch(
 
   const activePlan: ByteRangeFetchPlan | MultiSegmentFetchPlan = multiPlan || singlePlan;
 
-  // 3. Pre-Fetch Network Budget Estimation
+  // 4. Pre-Fetch Network Budget Estimation
   const headEndByte = index.hasMoovAtStart
     ? index.moovOffset + index.moovSize - 1
     : Math.min(index.fileSize - 1, 1024);
@@ -118,7 +141,7 @@ export async function runSelectiveFetch(
 
   const expectedTotalSavingsRatio = 1 - expectedTotalNetworkBytes / fullFileBytes;
 
-  // 4. Strict Pre-Fetch Fail-Closed Budget Enforcement:
+  // Strict Pre-Fetch Fail-Closed Budget Enforcement:
   // Must be provably partial across TOTAL expected network transfer before fetching media payload
   if (
     !activePlan.isProvablePartial ||
@@ -133,39 +156,23 @@ export async function runSelectiveFetch(
     );
   }
 
-  // 5. Initialize Transfer Ledger & Budget Tracker
-  let ledgerManager = options.ledgerManager;
-  if (!ledgerManager && renditionIdentity) {
-    const populatedIdentity = {
-      ...renditionIdentity,
-      fullFileBytes, // Authoritative full file size resolved from HTTP 206 Content-Range / index probe
-      etag: renditionIdentity.etag || indexProbeResult.etag,
-    };
-    ledgerManager = new TransferLedgerManager({
-      workspaceDir: workDir,
-      rendition: populatedIdentity,
-    });
-    await ledgerManager.loadOrCreateLedger();
-  }
-
-  let priorHistoricalBytes = 0;
+  // 5. Update Ledger Envelope & Authoritative Identity
   if (ledgerManager) {
-    priorHistoricalBytes = ledgerManager.cumulativeHistoricalSpentBytes;
-    await ledgerManager.recordNetworkSpend(indexProbeResult.totalProbeBytesTransferred);
+    await ledgerManager.updateEstimatedBudgetBytes(expectedTotalNetworkBytes);
     await ledgerManager.updateAuthoritativeFileSize(fullFileBytes);
     if (indexProbeResult.etag) {
       await ledgerManager.updateRenditionEtag(indexProbeResult.etag);
     }
   }
 
-  const budgetTracker = new TransferBudgetTracker({
-    estimatedBytes: expectedTotalNetworkBytes,
-    budgetMultiplier: options.budgetMultiplier ?? 1.5,
-    historicalTransferredBytes: priorHistoricalBytes,
-  });
+  if (!budgetTracker) {
+    budgetTracker = new TransferBudgetTracker({
+      estimatedBytes: expectedTotalNetworkBytes,
+      budgetMultiplier: options.budgetMultiplier ?? 1.5,
+      historicalTransferredBytes: ledgerManager?.cumulativeHistoricalSpentBytes || 0,
+    });
+  }
 
-  // Record current run probe bytes in budget tracker
-  budgetTracker.recordBytes(indexProbeResult.totalProbeBytesTransferred);
 
   // 6. Execute partial HTTP 206 fetch and extract clip via FFmpeg
   const extractResult = await extractClipFromPlan({

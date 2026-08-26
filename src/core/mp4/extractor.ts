@@ -300,9 +300,9 @@ export function assertConcatStreamCompatibility(
   segmentIndex: number
 ): void {
   // 1. Video codec
-  const c0 = normalizeCodecName(seg0.videoStream.codec);
-  const cI = normalizeCodecName(segI.videoStream.codec);
-  if (c0 !== cI) {
+  const videoCodec0 = normalizeCodecName(seg0.videoStream.codec);
+  const videoCodecI = normalizeCodecName(segI.videoStream.codec);
+  if (videoCodec0 !== videoCodecI) {
     throw new IncompatibleConcatSegmentsError(
       `Incompatible video codec between segments: segment 0 has "${seg0.videoStream.codec}", segment ${segmentIndex} has "${segI.videoStream.codec}". Refusing to concat without transcoding.`
     );
@@ -335,13 +335,14 @@ export function assertConcatStreamCompatibility(
 
   // 5. Audio stream parameters (if present)
   if (seg0.audioStream && segI.audioStream) {
-    const a0 = normalizeCodecName(seg0.audioStream.codec);
-    const aI = normalizeCodecName(segI.audioStream.codec);
-    if (a0 !== aI) {
+    const audioCodec0 = normalizeCodecName(seg0.audioStream.codec);
+    const audioCodecI = normalizeCodecName(segI.audioStream.codec);
+    if (audioCodec0 !== audioCodecI) {
       throw new IncompatibleConcatSegmentsError(
         `Incompatible audio codec between segments: segment 0 has "${seg0.audioStream.codec}", segment ${segmentIndex} has "${segI.audioStream.codec}". Refusing to concat without transcoding.`
       );
     }
+
     if (seg0.audioStream.channels !== segI.audioStream.channels) {
       throw new IncompatibleConcatSegmentsError(
         `Incompatible audio channels between segments: segment 0 has ${seg0.audioStream.channels} channels, segment ${segmentIndex} has ${segI.audioStream.channels} channels. Refusing to concat without transcoding.`
