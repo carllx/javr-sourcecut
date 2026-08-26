@@ -49,8 +49,11 @@ export async function checkDuplicatePreflight(
     throw err;
   }
 
-  const candidateAliases = new Set(
-    (identity.searchAliases || []).map((s) => s.toLowerCase().trim())
+  const candidateWorkAliases = new Set(
+    (identity.workSearchAliases || [
+      identity.canonicalCatalogId,
+      identity.providerAssetId,
+    ].filter(Boolean) as string[]).map((s) => s.toLowerCase().trim())
   );
 
   for (const entry of entries) {
@@ -101,12 +104,32 @@ export async function checkDuplicatePreflight(
     ) {
       matchedReason = `Matched canonical catalog ID: ${identity.canonicalCatalogId}`;
     }
-    // 4. Strong matching: Structured Search Aliases intersection
-    else if (job.identity?.searchAliases && job.identity.searchAliases.length > 0) {
-      const existingAliases = job.identity.searchAliases.map((s) => s.toLowerCase().trim());
-      const commonAlias = existingAliases.find((a) => a.length > 2 && candidateAliases.has(a));
-      if (commonAlias) {
-        matchedReason = `Matched search alias: "${commonAlias}"`;
+    // 4. Strong matching: Structured Work Search Aliases (catalog variants, provider IDs)
+    // NOTE: Performer names / performer aliases are search/indexing clues only and MUST NOT block
+    else {
+      const existingWorkAliases: string[] = [];
+      if (job.identity?.workSearchAliases && job.identity.workSearchAliases.length > 0) {
+        existingWorkAliases.push(...job.identity.workSearchAliases);
+      } else {
+        // Fallback for legacy job records: only extract catalog and provider ID, never performer names
+        if (job.identity?.canonicalCatalogId) {
+          existingWorkAliases.push(job.identity.canonicalCatalogId);
+          existingWorkAliases.push(job.identity.canonicalCatalogId.toLowerCase());
+        }
+        if (job.identity?.catalogCandidates) {
+          for (const c of job.identity.catalogCandidates) {
+            existingWorkAliases.push(c.canonical, c.hyphenated);
+          }
+        }
+        if (job.providerAssetId) {
+          existingWorkAliases.push(job.providerAssetId);
+        }
+      }
+
+      const normalizedExisting = existingWorkAliases.map((s) => s.toLowerCase().trim());
+      const commonWorkAlias = normalizedExisting.find((a) => a.length > 2 && candidateWorkAliases.has(a));
+      if (commonWorkAlias) {
+        matchedReason = `Matched work catalog/asset alias: "${commonWorkAlias}"`;
       }
     }
 

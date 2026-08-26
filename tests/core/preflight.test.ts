@@ -174,6 +174,40 @@ describe("Duplicate Preflight Hardening", () => {
     expect(result.status).toBe("completed");
   });
 
+  it("does not block different works featuring the same performer or performer aliases (not-seen)", async () => {
+    // Existing job featuring Yua Mikami in SSNI-888
+    const existingDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "assetA",
+      sourceUrl: "https://www.eporner.com/video-assetA/ssni-888-yua-mikami/",
+      rawTitle: "SSNI-888 Yua Mikami",
+      declaredPerformers: [
+        { preferredName: "Yua Mikami", aliases: ["Mikami Yua", "Momona Kito"] },
+      ],
+      renditions: [sampleRendition],
+    };
+
+    const job = await createJob(tempRoot, existingDescriptor, sampleRendition);
+    job.status = "completed";
+    await saveJob(job);
+
+    // Incoming work featuring the same performer and performer alias but DIFFERENT catalog ID and provider asset ID
+    const incomingDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "assetB",
+      sourceUrl: "https://www.eporner.com/video-assetB/ssni-999-mikami-yua/",
+      rawTitle: "SSNI-999 Mikami Yua",
+      declaredPerformers: [
+        { preferredName: "Yua Mikami", aliases: ["Mikami Yua"] },
+      ],
+      renditions: [sampleRendition],
+    };
+
+    const result = await checkDuplicatePreflight(tempRoot, incomingDescriptor);
+    expect(result.status).toBe("not-seen");
+    expect(result.matchedJob).toBeUndefined();
+  });
+
   it("treats fuzzy filename clues alone as auxiliary evidence without creating authoritative duplicate blocker", async () => {
     // Create an unmanaged file in rootDir that might have a similar name, but no job.json
     const unmanagedDir = path.join(tempRoot, "Random Video Folder");
