@@ -15,6 +15,23 @@ const EPORNER_URL_PATTERNS = [
 ];
 
 /**
+ * Detects whether Eporner native quality filter is set to 4K (quality=2160).
+ */
+export function isNative4kFilterActive(searchQuery?: string): boolean {
+  try {
+    const raw = searchQuery !== undefined
+      ? searchQuery
+      : (typeof window !== "undefined" ? window.location.search : "");
+    if (!raw) return false;
+    const queryString = raw.includes("?") ? raw.slice(raw.indexOf("?")) : raw;
+    const params = new URLSearchParams(queryString);
+    return params.get("quality") === "2160";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extracts Eporner video ID from a relative or absolute URL.
  */
 export function extractVideoId(url: string): string | null {
@@ -26,6 +43,8 @@ export function extractVideoId(url: string): string | null {
   }
   return null;
 }
+
+
 
 /**
  * Determines whether the advertised resolution text meets the 4K+ threshold (>= 2160p).

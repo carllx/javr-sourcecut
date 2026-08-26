@@ -51,6 +51,15 @@ describe("Companion UI Components", () => {
       expect(softBtn.classList.contains("active")).toBe(false);
     });
 
+    it("renders native 4K prefiltered state gracefully", () => {
+      toolbar.setNative4kActive(true);
+      const [hardBtn] = document.querySelectorAll(".javr-btn") as any;
+
+      expect(hardBtn.textContent).toBe("✓ Eporner 4K+");
+      expect(hardBtn.disabled).toBe(true);
+      expect(hardBtn.classList.contains("active-gold")).toBe(true);
+    });
+
     it("updates statistics display accurately", () => {
       toolbar.updateStats({
         totalCards: 20,

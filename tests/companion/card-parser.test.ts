@@ -7,10 +7,30 @@ import {
   parseCandidateCards,
   applyHardFilter,
   applySoftFilter,
+  isNative4kFilterActive,
 } from "../../companion/src/card-parser.js";
 import type { CandidateCard, RenditionProfile } from "../../companion/src/types.js";
 
 describe("Companion Card Parser & Filters", () => {
+  describe("isNative4kFilterActive", () => {
+    it("recognizes quality=2160 as active native 4K filter", () => {
+      expect(isNative4kFilterActive("?quality=2160")).toBe(true);
+      expect(isNative4kFilterActive("quality=2160")).toBe(true);
+      expect(isNative4kFilterActive("https://www.eporner.com/cat/vr-porn/?quality=2160")).toBe(true);
+      expect(isNative4kFilterActive("?page=2&quality=2160&sort=top")).toBe(true);
+    });
+
+    it("rejects non-4K qualities and unrelated queries", () => {
+      expect(isNative4kFilterActive("?quality=1080")).toBe(false);
+      expect(isNative4kFilterActive("?quality=720")).toBe(false);
+      expect(isNative4kFilterActive("?quality=21600")).toBe(false);
+      expect(isNative4kFilterActive("?quality=")).toBe(false);
+      expect(isNative4kFilterActive("?sort=top-weekly")).toBe(false);
+      expect(isNative4kFilterActive("")).toBe(false);
+      expect(isNative4kFilterActive(undefined)).toBe(false);
+    });
+  });
+
   describe("extractVideoId", () => {
     it("extracts ID from standard Eporner URL patterns", () => {
       expect(extractVideoId("/video-abc1234/test-title")).toBe("abc1234");

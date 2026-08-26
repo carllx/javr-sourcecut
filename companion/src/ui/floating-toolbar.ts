@@ -12,6 +12,7 @@ export class FloatingToolbar {
   private statsContainer: HTMLElement;
 
   private isHardFilterActive = false;
+  private isNative4kActive = false;
   private isSoftFilterActive = false;
   private callbacks: FloatingToolbarCallbacks;
 
@@ -35,7 +36,7 @@ export class FloatingToolbar {
     this.hardFilterBtn.className = "javr-btn";
     this.hardFilterBtn.textContent = "筛选 4K+";
     this.hardFilterBtn.onclick = () => {
-      if (this.isHardFilterActive) return; // One-way irreversible action
+      if (this.isHardFilterActive || this.isNative4kActive) return; // One-way irreversible action
       this.isHardFilterActive = true;
       this.updateButtonStates();
       this.callbacks.onActivateHardFilter?.();
@@ -76,6 +77,14 @@ export class FloatingToolbar {
     `;
   }
 
+  setNative4kActive(active: boolean = true): void {
+    this.isNative4kActive = active;
+    if (active) {
+      this.isHardFilterActive = true;
+    }
+    this.updateButtonStates();
+  }
+
   setHardFilterActive(active: boolean): void {
     this.isHardFilterActive = active;
     this.updateButtonStates();
@@ -87,16 +96,24 @@ export class FloatingToolbar {
   }
 
   private updateButtonStates(): void {
-    if (this.isHardFilterActive) {
+    if (this.isNative4kActive) {
+      this.hardFilterBtn.classList.add("active-gold");
+      this.hardFilterBtn.textContent = "✓ Eporner 4K+";
+      this.hardFilterBtn.disabled = true;
+      this.hardFilterBtn.style.cursor = "default";
+      this.hardFilterBtn.title = "Eporner 原生 4K 筛选已启用";
+    } else if (this.isHardFilterActive) {
       this.hardFilterBtn.classList.add("active-gold");
       this.hardFilterBtn.textContent = "已筛选 4K+";
       this.hardFilterBtn.disabled = true;
       this.hardFilterBtn.style.cursor = "default";
+      this.hardFilterBtn.removeAttribute("title");
     } else {
       this.hardFilterBtn.classList.remove("active-gold");
       this.hardFilterBtn.textContent = "筛选 4K+";
       this.hardFilterBtn.disabled = false;
       this.hardFilterBtn.style.cursor = "pointer";
+      this.hardFilterBtn.removeAttribute("title");
     }
 
     if (this.isSoftFilterActive) {

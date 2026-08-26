@@ -38,6 +38,17 @@
     /(?:https?:\/\/[^/]+)?\/video\/([a-zA-Z0-9]+)/i,
     /(?:https?:\/\/[^/]+)?\/hd-porn\/([a-zA-Z0-9]+)/i
   ];
+  function isNative4kFilterActive(searchQuery) {
+    try {
+      const raw = searchQuery !== void 0 ? searchQuery : typeof window !== "undefined" ? window.location.search : "";
+      if (!raw) return false;
+      const queryString = raw.includes("?") ? raw.slice(raw.indexOf("?")) : raw;
+      const params = new URLSearchParams(queryString);
+      return params.get("quality") === "2160";
+    } catch {
+      return false;
+    }
+  }
   function extractVideoId(url) {
     for (const pattern of EPORNER_URL_PATTERNS) {
       const match = url.match(pattern);
@@ -833,6 +844,7 @@
       __publicField(this, "softFilterBtn");
       __publicField(this, "statsContainer");
       __publicField(this, "isHardFilterActive", false);
+      __publicField(this, "isNative4kActive", false);
       __publicField(this, "isSoftFilterActive", false);
       __publicField(this, "callbacks");
       this.callbacks = callbacks;
@@ -849,7 +861,7 @@
       this.hardFilterBtn.className = "javr-btn";
       this.hardFilterBtn.textContent = "\u7B5B\u9009 4K+";
       this.hardFilterBtn.onclick = () => {
-        if (this.isHardFilterActive) return;
+        if (this.isHardFilterActive || this.isNative4kActive) return;
         this.isHardFilterActive = true;
         this.updateButtonStates();
         this.callbacks.onActivateHardFilter?.();
@@ -883,6 +895,13 @@
       ${stats.errorCount > 0 ? `<div class="javr-stat-item">\u5931\u8D25: <span class="javr-stat-val red">${stats.errorCount}</span></div>` : ""}
     `;
     }
+    setNative4kActive(active = true) {
+      this.isNative4kActive = active;
+      if (active) {
+        this.isHardFilterActive = true;
+      }
+      this.updateButtonStates();
+    }
     setHardFilterActive(active) {
       this.isHardFilterActive = active;
       this.updateButtonStates();
@@ -892,16 +911,24 @@
       this.updateButtonStates();
     }
     updateButtonStates() {
-      if (this.isHardFilterActive) {
+      if (this.isNative4kActive) {
+        this.hardFilterBtn.classList.add("active-gold");
+        this.hardFilterBtn.textContent = "\u2713 Eporner 4K+";
+        this.hardFilterBtn.disabled = true;
+        this.hardFilterBtn.style.cursor = "default";
+        this.hardFilterBtn.title = "Eporner \u539F\u751F 4K \u7B5B\u9009\u5DF2\u542F\u7528";
+      } else if (this.isHardFilterActive) {
         this.hardFilterBtn.classList.add("active-gold");
         this.hardFilterBtn.textContent = "\u5DF2\u7B5B\u9009 4K+";
         this.hardFilterBtn.disabled = true;
         this.hardFilterBtn.style.cursor = "default";
+        this.hardFilterBtn.removeAttribute("title");
       } else {
         this.hardFilterBtn.classList.remove("active-gold");
         this.hardFilterBtn.textContent = "\u7B5B\u9009 4K+";
         this.hardFilterBtn.disabled = false;
         this.hardFilterBtn.style.cursor = "pointer";
+        this.hardFilterBtn.removeAttribute("title");
       }
       if (this.isSoftFilterActive) {
         this.softFilterBtn.classList.add("active");
@@ -1002,7 +1029,7 @@
 
   // companion/src/index.ts
   var EpornerCompanionApp = class {
-    constructor() {
+    constructor(options = {}) {
       __publicField(this, "cacheManager");
       __publicField(this, "queue");
       __publicField(this, "toolbar");
@@ -1011,9 +1038,12 @@
       __publicField(this, "mutationObserver");
       __publicField(this, "allCandidateCards", /* @__PURE__ */ new Map());
       __publicField(this, "isHardFilterActive", false);
+      __publicField(this, "isNative4kPrefilter", false);
       __publicField(this, "isSoftFilterActive", false);
+      __publicField(this, "searchQuery");
       __publicField(this, "mutationDebounceTimer");
-      this.cacheManager = new RenditionCacheManager();
+      this.searchQuery = options.searchQuery;
+      this.cacheManager = options.cacheManager || new RenditionCacheManager();
       this.badgeRenderer = new FormatBadgeRenderer({
         onRetry: (videoId) => this.queue.retryManual(videoId)
       });
@@ -1034,6 +1064,11 @@
       await this.cacheManager.loadCache();
       this.setupIntersectionObserver();
       this.toolbar.mount();
+      this.isNative4kPrefilter = isNative4kFilterActive(this.searchQuery);
+      if (this.isNative4kPrefilter) {
+        this.isHardFilterActive = true;
+        this.toolbar.setNative4kActive(true);
+      }
       this.scanAndProcess(document.body);
       this.setupMutationObserver();
     }

@@ -1,10 +1,20 @@
 import type { CandidateCard, FilterStats, RenditionProfile } from "./types.js";
-import { parseCandidateCards, applyHardFilter, applySoftFilter } from "./card-parser.js";
+import {
+  parseCandidateCards,
+  applyHardFilter,
+  applySoftFilter,
+  isNative4kFilterActive,
+} from "./card-parser.js";
 import { RenditionCacheManager } from "./cache.js";
 import { ProbeQueue } from "./probe-queue.js";
 import { injectStyles } from "./ui/styles.js";
 import { FloatingToolbar } from "./ui/floating-toolbar.js";
 import { FormatBadgeRenderer } from "./ui/format-badge.js";
+
+export interface CompanionAppOptions {
+  searchQuery?: string;
+  cacheManager?: RenditionCacheManager;
+}
 
 export class EpornerCompanionApp {
   private cacheManager: RenditionCacheManager;
@@ -16,11 +26,14 @@ export class EpornerCompanionApp {
 
   private allCandidateCards = new Map<string, CandidateCard>();
   private isHardFilterActive = false;
+  private isNative4kPrefilter = false;
   private isSoftFilterActive = false;
+  private searchQuery?: string;
   private mutationDebounceTimer?: ReturnType<typeof setTimeout>;
 
-  constructor() {
-    this.cacheManager = new RenditionCacheManager();
+  constructor(options: CompanionAppOptions = {}) {
+    this.searchQuery = options.searchQuery;
+    this.cacheManager = options.cacheManager || new RenditionCacheManager();
     this.badgeRenderer = new FormatBadgeRenderer({
       onRetry: (videoId) => this.queue.retryManual(videoId),
     });
@@ -45,6 +58,13 @@ export class EpornerCompanionApp {
 
     this.setupIntersectionObserver();
     this.toolbar.mount();
+
+    // Check upstream native 4K filter in URL query
+    this.isNative4kPrefilter = isNative4kFilterActive(this.searchQuery);
+    if (this.isNative4kPrefilter) {
+      this.isHardFilterActive = true;
+      this.toolbar.setNative4kActive(true);
+    }
 
     // Initial scan
     this.scanAndProcess(document.body);

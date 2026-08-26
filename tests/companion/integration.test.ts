@@ -1,9 +1,21 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EpornerCompanionApp } from "../../companion/src/index.js";
 
 describe("Eporner Companion Integration & Lifecycle", () => {
   beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        text: async () => `
+          <div id="hd-porn-dload">
+            <a href="/dload/1/2160p.mp4"><b>2160p 4K</b> <span>MP4 (AV1)</span></a>
+          </div>
+        `,
+      })
+    );
+
     document.body.innerHTML = `
       <div id="vidresults">
         <div class="mb" id="v1"><a href="/video-v1/video-one"><span class="mv4k">4K 2160p</span></a></div>
@@ -11,6 +23,10 @@ describe("Eporner Companion Integration & Lifecycle", () => {
         <div class="mb" id="v3"><a href="/video-v3/video-three"><span class="mvvr">VR 4K</span></a></div>
       </div>
     `;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("initializes companion app, injects styles, and mounts floating toolbar", async () => {
@@ -79,5 +95,54 @@ describe("Eporner Companion Integration & Lifecycle", () => {
     expect(document.querySelector("#v-dyn-1080")).toBeNull();
 
     app.destroy();
+  });
+
+  describe("Native Filter Awareness (quality=2160)", () => {
+    it("auto-activates filtering & probing lifecycle and updates toolbar UI on quality=2160", async () => {
+      const app = new EpornerCompanionApp({
+        searchQuery: "?quality=2160",
+      });
+      await app.init();
+
+      const [hardBtn] = document.querySelectorAll(".javr-btn") as any;
+      expect(hardBtn.textContent).toBe("✓ Eporner 4K+");
+      expect(hardBtn.disabled).toBe(true);
+      expect(hardBtn.classList.contains("active-gold")).toBe(true);
+
+      // Sub-4K leakage #v2 must be automatically removed from DOM
+      expect(document.querySelector("#v2")).toBeNull();
+      expect(document.querySelector("#v1")).not.toBeNull();
+      expect(document.querySelector("#v3")).not.toBeNull();
+
+      // Probing lifecycle should be automatically enqueued
+      // Dynamic loading sub-4K cards should also be deleted immediately
+      const dynamicContainer = document.querySelector("#vidresults") as HTMLDivElement;
+      const leakedCard = document.createElement("div");
+      leakedCard.className = "mb";
+      leakedCard.id = "leaked-720";
+      leakedCard.innerHTML = `<a href="/video-leak/test"><span class="mvhd">720p</span></a>`;
+      dynamicContainer.appendChild(leakedCard);
+
+      app.scanAndProcess(dynamicContainer);
+      expect(document.querySelector("#leaked-720")).toBeNull();
+
+      app.destroy();
+    });
+
+    it("does NOT auto-activate when quality is 1080 or not 2160", async () => {
+      const app = new EpornerCompanionApp({
+        searchQuery: "?quality=1080",
+      });
+      await app.init();
+
+      const [hardBtn] = document.querySelectorAll(".javr-btn") as any;
+      expect(hardBtn.textContent).toBe("筛选 4K+");
+      expect(hardBtn.disabled).toBe(false);
+
+      // Sub-4K card is NOT deleted prior to manual activation
+      expect(document.querySelector("#v2")).not.toBeNull();
+
+      app.destroy();
+    });
   });
 });
