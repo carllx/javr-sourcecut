@@ -17,6 +17,7 @@ export class EpornerCompanionApp {
   private allCandidateCards = new Map<string, CandidateCard>();
   private isHardFilterActive = false;
   private isSoftFilterActive = false;
+  private mutationDebounceTimer?: ReturnType<typeof setTimeout>;
 
   constructor() {
     this.cacheManager = new RenditionCacheManager();
@@ -25,7 +26,7 @@ export class EpornerCompanionApp {
     });
 
     this.toolbar = new FloatingToolbar({
-      onToggleHardFilter: (active) => this.handleToggleHardFilter(active),
+      onActivateHardFilter: () => this.handleActivateHardFilter(),
       onToggleSoftFilter: (active) => this.handleToggleSoftFilter(active),
     });
 
@@ -57,6 +58,9 @@ export class EpornerCompanionApp {
 
     this.intersectionObserver = new IntersectionObserver(
       (entries) => {
+        // Strictly gate AV1 probing until Hard Filter is activated
+        if (!this.isHardFilterActive) return;
+
         for (const entry of entries) {
           if (entry.isIntersecting) {
             const cardEl = entry.target as HTMLElement;
@@ -77,10 +81,9 @@ export class EpornerCompanionApp {
   private setupMutationObserver(): void {
     if (typeof MutationObserver === "undefined") return;
 
-    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
     this.mutationObserver = new MutationObserver(() => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
+      if (this.mutationDebounceTimer) clearTimeout(this.mutationDebounceTimer);
+      this.mutationDebounceTimer = setTimeout(() => {
         this.scanAndProcess(document.body);
       }, 150);
     });
@@ -119,7 +122,7 @@ export class EpornerCompanionApp {
             this.intersectionObserver.observe(card.element);
           }
 
-          // Enqueue for AV1 probing if 4K+ hard filter is active or card was registered
+          // Enqueue for AV1 probing ONLY if 4K+ hard filter is active
           if (this.isHardFilterActive) {
             this.queue.enqueue(card);
           }
@@ -128,22 +131,21 @@ export class EpornerCompanionApp {
     }
   }
 
-  private handleToggleHardFilter(active: boolean): void {
-    this.isHardFilterActive = active;
+  private handleActivateHardFilter(): void {
+    if (this.isHardFilterActive) return;
+    this.isHardFilterActive = true;
 
-    if (active) {
-      // 1. Remove all sub-4K cards currently in DOM
-      const currentCards = Array.from(this.allCandidateCards.values());
-      const { kept } = applyHardFilter(currentCards);
+    // 1. Remove all sub-4K cards currently in DOM
+    const currentCards = Array.from(this.allCandidateCards.values());
+    const { kept } = applyHardFilter(currentCards);
 
-      // Re-index remaining cards
-      this.allCandidateCards.clear();
-      for (const card of kept) {
-        this.allCandidateCards.set(card.videoId, card);
-        this.badgeRenderer.mountBadge(card);
-        // Start automatic probing for remaining 4K cards
-        this.queue.enqueue(card);
-      }
+    // 2. Re-index remaining 4K cards and enqueue for AV1 probing
+    this.allCandidateCards.clear();
+    for (const card of kept) {
+      this.allCandidateCards.set(card.videoId, card);
+      this.badgeRenderer.mountBadge(card);
+      // Start automatic probing for remaining 4K candidates
+      this.queue.enqueue(card);
     }
 
     this.applyVisibility();
@@ -207,6 +209,9 @@ export class EpornerCompanionApp {
   }
 
   destroy(): void {
+    if (this.mutationDebounceTimer) {
+      clearTimeout(this.mutationDebounceTimer);
+    }
     this.intersectionObserver?.disconnect();
     this.mutationObserver?.disconnect();
     this.toolbar.getElement().remove();

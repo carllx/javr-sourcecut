@@ -849,9 +849,10 @@
       this.hardFilterBtn.className = "javr-btn";
       this.hardFilterBtn.textContent = "\u7B5B\u9009 4K+";
       this.hardFilterBtn.onclick = () => {
-        this.isHardFilterActive = !this.isHardFilterActive;
+        if (this.isHardFilterActive) return;
+        this.isHardFilterActive = true;
         this.updateButtonStates();
-        this.callbacks.onToggleHardFilter?.(this.isHardFilterActive);
+        this.callbacks.onActivateHardFilter?.();
       };
       this.softFilterBtn = document.createElement("button");
       this.softFilterBtn.className = "javr-btn";
@@ -893,8 +894,14 @@
     updateButtonStates() {
       if (this.isHardFilterActive) {
         this.hardFilterBtn.classList.add("active-gold");
+        this.hardFilterBtn.textContent = "\u5DF2\u7B5B\u9009 4K+";
+        this.hardFilterBtn.disabled = true;
+        this.hardFilterBtn.style.cursor = "default";
       } else {
         this.hardFilterBtn.classList.remove("active-gold");
+        this.hardFilterBtn.textContent = "\u7B5B\u9009 4K+";
+        this.hardFilterBtn.disabled = false;
+        this.hardFilterBtn.style.cursor = "pointer";
       }
       if (this.isSoftFilterActive) {
         this.softFilterBtn.classList.add("active");
@@ -1005,12 +1012,13 @@
       __publicField(this, "allCandidateCards", /* @__PURE__ */ new Map());
       __publicField(this, "isHardFilterActive", false);
       __publicField(this, "isSoftFilterActive", false);
+      __publicField(this, "mutationDebounceTimer");
       this.cacheManager = new RenditionCacheManager();
       this.badgeRenderer = new FormatBadgeRenderer({
         onRetry: (videoId) => this.queue.retryManual(videoId)
       });
       this.toolbar = new FloatingToolbar({
-        onToggleHardFilter: (active) => this.handleToggleHardFilter(active),
+        onActivateHardFilter: () => this.handleActivateHardFilter(),
         onToggleSoftFilter: (active) => this.handleToggleSoftFilter(active)
       });
       this.queue = new ProbeQueue({
@@ -1033,6 +1041,7 @@
       if (typeof IntersectionObserver === "undefined") return;
       this.intersectionObserver = new IntersectionObserver(
         (entries) => {
+          if (!this.isHardFilterActive) return;
           for (const entry of entries) {
             if (entry.isIntersecting) {
               const cardEl = entry.target;
@@ -1052,10 +1061,9 @@
     }
     setupMutationObserver() {
       if (typeof MutationObserver === "undefined") return;
-      let debounceTimer;
       this.mutationObserver = new MutationObserver(() => {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
+        if (this.mutationDebounceTimer) clearTimeout(this.mutationDebounceTimer);
+        this.mutationDebounceTimer = setTimeout(() => {
           this.scanAndProcess(document.body);
         }, 150);
       });
@@ -1092,17 +1100,16 @@
         }
       }
     }
-    handleToggleHardFilter(active) {
-      this.isHardFilterActive = active;
-      if (active) {
-        const currentCards = Array.from(this.allCandidateCards.values());
-        const { kept } = applyHardFilter(currentCards);
-        this.allCandidateCards.clear();
-        for (const card of kept) {
-          this.allCandidateCards.set(card.videoId, card);
-          this.badgeRenderer.mountBadge(card);
-          this.queue.enqueue(card);
-        }
+    handleActivateHardFilter() {
+      if (this.isHardFilterActive) return;
+      this.isHardFilterActive = true;
+      const currentCards = Array.from(this.allCandidateCards.values());
+      const { kept } = applyHardFilter(currentCards);
+      this.allCandidateCards.clear();
+      for (const card of kept) {
+        this.allCandidateCards.set(card.videoId, card);
+        this.badgeRenderer.mountBadge(card);
+        this.queue.enqueue(card);
       }
       this.applyVisibility();
       this.updateStats();
@@ -1156,6 +1163,9 @@
       this.toolbar.updateStats(stats);
     }
     destroy() {
+      if (this.mutationDebounceTimer) {
+        clearTimeout(this.mutationDebounceTimer);
+      }
       this.intersectionObserver?.disconnect();
       this.mutationObserver?.disconnect();
       this.toolbar.getElement().remove();

@@ -31,18 +31,52 @@ describe("Eporner Companion Integration & Lifecycle", () => {
     app.destroy();
   });
 
-  it("handles Hard Filter: deletes <4K cards and queues remaining 4K cards", async () => {
+  it("STRICT LIFECYCLE: does not issue AV1 probing requests prior to Hard Filter activation", async () => {
     const app = new EpornerCompanionApp();
     await app.init();
 
-    // Toggle 4K+ filter
-    const hardBtn = document.querySelector(".javr-btn") as HTMLButtonElement;
+    // 4K cards show initial unprobed badge ("4K"), never probing ("4K · ⏳") or detected AV1
+    const badgeV1 = document.querySelector("#v1 .javr-card-badge");
+    expect(badgeV1?.textContent).toBe("4K");
+
+    // Sub-4K card is still in DOM before activation
+    expect(document.querySelector("#v2")).not.toBeNull();
+
+    app.destroy();
+  });
+
+  it("handles Hard Filter: one-way activation deletes <4K cards and stays active for dynamic content", async () => {
+    const app = new EpornerCompanionApp();
+    await app.init();
+
+    const [hardBtn] = document.querySelectorAll(".javr-btn") as any;
+    expect(hardBtn.textContent).toBe("筛选 4K+");
+    expect(hardBtn.disabled).toBe(false);
+
+    // Activate 4K+ filter
     hardBtn.click();
 
     // Sub-4K card #v2 must be removed from DOM
     expect(document.querySelector("#v2")).toBeNull();
     expect(document.querySelector("#v1")).not.toBeNull();
     expect(document.querySelector("#v3")).not.toBeNull();
+
+    // Hard filter button must enter permanent disabled/active state
+    expect(hardBtn.disabled).toBe(true);
+    expect(hardBtn.textContent).toBe("已筛选 4K+");
+
+    // Dynamic loading test: dynamically added sub-4K card must be removed immediately
+    const dynamicContainer = document.querySelector("#vidresults") as HTMLDivElement;
+    const dynamicSub4k = document.createElement("div");
+    dynamicSub4k.className = "mb";
+    dynamicSub4k.id = "v-dyn-1080";
+    dynamicSub4k.innerHTML = `<a href="/video-dyn1/test"><span class="mvhd">1080p</span></a>`;
+    dynamicContainer.appendChild(dynamicSub4k);
+
+    // Process new content
+    app.scanAndProcess(dynamicContainer);
+
+    expect(document.querySelector("#v-dyn-1080")).toBeNull();
 
     app.destroy();
   });

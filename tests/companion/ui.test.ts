@@ -15,7 +15,7 @@ describe("Companion UI Components", () => {
       onHardFilter = vi.fn();
       onSoftFilter = vi.fn();
       toolbar = new FloatingToolbar({
-        onToggleHardFilter: onHardFilter,
+        onActivateHardFilter: onHardFilter,
         onToggleSoftFilter: onSoftFilter,
       });
       toolbar.mount();
@@ -27,20 +27,28 @@ describe("Companion UI Components", () => {
       expect(buttons).toHaveLength(2);
     });
 
-    it("toggles hard and soft filter buttons on click", () => {
+    it("activates hard filter as a one-way irreversible action", () => {
       const [hardBtn, softBtn] = document.querySelectorAll(".javr-btn") as any;
 
       hardBtn.click();
-      expect(onHardFilter).toHaveBeenCalledWith(true);
+      expect(onHardFilter).toHaveBeenCalledTimes(1);
+      expect(hardBtn.classList.contains("active-gold")).toBe(true);
+      expect(hardBtn.textContent).toBe("已筛选 4K+");
+      expect(hardBtn.disabled).toBe(true);
+
+      // Subsequent clicks must NOT toggle off or trigger callback again
+      hardBtn.click();
+      expect(onHardFilter).toHaveBeenCalledTimes(1);
       expect(hardBtn.classList.contains("active-gold")).toBe(true);
 
-      hardBtn.click();
-      expect(onHardFilter).toHaveBeenCalledWith(false);
-      expect(hardBtn.classList.contains("active-gold")).toBe(false);
-
+      // Soft filter remains a reversible toggle
       softBtn.click();
       expect(onSoftFilter).toHaveBeenCalledWith(true);
       expect(softBtn.classList.contains("active")).toBe(true);
+
+      softBtn.click();
+      expect(onSoftFilter).toHaveBeenCalledWith(false);
+      expect(softBtn.classList.contains("active")).toBe(false);
     });
 
     it("updates statistics display accurately", () => {

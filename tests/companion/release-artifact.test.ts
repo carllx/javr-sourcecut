@@ -11,10 +11,7 @@ const prodUserJs = path.join(userscriptsDir, "eporner-companion.user.js");
 
 describe("Userscript Release Artifact & Update URLs", () => {
   it("verifies production userscript file exists and has valid metadata headers", () => {
-    if (!fs.existsSync(prodUserJs)) {
-      // If build has not run yet in this test session, skip or assert after build
-      return;
-    }
+    expect(fs.existsSync(prodUserJs)).toBe(true);
 
     const content = fs.readFileSync(prodUserJs, "utf-8");
 

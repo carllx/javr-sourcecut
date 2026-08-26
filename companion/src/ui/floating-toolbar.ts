@@ -1,7 +1,7 @@
 import type { FilterStats } from "../types.js";
 
 export interface FloatingToolbarCallbacks {
-  onToggleHardFilter?: (active: boolean) => void;
+  onActivateHardFilter?: () => void;
   onToggleSoftFilter?: (active: boolean) => void;
 }
 
@@ -35,9 +35,10 @@ export class FloatingToolbar {
     this.hardFilterBtn.className = "javr-btn";
     this.hardFilterBtn.textContent = "筛选 4K+";
     this.hardFilterBtn.onclick = () => {
-      this.isHardFilterActive = !this.isHardFilterActive;
+      if (this.isHardFilterActive) return; // One-way irreversible action
+      this.isHardFilterActive = true;
       this.updateButtonStates();
-      this.callbacks.onToggleHardFilter?.(this.isHardFilterActive);
+      this.callbacks.onActivateHardFilter?.();
     };
 
     this.softFilterBtn = document.createElement("button");
@@ -88,8 +89,14 @@ export class FloatingToolbar {
   private updateButtonStates(): void {
     if (this.isHardFilterActive) {
       this.hardFilterBtn.classList.add("active-gold");
+      this.hardFilterBtn.textContent = "已筛选 4K+";
+      this.hardFilterBtn.disabled = true;
+      this.hardFilterBtn.style.cursor = "default";
     } else {
       this.hardFilterBtn.classList.remove("active-gold");
+      this.hardFilterBtn.textContent = "筛选 4K+";
+      this.hardFilterBtn.disabled = false;
+      this.hardFilterBtn.style.cursor = "pointer";
     }
 
     if (this.isSoftFilterActive) {
