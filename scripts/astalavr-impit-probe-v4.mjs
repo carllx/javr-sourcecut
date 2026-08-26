@@ -2,7 +2,7 @@
 
 // Browser Lead Windows-safe launcher for the standalone AstalaVR v3 probe.
 // Installs impit into the OS temp directory by invoking npm-cli.js through node.exe,
-// then imports v3. It does not build/typecheck the project and does not launch auth.
+// then imports v3 via a file:// URL. It does not build/typecheck the project and does not launch auth.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
