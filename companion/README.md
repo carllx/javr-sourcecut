@@ -1,126 +1,128 @@
 # Eporner Browser Companion
 
-> Lightweight Tampermonkey userscript for 4K+ candidate video validation and AV1 rendition probing on Eporner.
+> 用于 Eporner 页面的 4K+ 候选视频筛选与 AV1 格式能力探测轻量 Tampermonkey 油猴脚本。
 
 ---
 
-## 1. What it is
+## 1. 工具定位 (What it is)
 
-The **Eporner Browser Companion** is an in-browser companion script designed to streamline candidate video discovery on Eporner:
-- **4K+ Candidate Validation**: Filters video list cards client-side (Hard Filter), removing sub-4K items from the DOM and keeping 4K+ candidate cards.
-- **AV1 Format Probing**: Asynchronously probes detail pages for candidate cards in the background to detect AV1 availability and highest AV1 resolutions (e.g. 2160p vs 1080p).
-- **Soft Filtering**: Allows one-click toggling to hide videos confirmed to have NO AV1 while optimistically keeping pending/unprobed videos visible.
+**Eporner Browser Companion** 是运行在浏览器前端的辅助扩展脚本，用于加速与简化 Eporner 上的候选高画质视频查找：
+- **4K+ 候选视频硬筛选 (Hard Filter)**：在客户端直接将低于 4K (2160p) 的视频卡片从 DOM 永久移除，仅保留 4K+ 候选视频。
+- **AV1 格式能力异步探测 (AV1 Format Probing)**：在后台并发探测剩余 4K+ 候选视频的详情页，提取是否包含 AV1 rendition 以及最高 AV1 分辨率（例如 2160p / 1080p）。
+- **「只看 AV1」持续软筛选 (Soft Filter & Continuous View State)**：一键临时隐藏确认无 AV1 (NO AV1) 的视频；未探测完成 (Pending/Probing) 或探测异常 (Error/Unknown) 的卡片保持乐观可见 (Optimistic Visibility)。**Only-AV1 为持续视图状态，即使在探测进行中提前开启，后续异步探测确认为 NO AV1 的卡片也会自动隐藏，无需二次点击。**
 
 > [!NOTE]
-> **Not a Downloader**: The Browser Companion does **not** download video files, run FFmpeg clipping, or replace the SourceCut core CLI/daemon workflow. It focuses exclusively on candidate discovery and capability probing in the browser.
+> **非下载工具**：Browser Companion **不包含** 视频下载、FFmpeg 剪辑或取代 SourceCut 核心 CLI/daemon 的功能。它专注于浏览器前端的视频候选筛选与格式探测。
 
 ---
 
-## 2. Installation
+## 2. 安装方法 (Installation)
 
-### Prerequisites
-- Chrome, Edge, Firefox, or any Chromium-based browser.
-- [Tampermonkey extension](https://www.tampermonkey.net/) installed and enabled.
+### 前置要求
+- Chrome、Edge、Firefox 或任何主流 Chromium 内核浏览器；
+- 已安装并启用 [Tampermonkey (油猴插件)](https://www.tampermonkey.net/)。
 
-### Install URL
-Install the production userscript directly via Tampermonkey:
+### 正式安装地址
+直接在 Tampermonkey 中打开并安装生产版用户脚本：
 - [https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js](https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js)
 
-*(Note: During development and PR reviews, you can install from the feature branch artifact, but `main` is the permanent update upstream.)*
+*(注：在开发与 PR 验收阶段，可临时安装 feature 分支构建产物，但后续长期更新来源固定为 `main` 分支。)*
 
 ---
 
-## 3. Recommended Usage
+## 3. 推荐使用流程 (Recommended Usage)
 
-### Recommended Entrypoint
-For VR and high-resolution video search, navigate directly to Eporner with the native quality filter active:
+### 推荐使用入口
+查找 VR 及超高清视频时，推荐直接进入带有 Eporner 原生最高画质筛选的页面：
 - [https://www.eporner.com/cat/vr-porn/?quality=2160](https://www.eporner.com/cat/vr-porn/?quality=2160)
 
-### How It Works
-1. **Pages with `quality=2160` (Native 4K Prefilter)**:
-   - The Companion detects `quality=2160` in the URL automatically.
-   - The toolbar shows `✓ Eporner 4K+` (no manual click needed).
-   - Local 4K validation runs as a leakage guard against the DOM.
-   - AV1 probing starts automatically for all 4K+ cards with viewport-prioritized queuing.
-2. **General Pages (without `quality=2160`)**:
-   - On regular category, channel, or search pages, cards below 4K remain visible on page load.
-   - Click the **`[筛选 4K+]`** button in the floating toolbar to permanently remove `<4K` cards and begin AV1 probing on the remaining candidates.
-3. **Toggle `[只看 AV1]`**:
-   - Click to hide confirmed NO-AV1 cards. Unprobed, pending, or error cards remain visible (Optimistic Visibility).
+### 工作机制
+1. **带有 `quality=2160` 的页面 (原生 4K 预过滤)**：
+   - Companion 初始化时自动识别 URL 参数中的 `quality=2160`；
+   - 悬浮工具栏显示 `✓ Eporner 4K+`（无需用户手动点击）；
+   - 本地 4K 解析器自动作为防漏兜底 (Leakage Guard)，移除意外漏入的 `<4K` 卡片；
+   - 自动启动 AV1 探测生命周期，并结合视口监听 (IntersectionObserver) 优先探测当前可见卡片。
+2. **普通页面 (无 `quality=2160`)**：
+   - 默认保留所有卡片可见；
+   - 用户点击悬浮工具栏中的 **`[筛选 4K+]`** 按钮，单向永久移除 `<4K` 卡片，并开始对剩余 4K+ 卡片进行 AV1 探测。
+3. **开启 `[只看 AV1]`**：
+   - 随时点击开启。已确认无 AV1 的卡片立即隐藏；
+   - 正在探测中、排队中或报错的卡片保持显示；
+   - 随后新探测完成并判定为 NO AV1 的卡片会自动追加隐藏。
 
 ---
 
-## 4. Toolbar & Badge Semantics
+## 4. 工具栏与状态徽章语义 (Toolbar & Badge Semantics)
 
-### Floating Toolbar
+### 悬浮工具栏 (Floating Toolbar)
 
-| Control / Display | Meaning |
+| 控件 / 显示项 | 语义说明 |
 | :--- | :--- |
-| **`✓ Eporner 4K+`** | Upstream native 4K filter detected from URL (`quality=2160`); Hard Filter & AV1 probing active. |
-| **`[筛选 4K+]`** | One-way activation action on non-filtered pages. Clicking permanently deletes `<4K` cards from the DOM and begins AV1 probing. |
-| **`[只看 AV1]`** | Soft filter toggle. When enabled, hides cards confirmed to lack AV1 streams. |
-| **`4K: N`** | Count of 4K+ candidate cards on the current page. |
-| **`AV1: X (Y 4K)`** | Count of confirmed AV1 videos (`X`) and count of confirmed 4K AV1 videos (`Y`). |
-| **`探测: N`** | Number of candidate cards currently in the probing queue. |
-| **`失败: N`** | Number of cards whose probing failed after auto-retries. |
+| **`✓ Eporner 4K+`** | 已识别 URL 中的原生 4K 过滤 (`quality=2160`)；Hard Filter 与 AV1 探测已自动激活。 |
+| **`[筛选 4K+]`** | 普通页面的单向激活按钮。点击后永久删除 `<4K` DOM 卡片并启动 AV1 探测。 |
+| **`[只看 AV1]`** | 软筛选持续切换按钮。激活后隐藏已确认 NO AV1 的卡片（具有持续视图状态）。 |
+| **`4K: N`** | 当前页面保留的 4K+ 候选视频数量。 |
+| **`AV1: X (Y 4K)`** | 确认具备 AV1 的视频总数 (`X`) 与其中具备 4K (2160p) AV1 的视频数 (`Y`)。 |
+| **`探测: N`** | 当前正在排队或进行后台探测的卡片数量。 |
+| **`失败: N`** | 自动重试耗尽后仍探测失败的卡片数量。 |
 
-### Card Format Badges
+### 卡片格式徽章 (Card Format Badges)
 
-| Badge Text | Color / Style | Meaning |
+| 徽章文本 | 样式 / 颜色 | 语义说明 |
 | :--- | :--- | :--- |
-| **`4K · AV1 4K`** | Gold / Green | Video is confirmed 4K and provides **2160p AV1** rendition. |
-| **`4K · AV1 1080p`** | Blue | Video is 4K, but AV1 is only available up to **1080p**. |
-| **`4K · NO AV1`** | Gray | Video has been probed and confirmed to have **no AV1** stream. |
-| **`4K · ⏳`** | Pulsing Cyan | Currently probing detail page in background. |
-| **`4K · ⚠️ 重试`** | Red (Clickable) | Network or parsing error occurred. Click the badge to retry probing manually. |
+| **`4K · AV1 4K`** | 金绿渐变 | 视频为 4K+，且确认提供 **2160p (4K) AV1** 流。 |
+| **`4K · AV1 1080p`** | 蓝色渐变 | 视频为 4K+，但 AV1 流最高仅到 **1080p**。 |
+| **`4K · NO AV1`** | 灰色暗底 | 详情页已探测完毕，确认**无任何 AV1** 流（仅 H.264/WebM）。 |
+| **`4K · ⏳`** | 呼吸闪烁青色 | 正在后台异步请求并解析详情页。 |
+| **`4K · ⚠️ 重试`** | 红色高亮 (可点击) | 网络异常或解析失败。点击徽章可立即手动重试探测。 |
 
 ---
 
-## 5. Caching Strategy
+## 5. 缓存机制 (Cache)
 
-- **Capability Cache**: Probed rendition capabilities (`detected` and `no_av1`) are cached in Tampermonkey persistent storage (`GM_setValue` / `GM_getValue`).
-- **Cache TTL**: 7 days (604,800,000 ms). Expired records are automatically re-probed.
-- **Error Handling**: `error` and `unknown` states are **never** persisted as `no_av1`, ensuring transient network hiccups can be retried immediately.
+- **探测能力缓存**：已确认的格式结果（`detected` 与 `no_av1`）会持久化保存至 Tampermonkey 存储 (`GM_setValue` / `GM_getValue`)；
+- **缓存有效期 (TTL)**：7 天 (604,800,000 ms)。过期记录会在再次浏览时重新探测；
+- **错误永不误存**：`error` 与 `unknown` 状态**绝不会**被持久化为 `no_av1`，确保临时网络抖动可在刷新或重试时恢复。
 
 ---
 
-## 6. Automatic Updates
+## 6. 自动化更新机制 (Automatic Updates)
 
-The production userscript includes Tampermonkey metadata headers:
+生产版脚本内嵌了 Tampermonkey 标准元数据头：
 ```javascript
 // @updateURL   https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js
 // @downloadURL https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js
 ```
-- Tampermonkey automatically polls `@updateURL` and prompts/applies updates whenever the `@version` header is incremented on `main`.
-- Users do not need to manually copy-paste script code after initial installation.
+- Tampermonkey 会定期根据 `@updateURL` 检查 `main` 分支上的 `@version`；
+- 正式发布提升 `@version` 后，用户浏览器将自动接收更新提示并无缝升级，无需重新手动复制粘贴代码。
 
 ---
 
-## 7. Known Warnings
+## 7. 已知警告说明 (Known Warnings)
 
-### Chromium AbortError on Card Removal
-In the browser developer console, you may occasionally observe:
+### Chromium 关于媒体移除的 AbortError 警告
+在打开浏览器开发者工具 (F12 Console) 时，可能会观察到如下报错信息：
 ```text
 Uncaught (in promise) AbortError: The play() request was interrupted because the media was removed from the document.
 ```
 
-#### Explanation
-- **Cause**: Eporner's native page scripts trigger asynchronous `HTMLMediaElement.play()` on video thumbnail hover or dynamic initialization. When Companion's Hard Filter removes sub-4K video cards from the DOM, Chromium automatically aborts any pending `play()` promise associated with the detached video element.
-- **Classification**: This is a **benign, non-blocking browser warning** under the following verified conditions:
-  1. Kept 4K candidate videos continue to function and play normally.
-  2. Companion floating toolbar, format badges, and AV1 probing operate without interruption.
-  3. No persistent functional errors or page crashes occur.
+#### 原因分析与判定
+- **触发机理**：Eporner 页面原生脚本会在缩略图加载或鼠标悬停时触发异步 `HTMLMediaElement.play()` 视频预览请求。当 Companion 的 Hard Filter 将低于 4K 的卡片从 DOM 永久移除时，被移除节点的 pending `play()` promise 会被 Chromium 引擎正常中断并抛出 `AbortError`。
+- **判定标准**：在满足以下所有条件时，该现象确认为**非阻塞良性警告 (benign non-blocking warning)**：
+  1. 页面保留的 4K 视频卡片悬停与点击播放功能完全正常；
+  2. Companion 工具栏、徽章与 AV1 探测正常工作；
+  3. 页面无持续性功能性中断或报错。
 
 > [!IMPORTANT]
-> **Design Note**: Do not downgrade Hard Filter to a "soft hide" or inject global `unhandledrejection` suppressors solely to silence this browser warning. If actual playback of retained videos or Companion functionality is impacted in the future, investigate as a dedicated issue.
+> **架构设计原则**：不得为了消除该 Console 警告而将 Hard Filter 降级为软隐藏，也不得在全局捕获吞掉 `unhandledrejection`。如未来发现保留视频出现实际播放异常，再针对性单独立项排查。
 
 ---
 
-## 8. Troubleshooting
+## 8. 常见问题排查 (Troubleshooting)
 
-| Symptom | Probable Cause | Resolution |
+| 异常现象 | 可能原因 | 解决办法 |
 | :--- | :--- | :--- |
-| **Floating Toolbar does not appear** | Tampermonkey script disabled or URL pattern mismatch. | Check that Tampermonkey is active and the URL matches `*://*.eporner.com/*`. |
-| **All cards stuck in `Pending` / `Error`** | Network connectivity issue or aggressive rate-limiting. | Prober uses limited concurrency (2) and auto-backoff (up to 2 retries). Check network tab, or click the `4K · ⚠️ 重试` badge to trigger a manual probe. |
-| **Raw GitHub URL does not open Tampermonkey install dialog** | Browser displaying raw text instead of handing off to Tampermonkey. | In Tampermonkey dashboard, go to *Utilities -> Install from URL*, paste the raw URL, and click *Install*. |
-| **Distinguishing benign `AbortError` from real bugs** | Console shows `AbortError` vs other errors. | `AbortError` mentioning `media was removed from the document` is expected when sub-4K cards are deleted. Any error mentioning `GM_xmlhttpRequest`, `TypeError`, or failed parsing should be reported as a bug. |
+| **悬浮工具栏未出现** | 油猴插件未启用或当前页面 URL 不在匹配范围内。 | 检查 Tampermonkey 扩展是否已启用，确认网址匹配 `*://*.eporner.com/*`。 |
+| **卡片长时间处于 `⏳` 或 `⚠️ 重试`** | 本地网络连接受限或遇到临时限流。 | 探测器具备并发限制 (2) 与自动退避机制（最多 2 次）。可检查网络，或直接点击红色的 `4K · ⚠️ 重试` 徽章触发手动重试。 |
+| **点击安装链接直接显示纯文本** | 浏览器未关联 `.user.js` 到 Tampermonkey。 | 打开 Tampermonkey 管理面板 -> *实用工具 -> 从 URL 安装*，粘贴 raw 地址并点击安装。 |
+| **如何区分良性 `AbortError` 与真故障** | 控制台抛错类型不同。 | 包含 `media was removed from the document` 的 `AbortError` 为卡片移除引起的良性提示；若出现 `GM_xmlhttpRequest`、`TypeError` 或解析异常，则属于需修复的程序缺陷。 |

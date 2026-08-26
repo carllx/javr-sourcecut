@@ -18,6 +18,7 @@ describe("Userscript Release Artifact & Update URLs", () => {
     // Check Tampermonkey metadata
     expect(content).toContain("// ==UserScript==");
     expect(content).toContain("// ==/UserScript==");
+    expect(content).toContain("// @version      0.1.1");
 
     // Check stable tracked raw GitHub update & download URLs
     const expectedUrl =

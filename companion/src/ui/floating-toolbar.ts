@@ -25,7 +25,7 @@ export class FloatingToolbar {
     // Header
     const header = document.createElement("div");
     header.className = "javr-toolbar-header";
-    header.innerHTML = `<span>⚡ Eporner Companion</span><span style="font-size:10px;color:#9ca3af;">v0.1</span>`;
+    header.innerHTML = `<span>⚡ Eporner Companion</span><span style="font-size:10px;color:#9ca3af;">v0.1.1</span>`;
     this.container.appendChild(header);
 
     // Controls

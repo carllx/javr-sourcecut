@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Eporner Companion (javr-sourcecut)
 // @namespace    https://github.com/carllx/javr-sourcecut
-// @version      0.1.0
+// @version      0.1.1
 // @description  4K+ candidate filtering and AV1 format capability detection for Eporner
 // @author       carllx
 // @match        https://*.eporner.com/*
@@ -854,7 +854,7 @@
       this.container.id = "javr-floating-toolbar";
       const header = document.createElement("div");
       header.className = "javr-toolbar-header";
-      header.innerHTML = `<span>\u26A1 Eporner Companion</span><span style="font-size:10px;color:#9ca3af;">v0.1</span>`;
+      header.innerHTML = `<span>\u26A1 Eporner Companion</span><span style="font-size:10px;color:#9ca3af;">v0.1.1</span>`;
       this.container.appendChild(header);
       const controls = document.createElement("div");
       controls.className = "javr-toolbar-controls";

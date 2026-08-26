@@ -235,18 +235,18 @@ describe("Eporner Companion Integration & Lifecycle", () => {
       app.destroy();
     });
 
-    it("keeps Error / Unknown cards visible under Only-AV1 active mode", async () => {
-      let resolveV1: (val: any) => void;
-
-      const promiseV1 = new Promise((resolve) => {
-        resolveV1 = resolve;
-      });
-
+    it("keeps Error / Unknown cards visible under Only-AV1 active mode after auto-retries exhaust", async () => {
+      let callCount = 0;
       vi.stubGlobal(
         "fetch",
         vi.fn().mockImplementation((url: string) => {
           if (url.includes("video-one")) {
-            return promiseV1;
+            callCount++;
+            return Promise.resolve({
+              ok: false,
+              status: 500,
+              statusText: "Internal Server Error",
+            });
           }
           return Promise.resolve({
             ok: true,
@@ -266,16 +266,18 @@ describe("Eporner Companion Integration & Lifecycle", () => {
       softBtn.click();
       expect(softBtn.classList.contains("active")).toBe(true);
 
-      // Settle v1 as Network Error (after retries fail)
-      resolveV1!({
-        ok: false,
-        status: 500,
-        statusText: "Internal Server Error",
-      });
+      // Wait for initial attempt + 2 auto-retries (300ms + 600ms backoff) to exhaust
+      await new Promise((r) => setTimeout(r, 1100));
 
-      await new Promise((r) => setTimeout(r, 50));
+      // Verify retries were actually performed
+      expect(callCount).toBeGreaterThanOrEqual(3);
 
-      // Error/Unknown must remain optimistic visible
+      // Verify badge settled into Error retry state
+      const badgeV1 = elV1.querySelector(".javr-card-badge") as HTMLElement;
+      expect(badgeV1.textContent).toContain("4K · ⚠️ 重试");
+      expect(badgeV1.classList.contains("javr-badge-error")).toBe(true);
+
+      // Error/Unknown MUST remain optimistic visible even when Only-AV1 is active
       expect(elV1.style.display).not.toBe("none");
       expect(elV1.classList.contains("javr-soft-hidden")).toBe(false);
 

@@ -19,7 +19,7 @@ if (!fs.existsSync(userscriptsDir)) {
 const USERSCRIPT_HEADER = `// ==UserScript==
 // @name         Eporner Companion (javr-sourcecut)
 // @namespace    https://github.com/carllx/javr-sourcecut
-// @version      0.1.0
+// @version      0.1.1
 // @description  4K+ candidate filtering and AV1 format capability detection for Eporner
 // @author       carllx
 // @match        https://*.eporner.com/*
@@ -66,7 +66,7 @@ async function build() {
   const DEV_HEADER = `// ==UserScript==
 // @name         Eporner Companion [DEV LIVE] (javr-sourcecut)
 // @namespace    https://github.com/carllx/javr-sourcecut
-// @version      0.1.0-dev
+// @version      0.1.1-dev
 // @description  Live local development wrapper for Eporner Companion
 // @match        https://*.eporner.com/*
 // @match        http://*.eporner.com/*
