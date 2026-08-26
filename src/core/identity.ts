@@ -37,6 +37,18 @@ const GENERIC_TAG_WORDS = new Set([
 const IGNORED_CATALOG_PREFIXES = new Set([
   "TEST",
   "VIDEO",
+  "VID",
+  "ASSET",
+  "ITEM",
+  "FILE",
+  "ID",
+  "MOV",
+  "MOVIE",
+  "MP",
+  "MKV",
+  "AVI",
+  "WEBM",
+  "FLV",
   "UPLOAD",
   "SAMPLE",
   "DOWNLOAD",
@@ -48,6 +60,8 @@ const IGNORED_CATALOG_PREFIXES = new Set([
   "HTTP",
   "HTTPS",
   "EPORNER",
+  "ASTALAVR",
+  "PIKPAK",
 ]);
 
 const CATALOG_ID_PATTERN =
@@ -132,6 +146,29 @@ export function formatPerformerGroup(performers: PerformerIdentity[]): string {
     .join("_");
 }
 
+export function extractLegacyWorkAliases(
+  identity?: ProgressiveMediaIdentity,
+  provider?: string,
+  providerAssetId?: string
+): string[] {
+  const aliases: string[] = [];
+  if (identity?.canonicalCatalogId) {
+    aliases.push(identity.canonicalCatalogId);
+    aliases.push(identity.canonicalCatalogId.toLowerCase());
+  }
+  if (identity?.catalogCandidates) {
+    for (const c of identity.catalogCandidates) {
+      if (c.confidence !== "low") {
+        aliases.push(c.canonical, c.hyphenated);
+      }
+    }
+  }
+  if (provider && providerAssetId) {
+    aliases.push(`${provider}:${providerAssetId}`);
+  }
+  return aliases;
+}
+
 export function buildMediaIdentity(
   descriptor: SourceDescriptor
 ): ProgressiveMediaIdentity {
@@ -152,13 +189,18 @@ export function buildMediaIdentity(
     }
   }
 
-  const primaryCandidate = allCandidates.length > 0 ? allCandidates[0] : null;
+  // Only candidates with sufficient confidence (medium or high, e.g. from title, URL, declared metadata)
+  // may be promoted to canonical catalog ID and authoritative duplicate work aliases.
+  // Low-confidence candidates (e.g. filename-only clues) are retained as indexing/search clues only.
+  const authoritativeCandidates = allCandidates.filter((c) => c.confidence !== "low");
+  const primaryCandidate = authoritativeCandidates.length > 0 ? authoritativeCandidates[0] : null;
   const realPerformers = normalizePerformers(descriptor.declaredPerformers || []);
 
-  // 1. Work-identity search aliases (used for strong duplicate checks and indexing)
+  // 1. Work-identity search aliases (used for strong duplicate checks and authoritative indexing)
+  // Note: Provider asset ID is provider-scoped (e.g. "eporner:12345") to prevent cross-provider collisions.
   const workAliasesSet = new Set<string>();
-  if (descriptor.providerAssetId) {
-    workAliasesSet.add(descriptor.providerAssetId);
+  if (descriptor.provider && descriptor.providerAssetId) {
+    workAliasesSet.add(`${descriptor.provider}:${descriptor.providerAssetId}`);
   }
 
   // 2. Performer-identity search aliases (used for discovery/search indexing only, NOT duplicates)
@@ -172,6 +214,16 @@ export function buildMediaIdentity(
     }
   }
 
+  // 3. General discovery search aliases (includes bare providerAssetId and low-confidence clues for discovery)
+  const generalSearchAliasesSet = new Set<string>();
+  if (descriptor.providerAssetId) {
+    generalSearchAliasesSet.add(descriptor.providerAssetId);
+  }
+  for (const c of allCandidates) {
+    generalSearchAliasesSet.add(c.canonical);
+    generalSearchAliasesSet.add(c.hyphenated);
+  }
+
   if (primaryCandidate) {
     const canonicalCatalogId = primaryCandidate.canonical;
     const hyphenated = primaryCandidate.hyphenated;
@@ -181,7 +233,7 @@ export function buildMediaIdentity(
     workAliasesSet.add(canonicalCatalogId.toLowerCase());
     workAliasesSet.add(hyphenated.toLowerCase());
 
-    for (const c of allCandidates) {
+    for (const c of authoritativeCandidates) {
       workAliasesSet.add(c.canonical);
       workAliasesSet.add(c.hyphenated);
     }
@@ -195,7 +247,9 @@ export function buildMediaIdentity(
 
     const workSearchAliases = Array.from(workAliasesSet);
     const performerSearchAliases = Array.from(performerAliasesSet);
-    const searchAliases = Array.from(new Set([...workSearchAliases, ...performerSearchAliases]));
+    const searchAliases = Array.from(
+      new Set([...workSearchAliases, ...performerSearchAliases, ...generalSearchAliasesSet])
+    );
 
     return {
       provider: descriptor.provider,
@@ -214,7 +268,7 @@ export function buildMediaIdentity(
     };
   }
 
-  // Deterministic fallback identity when no catalog ID is detected
+  // Deterministic fallback identity when no catalog ID is detected or confidence is low-only
   const sanitizedTitle = sanitizeFilename(title);
   const baseName = sanitizeFilename(
     `${descriptor.provider}-${descriptor.providerAssetId} - ${sanitizedTitle}`
@@ -222,7 +276,9 @@ export function buildMediaIdentity(
 
   const workSearchAliases = Array.from(workAliasesSet);
   const performerSearchAliases = Array.from(performerAliasesSet);
-  const searchAliases = Array.from(new Set([...workSearchAliases, ...performerSearchAliases]));
+  const searchAliases = Array.from(
+    new Set([...workSearchAliases, ...performerSearchAliases, ...generalSearchAliasesSet])
+  );
 
   return {
     provider: descriptor.provider,

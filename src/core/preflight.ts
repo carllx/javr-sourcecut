@@ -6,7 +6,7 @@ import type {
   ProgressiveMediaIdentity,
   SourceDescriptor,
 } from "../types.js";
-import { buildMediaIdentity } from "./identity.js";
+import { buildMediaIdentity, extractLegacyWorkAliases } from "./identity.js";
 import { loadJob } from "./job.js";
 
 export class DuplicatePreflightError extends Error {
@@ -41,9 +41,9 @@ export async function checkDuplicatePreflight(
   let entries: { name: string; isDirectory: () => boolean }[] = [];
   try {
     entries = await fs.readdir(rootDir, { withFileTypes: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // If rootDir does not exist yet, no duplicates can exist
-    if (err.code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { status: "not-seen" };
     }
     throw err;
@@ -52,7 +52,9 @@ export async function checkDuplicatePreflight(
   const candidateWorkAliases = new Set(
     (identity.workSearchAliases || [
       identity.canonicalCatalogId,
-      identity.providerAssetId,
+      identity.provider && identity.providerAssetId
+        ? `${identity.provider}:${identity.providerAssetId}`
+        : undefined,
     ].filter(Boolean) as string[]).map((s) => s.toLowerCase().trim())
   );
 
@@ -77,7 +79,7 @@ export async function checkDuplicatePreflight(
 
     let matchedReason: string | undefined;
 
-    // 1. Strong matching: Provider + Provider Asset ID
+    // 1. Strong matching: Provider + Provider Asset ID (strictly provider-scoped)
     if (
       job.provider &&
       descriptor.provider &&
@@ -104,27 +106,13 @@ export async function checkDuplicatePreflight(
     ) {
       matchedReason = `Matched canonical catalog ID: ${identity.canonicalCatalogId}`;
     }
-    // 4. Strong matching: Structured Work Search Aliases (catalog variants, provider IDs)
-    // NOTE: Performer names / performer aliases are search/indexing clues only and MUST NOT block
+    // 4. Strong matching: Structured Work Search Aliases (catalog variants, provider-scoped IDs)
+    // NOTE: Performer names / performer aliases and low-confidence clues are search/indexing only and MUST NOT block
     else {
-      const existingWorkAliases: string[] = [];
-      if (job.identity?.workSearchAliases && job.identity.workSearchAliases.length > 0) {
-        existingWorkAliases.push(...job.identity.workSearchAliases);
-      } else {
-        // Fallback for legacy job records: only extract catalog and provider ID, never performer names
-        if (job.identity?.canonicalCatalogId) {
-          existingWorkAliases.push(job.identity.canonicalCatalogId);
-          existingWorkAliases.push(job.identity.canonicalCatalogId.toLowerCase());
-        }
-        if (job.identity?.catalogCandidates) {
-          for (const c of job.identity.catalogCandidates) {
-            existingWorkAliases.push(c.canonical, c.hyphenated);
-          }
-        }
-        if (job.providerAssetId) {
-          existingWorkAliases.push(job.providerAssetId);
-        }
-      }
+      const existingWorkAliases: string[] =
+        job.identity?.workSearchAliases && job.identity.workSearchAliases.length > 0
+          ? job.identity.workSearchAliases
+          : extractLegacyWorkAliases(job.identity, job.provider, job.providerAssetId);
 
       const normalizedExisting = existingWorkAliases.map((s) => s.toLowerCase().trim());
       const commonWorkAlias = normalizedExisting.find((a) => a.length > 2 && candidateWorkAliases.has(a));

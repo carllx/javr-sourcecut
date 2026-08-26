@@ -208,6 +208,68 @@ describe("Duplicate Preflight Hardening", () => {
     expect(result.matchedJob).toBeUndefined();
   });
 
+  it("scopes provider asset IDs strictly to their provider namespace (different providers with same raw ID are not-seen)", async () => {
+    // Existing job from eporner with asset ID "777888" and raw fallback title
+    const existingDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "777888",
+      sourceUrl: "https://www.eporner.com/video-777888/eporner-title/",
+      rawTitle: "Eporner Raw Title",
+      declaredPerformers: [],
+      renditions: [sampleRendition],
+    };
+
+    const job = await createJob(tempRoot, existingDescriptor, sampleRendition);
+    job.status = "completed";
+    await saveJob(job);
+
+    // Incoming job from astalavr with same raw asset ID "777888" and different URL / title
+    const incomingDescriptor: SourceDescriptor = {
+      provider: "astalavr",
+      providerAssetId: "777888",
+      sourceUrl: "https://www.astalavr.com/video-777888/astalavr-title/",
+      rawTitle: "AstalaVR Raw Title",
+      declaredPerformers: [],
+      renditions: [sampleRendition],
+    };
+
+    const result = await checkDuplicatePreflight(tempRoot, incomingDescriptor);
+    expect(result.status).toBe("not-seen");
+    expect(result.matchedJob).toBeUndefined();
+  });
+
+  it("does not block when only low-confidence filename catalog candidates are present (not-seen)", async () => {
+    // Existing job with low-confidence filename-only clue IPX-789
+    const existingDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "assetFirst",
+      sourceUrl: "https://www.eporner.com/video-assetFirst/unrelated-one/",
+      rawTitle: "Unrelated Title One",
+      declaredPerformers: [],
+      observedFilenames: ["extra_ipx789_1080p.mp4"],
+      renditions: [sampleRendition],
+    };
+
+    const job = await createJob(tempRoot, existingDescriptor, sampleRendition);
+    job.status = "completed";
+    await saveJob(job);
+
+    // Incoming job with different asset ID and different URL that also has a filename containing IPX-789
+    const incomingDescriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "assetSecond",
+      sourceUrl: "https://www.eporner.com/video-assetSecond/unrelated-two/",
+      rawTitle: "Unrelated Title Two",
+      declaredPerformers: [],
+      observedFilenames: ["extra_ipx789_720p.mp4"],
+      renditions: [sampleRendition],
+    };
+
+    const result = await checkDuplicatePreflight(tempRoot, incomingDescriptor);
+    expect(result.status).toBe("not-seen");
+    expect(result.matchedJob).toBeUndefined();
+  });
+
   it("treats fuzzy filename clues alone as auxiliary evidence without creating authoritative duplicate blocker", async () => {
     // Create an unmanaged file in rootDir that might have a similar name, but no job.json
     const unmanagedDir = path.join(tempRoot, "Random Video Folder");
