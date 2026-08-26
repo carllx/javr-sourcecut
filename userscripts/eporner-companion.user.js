@@ -136,7 +136,8 @@
     const cardElements = [];
     for (const selector of EPORNER_CARD_SELECTORS) {
       const found = root.querySelectorAll(selector);
-      found.forEach((el) => {
+      found.forEach((rawEl) => {
+        const el = rawEl.closest(".mb, div[id^='vf'], .video-box, .mb5") || rawEl;
         if (!cardElements.includes(el)) {
           cardElements.push(el);
         }
@@ -185,7 +186,7 @@
       if (onlyAv1Active) {
         if (profile && profile.probeStatus === "no_av1") {
           card.element.classList.add("javr-soft-hidden");
-          card.element.style.display = "none";
+          card.element.style.setProperty("display", "none", "important");
         } else {
           card.element.classList.remove("javr-soft-hidden");
           card.element.style.removeProperty("display");
@@ -1120,11 +1121,27 @@
     }
     registerCandidateCards(cards) {
       for (const card of cards) {
-        if (!this.allCandidateCards.has(card.videoId)) {
+        const existing = this.allCandidateCards.get(card.videoId);
+        if (existing) {
+          existing.element = card.element;
+          existing.element.setAttribute("data-javr-vid", card.videoId);
+          if (!existing.profile && this.cacheManager) {
+            const cached = this.cacheManager.getProfile(card.videoId);
+            if (cached) {
+              existing.profile = cached;
+            }
+          }
+        } else {
+          if (!card.profile && this.cacheManager) {
+            const cached = this.cacheManager.getProfile(card.videoId);
+            if (cached) {
+              card.profile = cached;
+            }
+          }
           this.allCandidateCards.set(card.videoId, card);
           card.element.setAttribute("data-javr-vid", card.videoId);
           if (card.is4kPlus) {
-            this.badgeRenderer.mountBadge(card);
+            this.badgeRenderer.mountBadge(card, card.profile);
             if (this.intersectionObserver) {
               this.intersectionObserver.observe(card.element);
             }
@@ -1143,7 +1160,7 @@
       this.allCandidateCards.clear();
       for (const card of kept) {
         this.allCandidateCards.set(card.videoId, card);
-        this.badgeRenderer.mountBadge(card);
+        this.badgeRenderer.mountBadge(card, card.profile);
         this.queue.enqueue(card);
       }
       this.applyVisibility();
@@ -1154,9 +1171,12 @@
       this.applyVisibility();
     }
     handleProfileUpdate(profile, card) {
+      const canonicalCard = this.allCandidateCards.get(card.videoId) || card;
+      canonicalCard.profile = profile;
       card.profile = profile;
-      this.badgeRenderer.mountBadge(card, profile);
+      this.badgeRenderer.mountBadge(canonicalCard, profile);
       this.applyVisibility();
+      this.updateStats();
     }
     applyVisibility() {
       const cards = Array.from(this.allCandidateCards.values());

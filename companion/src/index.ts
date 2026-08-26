@@ -130,13 +130,30 @@ export class EpornerCompanionApp {
 
   private registerCandidateCards(cards: CandidateCard[]): void {
     for (const card of cards) {
-      if (!this.allCandidateCards.has(card.videoId)) {
+      const existing = this.allCandidateCards.get(card.videoId);
+      if (existing) {
+        // Keep DOM element synchronized in case of dynamic re-renders
+        existing.element = card.element;
+        existing.element.setAttribute("data-javr-vid", card.videoId);
+        if (!existing.profile && this.cacheManager) {
+          const cached = this.cacheManager.getProfile(card.videoId);
+          if (cached) {
+            existing.profile = cached;
+          }
+        }
+      } else {
+        if (!card.profile && this.cacheManager) {
+          const cached = this.cacheManager.getProfile(card.videoId);
+          if (cached) {
+            card.profile = cached;
+          }
+        }
         this.allCandidateCards.set(card.videoId, card);
         card.element.setAttribute("data-javr-vid", card.videoId);
 
         // Mount badge if 4K+
         if (card.is4kPlus) {
-          this.badgeRenderer.mountBadge(card);
+          this.badgeRenderer.mountBadge(card, card.profile);
 
           if (this.intersectionObserver) {
             this.intersectionObserver.observe(card.element);
@@ -163,7 +180,7 @@ export class EpornerCompanionApp {
     this.allCandidateCards.clear();
     for (const card of kept) {
       this.allCandidateCards.set(card.videoId, card);
-      this.badgeRenderer.mountBadge(card);
+      this.badgeRenderer.mountBadge(card, card.profile);
       // Start automatic probing for remaining 4K candidates
       this.queue.enqueue(card);
     }
@@ -178,9 +195,12 @@ export class EpornerCompanionApp {
   }
 
   private handleProfileUpdate(profile: RenditionProfile, card: CandidateCard): void {
+    const canonicalCard = this.allCandidateCards.get(card.videoId) || card;
+    canonicalCard.profile = profile;
     card.profile = profile;
-    this.badgeRenderer.mountBadge(card, profile);
+    this.badgeRenderer.mountBadge(canonicalCard, profile);
     this.applyVisibility();
+    this.updateStats();
   }
 
   private applyVisibility(): void {

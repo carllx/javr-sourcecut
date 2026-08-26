@@ -149,10 +149,11 @@ export function extractCardResolution(cardEl: HTMLElement): string {
 export function parseCandidateCards(root: ParentNode = document): CandidateCard[] {
   const cardElements: HTMLElement[] = [];
   
-  // Find matching elements
+  // Find matching elements and normalize to outermost container
   for (const selector of EPORNER_CARD_SELECTORS) {
     const found = root.querySelectorAll<HTMLElement>(selector);
-    found.forEach((el) => {
+    found.forEach((rawEl) => {
+      const el = (rawEl.closest(".mb, div[id^='vf'], .video-box, .mb5") as HTMLElement) || rawEl;
       if (!cardElements.includes(el)) {
         cardElements.push(el);
       }
@@ -231,7 +232,7 @@ export function applySoftFilter(
     if (onlyAv1Active) {
       if (profile && profile.probeStatus === "no_av1") {
         card.element.classList.add("javr-soft-hidden");
-        card.element.style.display = "none";
+        card.element.style.setProperty("display", "none", "important");
       } else {
         // Optimistic visibility: detected, pending, probing, unknown, error
         card.element.classList.remove("javr-soft-hidden");

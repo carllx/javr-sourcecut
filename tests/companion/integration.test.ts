@@ -145,4 +145,205 @@ describe("Eporner Companion Integration & Lifecycle", () => {
       app.destroy();
     });
   });
+
+  describe("Only-AV1 Soft Filter In-Flight Settling (Race Condition)", () => {
+    it("automatically hides later-settled NO AV1 cards when Only-AV1 is toggled during probing without requiring second toggle", async () => {
+      let resolveV1: (val: any) => void;
+      let resolveV3: (val: any) => void;
+
+      const promiseV1 = new Promise((resolve) => {
+        resolveV1 = resolve;
+      });
+      const promiseV3 = new Promise((resolve) => {
+        resolveV3 = resolve;
+      });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) => {
+          if (url.includes("video-one")) {
+            return promiseV1;
+          }
+          if (url.includes("video-three")) {
+            return promiseV3;
+          }
+          return Promise.resolve({
+            ok: true,
+            text: async () => `<div id="hd-porn-dload"></div>`,
+          });
+        })
+      );
+
+      const app = new EpornerCompanionApp({
+        searchQuery: "?quality=2160",
+      });
+      await app.init();
+
+      const elV1 = document.querySelector("#v1") as HTMLElement;
+      const elV3 = document.querySelector("#v3") as HTMLElement;
+
+      // Both cards are in-flight probing
+      expect(elV1).not.toBeNull();
+      expect(elV3).not.toBeNull();
+
+      // Step 3: User clicks "只看 AV1" while probing is in-flight
+      const buttons = document.querySelectorAll(".javr-btn") as any;
+      const softBtn = buttons[1]; // [只看 AV1]
+      softBtn.click();
+      expect(softBtn.classList.contains("active")).toBe(true);
+
+      // Optimistic visibility: while in-flight, neither card is hidden
+      expect(elV1.style.display).not.toBe("none");
+      expect(elV3.style.display).not.toBe("none");
+
+      // Step 5 & 6: Settle v1 as detected (AV1 4K) and v3 as no_av1 (H264 only)
+      resolveV1!({
+        ok: true,
+        text: async () => `
+          <div id="downloaddiv">
+            <span class="download-av1"><a href="/dload/1/2160/1-2160p.mp4">2160p (4K) AV1</a></span>
+          </div>
+        `,
+      });
+
+      resolveV3!({
+        ok: true,
+        text: async () => `
+          <div id="downloaddiv">
+            <span class="download-h264"><a href="/dload/3/2160/3-2160p.mp4">2160p (4K) H264</a></span>
+          </div>
+        `,
+      });
+
+      // Allow microtasks & queue callbacks to settle
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Assertions:
+      // v1 (detected AV1) must remain visible
+      expect(elV1.style.display).not.toBe("none");
+      expect(elV1.classList.contains("javr-soft-hidden")).toBe(false);
+
+      // v3 (later settled as no_av1) MUST be automatically hidden without requiring second toggle!
+      expect(elV3.style.display).toBe("none");
+      expect(elV3.classList.contains("javr-soft-hidden")).toBe(true);
+
+      // Toggle off Only-AV1 -> v3 becomes visible again
+      softBtn.click();
+      expect(elV3.style.display).not.toBe("none");
+      expect(elV3.classList.contains("javr-soft-hidden")).toBe(false);
+
+      app.destroy();
+    });
+
+    it("keeps Error / Unknown cards visible under Only-AV1 active mode", async () => {
+      let resolveV1: (val: any) => void;
+
+      const promiseV1 = new Promise((resolve) => {
+        resolveV1 = resolve;
+      });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) => {
+          if (url.includes("video-one")) {
+            return promiseV1;
+          }
+          return Promise.resolve({
+            ok: true,
+            text: async () => `<div id="hd-porn-dload"></div>`,
+          });
+        })
+      );
+
+      const app = new EpornerCompanionApp({
+        searchQuery: "?quality=2160",
+      });
+      await app.init();
+
+      const elV1 = document.querySelector("#v1") as HTMLElement;
+      const buttons = document.querySelectorAll(".javr-btn") as any;
+      const softBtn = buttons[1]; // [只看 AV1]
+      softBtn.click();
+      expect(softBtn.classList.contains("active")).toBe(true);
+
+      // Settle v1 as Network Error (after retries fail)
+      resolveV1!({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Error/Unknown must remain optimistic visible
+      expect(elV1.style.display).not.toBe("none");
+      expect(elV1.classList.contains("javr-soft-hidden")).toBe(false);
+
+      app.destroy();
+    });
+
+    it("automatically hides dynamically loaded cards that later settle as NO AV1 while Only-AV1 is active", async () => {
+      let resolveDyn: (val: any) => void;
+      const promiseDyn = new Promise((resolve) => {
+        resolveDyn = resolve;
+      });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) => {
+          if (url.includes("video-dyn-4k")) {
+            return promiseDyn;
+          }
+          return Promise.resolve({
+            ok: true,
+            text: async () => `<div id="hd-porn-dload"><span class="download-av1"><a href="/dload/1/2160/1.mp4">4K AV1</a></span></div>`,
+          });
+        })
+      );
+
+      const app = new EpornerCompanionApp({
+        searchQuery: "?quality=2160",
+      });
+      await app.init();
+
+      // Enable Only-AV1
+      const buttons = document.querySelectorAll(".javr-btn") as any;
+      const softBtn = buttons[1];
+      softBtn.click();
+      expect(softBtn.classList.contains("active")).toBe(true);
+
+      // Dynamically add a new 4K candidate card
+      const dynamicContainer = document.querySelector("#vidresults") as HTMLDivElement;
+      const dynamic4k = document.createElement("div");
+      dynamic4k.className = "mb";
+      dynamic4k.id = "v-dyn-4k";
+      dynamic4k.innerHTML = `<a href="/video-dyn-4k/test"><span class="mvhd">4K</span></a>`;
+      dynamicContainer.appendChild(dynamic4k);
+
+      app.scanAndProcess(dynamicContainer);
+
+      const elDyn = document.querySelector("#v-dyn-4k") as HTMLElement;
+      expect(elDyn).not.toBeNull();
+      // Initially pending/probing -> visible
+      expect(elDyn.style.display).not.toBe("none");
+
+      // Settle dynamically added card as no_av1
+      resolveDyn!({
+        ok: true,
+        text: async () => `
+          <div id="downloaddiv">
+            <span class="download-h264"><a href="/dload/dyn/2160/dyn.mp4">2160p H264</a></span>
+          </div>
+        `,
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Must be automatically hidden without user interaction
+      expect(elDyn.style.display).toBe("none");
+      expect(elDyn.classList.contains("javr-soft-hidden")).toBe(true);
+
+      app.destroy();
+    });
+  });
 });
