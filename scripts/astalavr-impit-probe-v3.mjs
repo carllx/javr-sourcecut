@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-// v3 standalone probe; see prior content. This file intentionally avoids project build/typecheck.
+// Browser Lead standalone AstalaVR transport probe v3.
+// Intentionally independent of the project's TypeScript build/typecheck.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
