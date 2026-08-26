@@ -257,5 +257,69 @@ describe("AstalaVR Tracer Slice 1 End-to-End Workflow", () => {
       })
     ).rejects.toThrow(/Duplicate preflight halted/i);
   });
+
+  it("handles proxy download auth failure by cleaning up .part and persisting needs-user-intervention", async () => {
+    const astalaUrl = `${serverUrl}/videos/7gYMp/Kenzie-Reeves-VR-Scene`;
+
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/videos/7gYMp")) {
+        return new Response(
+          `<!DOCTYPE html><html><body><main data-video-id="7gYMp"><dl8-video title="VR"><source src="${serverUrl}/media/7gYMp/720P.mp4" quality="720P"/></dl8-video></main></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } }
+        );
+      }
+      if (url.includes("/media/7gYMp/720P.mp4")) {
+        return new Response("Forbidden", { status: 403, statusText: "Forbidden" });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    await expect(
+      runTracerSlice({
+        sourceUrl: astalaUrl,
+        rootDir: tempRoot,
+        sessionProvider: new NoopSessionProvider(),
+        fetchFn: mockFetch as any,
+      })
+    ).rejects.toThrow(/Download failed with HTTP 403 Forbidden/i);
+
+    // Job workspace should exist with status needs-user-intervention
+    const entries = await fs.readdir(tempRoot);
+    const jobDirName = entries.find((e) => e.startsWith("astalavr-7gYMp"));
+    expect(jobDirName).toBeDefined();
+
+    const jobWorkspace = path.join(tempRoot, jobDirName!);
+    const jobJson = JSON.parse(await fs.readFile(path.join(jobWorkspace, "job.json"), "utf-8"));
+    expect(jobJson.status).toBe("needs-user-intervention");
+    expect(jobJson.interventionReason).toContain("Authenticated session transport is not configured");
+
+    // .part file must be cleaned up
+    const workspaceFiles = await fs.readdir(jobWorkspace);
+    const partFiles = workspaceFiles.filter((f) => f.endsWith(".part"));
+    expect(partFiles).toEqual([]);
+  });
+
+  it("fails closed on fresh ingestion page auth failure without creating damaged job", async () => {
+    const astalaUrl = `${serverUrl}/videos/forbidden/Forbidden-Scene`;
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response("Access Denied Cloudflare", { status: 403, statusText: "Forbidden" })
+    );
+
+    await expect(
+      runTracerSlice({
+        sourceUrl: astalaUrl,
+        rootDir: tempRoot,
+        sessionProvider: new NoopSessionProvider(),
+        fetchFn: mockFetch as any,
+      })
+    ).rejects.toThrow(/Authentication or browser session is required/i);
+
+    // No job workspace should be created
+    const entries = await fs.readdir(tempRoot);
+    const jobDirs = entries.filter((e) => !e.includes("profiles"));
+    expect(jobDirs).toEqual([]);
+  });
 });
+
 

@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter } from "../types.js";
+import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
 import { AstalaVrAdapter } from "../adapters/astalavr/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
@@ -28,6 +28,37 @@ export const DEFAULT_ADAPTERS: SourceAdapter[] = [
   new EpornerAdapter(),
   new AstalaVrAdapter(),
 ];
+
+export function isAuthOrAccessError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as any;
+  if (anyErr.status === 401 || anyErr.status === 403 || anyErr.status === 407) return true;
+  if (anyErr.statusCode === 401 || anyErr.statusCode === 403 || anyErr.statusCode === 407) return true;
+  const msg = (anyErr.message || String(err)).toLowerCase();
+  return (
+    /\b(401|403|407|unauthorized|forbidden|login required|session expired|token expired|access denied|cloudflare|turnstile|captcha|bot verification|auth(?:entication)? required)\b/i.test(
+      msg
+    ) ||
+    msg.includes("requires an authenticated session") ||
+    msg.includes("authenticated session transport is not configured") ||
+    msg.includes("failed public probe: 403") ||
+    msg.includes("failed public probe: 401") ||
+    msg.includes("failed live range capability verification")
+  );
+}
+
+export function buildInterventionReason(
+  err: Error | unknown,
+  sessionProvider: SourceSessionProvider,
+  provider: string,
+  context: "resolve" | "proxy-download" | "hq-selection"
+): string {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  if (!sessionProvider.hasSession) {
+    return `Authenticated session transport is not configured for runtime (e.g. run 'javr-sourcecut auth ${provider}' or pass --cookies). Action '${context}' failed with access/session error: ${errMsg}`;
+  }
+  return `Current session or token was rejected or expired for provider '${provider}' during '${context}' (${errMsg}). Please re-authenticate via 'javr-sourcecut auth ${provider}' or supply fresh --cookies.`;
+}
 
 export interface TracerSliceParams {
   sourceUrl: string;
@@ -67,8 +98,20 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
 
   onLog(`[1/5] Ingesting URL with adapter "${adapter.provider}"...`);
 
-  // 2. Discover formats and metadata
-  const descriptor = await adapter.resolve(sourceUrl, sessionFetch);
+  // 2. Discover formats and metadata (Fail closed before job creation if initial page fetch fails)
+  let descriptor: SourceDescriptor;
+  try {
+    descriptor = await adapter.resolve(sourceUrl, sessionFetch);
+  } catch (err: any) {
+    if (isAuthOrAccessError(err)) {
+      const guidance = !sessionProvider.hasSession
+        ? `Authentication or browser session is required to access "${sourceUrl}". Please run 'javr-sourcecut auth ${adapter.provider}' or supply --cookies.`
+        : `Session access failed for "${sourceUrl}". Please re-authenticate via 'javr-sourcecut auth ${adapter.provider}' or update --cookies.`;
+      throw new Error(`Failed to resolve source page (${err.message}). ${guidance}`);
+    }
+    throw err;
+  }
+
   onLog(`Discovered source: "${descriptor.rawTitle}" (${descriptor.renditions.length} renditions)`);
 
   // 3. Duplicate Preflight Check (fail-closed before downloading proxy or creating job)
@@ -94,10 +137,24 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   // 6. Download proxy
   await updateJobStatus(job, "proxy-downloading");
   onLog(`[2/5] Downloading proxy video to: ${job.proxyPath}`);
-  await downloadFile(selectedProxy.directUrl, job.proxyPath, {
-    fetchFn: sessionFetch,
-    onProgress,
-  });
+  try {
+    await downloadFile(selectedProxy.directUrl, job.proxyPath, {
+      fetchFn: sessionFetch,
+      onProgress,
+    });
+  } catch (err: any) {
+    // Cleanup any partial file
+    await fs.rm(`${job.proxyPath}.part`, { force: true }).catch(() => {});
+
+    if (isAuthOrAccessError(err)) {
+      const reason = buildInterventionReason(err, sessionProvider, job.provider, "proxy-download");
+      job.status = "needs-user-intervention";
+      job.interventionReason = reason;
+      await saveJob(job);
+      onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId}: ${reason}`);
+    }
+    throw err;
+  }
 
   // 6. Verify container integrity via ffprobe
   onLog(`[3/5] Verifying proxy container integrity with ffprobe...`);
@@ -249,9 +306,26 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     throw new Error(`No compatible source adapter found for source URL: ${job.sourceUrl}`);
   }
 
-  onLog(`[Resume 3/5] Re-resolving live renditions from ${job.sourceUrl}...`);
-  const descriptor = await adapter.resolve(job.sourceUrl, sessionFetch);
-  onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
+  let descriptor: SourceDescriptor;
+  try {
+    onLog(`[Resume 3/5] Re-resolving live renditions from ${job.sourceUrl}...`);
+    descriptor = await adapter.resolve(job.sourceUrl, sessionFetch);
+    onLog(`Discovered ${descriptor.renditions.length} live renditions.`);
+  } catch (err: any) {
+    if (isAuthOrAccessError(err)) {
+      const reason = buildInterventionReason(err, sessionProvider, job.provider, "resolve");
+      job.status = "needs-user-intervention";
+      job.interventionReason = reason;
+      job.qualityTarget = resolveJobQualityTargetMetadata(
+        job.renditions || [],
+        qualityTarget,
+        reason
+      );
+      await saveJob(job);
+      onLog(`[NEEDS USER INTERVENTION] Job ${job.jobId}: ${reason}`);
+    }
+    throw err;
+  }
 
   // 6. Select highest publicly available Direct MP4 rendition in target tier
   let hqSelectionResult: HqSelectionResult;
@@ -263,9 +337,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     });
   } catch (err: any) {
     // Quality target is inaccessible (e.g. requires authentication) -> enter needs-user-intervention
-    const reason = !sessionProvider.hasSession
-      ? `Authenticated session transport is not configured for runtime (e.g. pass --cookies). Target resolution requires an authenticated session: ${err.message}`
-      : err.message;
+    const reason = buildInterventionReason(err, sessionProvider, job.provider, "hq-selection");
 
     job.status = "needs-user-intervention";
     job.renditions = descriptor.renditions;

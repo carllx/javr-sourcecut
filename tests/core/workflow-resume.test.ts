@@ -1596,7 +1596,88 @@ describe("AstalaVR Tracer Slice 6 Workflow Resume E2E", () => {
     expect(reloaded.status).toBe("needs-user-intervention");
     expect(reloaded.interventionReason).toContain("Authenticated session transport is not configured");
   });
+
+  it("handles adapter.resolve page auth rejection by persisting needs-user-intervention and keeping proxy intact", async () => {
+    const workspaceDir = path.join(tmpDir, "astalavr-page-auth-fail");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "astalavr-page-auth-fail.proxy.mp4");
+    const proxyContent = Buffer.from("intact-proxy-bytes");
+    await fs.writeFile(proxyPath, proxyContent);
+    const proxyStatBefore = await fs.stat(proxyPath);
+
+    const llcPath = path.join(workspaceDir, "astalavr-page-auth-fail.llc");
+    await fs.writeFile(
+      llcPath,
+      JSON.stringify({
+        version: 2,
+        mediaFileName: "astalavr-page-auth-fail.proxy.mp4",
+        cutSegments: [{ start: 0, end: 10, selected: true }],
+      })
+    );
+
+    const jobState: JobState = {
+      jobId: "astalavr-page-auth-fail",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://astalavr.com/videos/pageauthfail",
+      provider: "astalavr",
+      providerAssetId: "pageauthfail",
+      identity: {
+        provider: "astalavr",
+        providerAssetId: "pageauthfail",
+        observedTitle: "Page Auth Fail",
+        searchAliases: ["astalavr:pageauthfail"],
+        workSearchAliases: ["astalavr:pageauthfail"],
+        performerSearchAliases: [],
+        performers: [],
+        confidence: "fallback",
+        baseName: "astalavr-pageauthfail",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "720p-h264",
+        resolution: "720p",
+        height: 720,
+        vcodec: "h264",
+        directUrl: "https://cdn3.astalavr.com/pageauthfail/720P.mp4",
+      },
+      proxyPath,
+      expectedLlcPath: llcPath,
+      finalOutputPath: path.join(workspaceDir, "out.mp4"),
+      renditions: [],
+    };
+
+    await saveJob(jobState);
+
+    // Mock adapter where resolve itself throws 403 Forbidden / Cloudflare challenge
+    const mockAdapter: SourceAdapter = {
+      provider: "astalavr",
+      canHandle: () => true,
+      resolve: vi.fn().mockRejectedValue(new Error("Failed to fetch AstalaVR page (403 Forbidden): Cloudflare challenge")),
+    };
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(/Failed to fetch AstalaVR page \(403 Forbidden\)/i);
+
+    const reloaded = await loadJob(workspaceDir);
+    expect(reloaded.status).toBe("needs-user-intervention");
+    expect(reloaded.interventionReason).toContain("Authenticated session transport is not configured");
+    expect(reloaded.interventionReason).toContain("Failed to fetch AstalaVR page (403 Forbidden)");
+
+    // Invariant: Proxy must not be modified
+    const proxyStatAfter = await fs.stat(proxyPath);
+    expect(proxyStatAfter.mtimeMs).toBe(proxyStatBefore.mtimeMs);
+    expect(proxyStatAfter.size).toBe(proxyStatBefore.size);
+  });
 });
+
 
 
 
