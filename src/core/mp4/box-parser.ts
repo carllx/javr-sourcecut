@@ -50,6 +50,48 @@ export function readBoxes(buffer: Buffer, baseFileOffset: number = 0): BoxHeader
   return boxes;
 }
 
+export function findBoxHeader(
+  buffer: Buffer,
+  targetType: string,
+  baseFileOffset: number = 0
+): BoxHeader | null {
+  const boxes = readBoxes(buffer, baseFileOffset);
+  const found = boxes.find((b) => b.type === targetType);
+  if (found) {
+    return found;
+  }
+
+  // If aligned scan didn't find the box (e.g. buffer starts in middle of mdat), scan by signature
+  const targetBuf = Buffer.from(targetType, "ascii");
+  let matchIdx = buffer.indexOf(targetBuf);
+
+  while (matchIdx !== -1) {
+    if (matchIdx >= 4) {
+      const boxOffset = matchIdx - 4;
+      let size = buffer.readUInt32BE(boxOffset);
+      let headerSize = 8;
+
+      if (size === 1 && boxOffset + 16 <= buffer.length) {
+        size = readUInt64BE(buffer, boxOffset + 8);
+        headerSize = 16;
+      }
+
+      if (size >= headerSize) {
+        return {
+          type: targetType,
+          size,
+          headerSize,
+          offset: boxOffset,
+          fileOffset: baseFileOffset + boxOffset,
+        };
+      }
+    }
+    matchIdx = buffer.indexOf(targetBuf, matchIdx + 1);
+  }
+
+  return null;
+}
+
 export function findBox(
   buffer: Buffer,
   targetType: string,

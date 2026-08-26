@@ -4,7 +4,7 @@ import {
   RenditionVersionMismatchError,
   UnprovablePartialPlanError,
 } from "./types.js";
-import { parseMP4Buffer } from "./box-parser.js";
+import { findBoxHeader, parseMP4Buffer } from "./box-parser.js";
 import { isStrongEtag, type TransferLedgerManager } from "./ledger.js";
 import type { TransferBudgetTracker } from "./budget.js";
 
@@ -285,21 +285,101 @@ export async function probeMP4Index(
     }
   }
 
+  // If moov header was detected in head probe but moov size extends beyond initial head buffer,
+  // dynamically fetch the exact remainder of the moov box (strictly bounded < 50% file size).
+  let currentHeadBuffer = headBuffer;
+  let currentHeadEnd = headEnd;
+  let totalHeadProbeBytes = headProbeBytesTransferred;
+
+  const moovHeaderInHead = findBoxHeader(headBuffer, "moov", 0);
+  if (moovHeaderInHead && moovHeaderInHead.fileOffset < fileSize * 0.5) {
+    const requiredMoovEnd = moovHeaderInHead.fileOffset + moovHeaderInHead.size - 1;
+    const maxAllowedMoovEnd = Math.min(fileSize - 1, Math.max(64 * 1024 * 1024, Math.floor(fileSize * 0.5)));
+
+    if (requiredMoovEnd > currentHeadEnd && requiredMoovEnd <= maxAllowedMoovEnd) {
+      const remainingStart = currentHeadEnd + 1;
+      const remainingEnd = requiredMoovEnd;
+      const expectedRemainderLength = remainingEnd - remainingStart + 1;
+
+      const prospectiveBytes =
+        capabilityProbeBytesTransferred + totalHeadProbeBytes + expectedRemainderLength;
+      if (prospectiveBytes < fileSize && prospectiveBytes / fileSize <= 0.5) {
+        options.budgetTracker?.checkProspectiveBudget(expectedRemainderLength);
+
+        const remRes = await fetchFn(url, {
+          headers: {
+            Range: `bytes=${remainingStart}-${remainingEnd}`,
+            ...options.headers,
+          },
+        });
+
+        if (remRes.status === 206) {
+          const remCr = remRes.headers.get("content-range");
+          const remMatch = remCr?.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+          if (
+            remMatch &&
+            parseInt(remMatch[1], 10) === remainingStart &&
+            parseInt(remMatch[2], 10) === remainingEnd
+          ) {
+            const remBuffer = await readResponseBodyStream(remRes, {
+              budgetTracker: options.budgetTracker,
+              ledgerManager: options.ledgerManager,
+            });
+
+            if (remBuffer.length === expectedRemainderLength) {
+              currentHeadBuffer = Buffer.concat([currentHeadBuffer, remBuffer]);
+              currentHeadEnd = remainingEnd;
+              totalHeadProbeBytes += remBuffer.length;
+
+              try {
+                const index = parseMP4Buffer(currentHeadBuffer, fileSize, 0);
+                return {
+                  index,
+                  capabilityProbeBytesTransferred,
+                  headProbeBytesTransferred: totalHeadProbeBytes,
+                  tailProbeBytesTransferred: 0,
+                  totalProbeBytesTransferred: capabilityProbeBytesTransferred + totalHeadProbeBytes,
+                  etag: establishedEtag,
+                  cachedHead: {
+                    buffer: currentHeadBuffer,
+                    range: { startByte: 0, endByte: currentHeadEnd },
+                  },
+                };
+              } catch (err: any) {
+                if (!(err instanceof UnprovablePartialPlanError)) {
+                  throw err;
+                }
+              }
+            }
+          } else {
+            cancelResponseBody(remRes);
+          }
+        } else {
+          cancelResponseBody(remRes);
+        }
+      }
+    }
+  }
+
   // =========================================================================
   // Stage C: Bounded Tail Probe (if moov not in head)
   // Ensure tail probe does not overlap head probe and aggregate probes stay strictly within partial budget
   // =========================================================================
-  const tailBudget = Math.min(configuredTailProbeBytes, Math.floor(fileSize * 0.5));
+  const defaultTailProbeBytes = Math.min(
+    16 * 1024 * 1024,
+    Math.max(configuredTailProbeBytes, Math.floor(fileSize * 0.01))
+  );
+  const tailBudget = Math.min(defaultTailProbeBytes, Math.floor(fileSize * 0.5));
   const tailStart = fileSize - tailBudget;
   const tailEnd = fileSize - 1;
   const expectedTailBodyLength = tailEnd - tailStart + 1;
 
   const prospectiveProbeBytes =
-    capabilityProbeBytesTransferred + headProbeBytesTransferred + tailBudget;
+    capabilityProbeBytesTransferred + totalHeadProbeBytes + tailBudget;
   const prospectiveProbeRatio = prospectiveProbeBytes / fileSize;
 
   if (
-    tailStart <= headEnd ||
+    tailStart <= currentHeadEnd ||
     tailStart <= 0 ||
     prospectiveProbeBytes >= fileSize ||
     prospectiveProbeRatio > 0.95 ||
@@ -411,14 +491,14 @@ export async function probeMP4Index(
     return {
       index,
       capabilityProbeBytesTransferred,
-      headProbeBytesTransferred,
+      headProbeBytesTransferred: totalHeadProbeBytes,
       tailProbeBytesTransferred,
       totalProbeBytesTransferred:
-        capabilityProbeBytesTransferred + headProbeBytesTransferred + tailProbeBytesTransferred,
+        capabilityProbeBytesTransferred + totalHeadProbeBytes + tailProbeBytesTransferred,
       etag: finalEffectiveEtag,
       cachedHead: {
-        buffer: headBuffer,
-        range: { startByte: 0, endByte: headEnd },
+        buffer: currentHeadBuffer,
+        range: { startByte: 0, endByte: currentHeadEnd },
       },
       cachedTail: {
         buffer: tailBuffer,
@@ -427,7 +507,7 @@ export async function probeMP4Index(
     };
   } catch (err: any) {
     throw new UnprovablePartialPlanError(
-      `Could not locate complete moov atom within bounded head (${headBudget}B) or tail (${tailBudget}B) probes for ${url}. Refusing unbounded full-file download.`
+      `Could not locate complete moov atom within bounded head (${totalHeadProbeBytes}B) or tail (${tailBudget}B) probes for ${url}. Refusing unbounded full-file download.`
     );
   }
 }

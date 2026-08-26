@@ -432,6 +432,16 @@ export async function extractCookiesFromProfile(
       const startTime = Date.now();
       const pollTimeout = 6000;
       while (Date.now() - startTime < pollTimeout) {
+        try {
+          const content = await fs.readFile(activePortFile, "utf-8");
+          const lines = content.trim().split(/\r?\n/);
+          if (lines.length >= 2) {
+            port = parseInt(lines[0].trim(), 10);
+            browserWsPath = lines[1].trim();
+            if (port > 0) break;
+          }
+        } catch {}
+
         if (procExited) {
           if (exitCode === 21 && attempt < maxRetries - 1) {
             // Profile in use by closing background process; wait for OS file lock release and retry
@@ -443,15 +453,6 @@ export async function extractCookiesFromProfile(
           );
         }
         await new Promise((r) => setTimeout(r, 100));
-        try {
-          const content = await fs.readFile(activePortFile, "utf-8");
-          const lines = content.trim().split(/\r?\n/);
-          if (lines.length >= 2) {
-            port = parseInt(lines[0].trim(), 10);
-            browserWsPath = lines[1].trim();
-            if (port > 0) break;
-          }
-        } catch {}
       }
 
       if (port > 0) {
@@ -497,9 +498,9 @@ export async function extractCookiesFromProfile(
       pageWs.onerror = (err) => reject(new Error(`Page WebSocket connection failed: ${err}`));
     });
 
-    // Query Network.getCookies with explicit URL scope
+    // Query Storage.getCookies to extract all cookies from profile storage
     const cookiesResponse = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("CDP Network.getCookies timed out")), 4000);
+      const timer = setTimeout(() => reject(new Error("CDP Storage.getCookies timed out")), 4000);
       if (!pageWs) return reject(new Error("Page WebSocket closed"));
       pageWs.onmessage = (event) => {
         try {
@@ -513,13 +514,13 @@ export async function extractCookiesFromProfile(
       pageWs.send(
         JSON.stringify({
           id: 101,
-          method: "Network.getCookies",
-          params: { urls: targetUrls },
+          method: "Storage.getCookies",
         })
       );
     });
 
-    const rawCookies: any[] = cookiesResponse?.result?.cookies ?? [];
+    const rawCookies: any[] =
+      cookiesResponse?.result?.cookies ?? cookiesResponse?.cookies ?? [];
     const cookies: NetscapeCookie[] = [];
 
     for (const c of rawCookies) {
@@ -873,37 +874,17 @@ export async function launchAuthBrowser(
     `\nPlease log into ${provider} in the opened browser window. When finished, you may close the browser.`
   );
 
-  let proc: any;
-  if (process.platform === "win32") {
-    proc = spawn(
-      "cmd.exe",
-      [
-        "/c",
-        "start",
-        "/wait",
-        `"${browser.type}"`,
-        browser.executablePath,
-        `--user-data-dir=${profileDir}`,
-        "--new-window",
-        "--no-first-run",
-        "--no-default-browser-check",
-        targetUrl,
-      ],
-      { stdio: "ignore", windowsHide: false }
-    );
-  } else {
-    proc = spawn(
-      browser.executablePath,
-      [
-        `--user-data-dir=${profileDir}`,
-        "--new-window",
-        "--no-first-run",
-        "--no-default-browser-check",
-        targetUrl,
-      ],
-      { stdio: "ignore" }
-    );
-  }
+  const proc = spawn(
+    browser.executablePath,
+    [
+      `--user-data-dir=${profileDir}`,
+      "--new-window",
+      "--no-first-run",
+      "--no-default-browser-check",
+      targetUrl,
+    ],
+    { stdio: "ignore", windowsHide: false }
+  );
 
   try {
     await new Promise<void>((resolve) => {

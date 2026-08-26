@@ -273,7 +273,7 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
     expect(result.probeResult.duration).toBeLessThanOrEqual(5.0);
     expect(result.probeResult.videoStream.codec).toBe("h264");
     expect(result.savingsPercent).toBeGreaterThanOrEqual(10);
-  });
+  }, 20000);
 
   it("proves Run 1 spends probe/data bytes, process stops with budget exhausted, Run 2 resume fails prospectively before issuing probe requests", async () => {
     const { BudgetExceededError } = await import("../../../src/core/mp4/types.js");

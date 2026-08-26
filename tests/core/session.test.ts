@@ -366,4 +366,65 @@ otherdomain.com	FALSE	/	FALSE	1893456000	other_cookie	other_val
       await new Promise<void>((resolve) => targetServer.close(() => resolve()));
     }
   });
+
+  it("11. Provider Isolation & Wildcard Domain Scoping: BrowserProfileSessionProvider isolates astalavr from other domains and scopes wildcard cookies", () => {
+    const astalaCookies = [
+      {
+        domain: ".astalavr.com",
+        includeSubdomains: true,
+        path: "/",
+        secure: true,
+        expires: 1893456000,
+        name: "cf_clearance",
+        value: "dummy_cf_clearance_token",
+      },
+      {
+        domain: "astalavr.com",
+        includeSubdomains: false,
+        path: "/",
+        secure: false,
+        expires: 1893456000,
+        name: "REMEMBERME",
+        value: "dummy_rememberme_token",
+      },
+      {
+        domain: "astalavr.com",
+        includeSubdomains: false,
+        path: "/",
+        secure: false,
+        expires: 1893456000,
+        name: "lcc",
+        value: "JP",
+      },
+    ];
+
+    const provider = new BrowserProfileSessionProvider(
+      astalaCookies,
+      "/mock/profiles/astalavr",
+      "chrome"
+    );
+
+    expect(provider.hasSession).toBe(true);
+
+    // Matching video page on astalavr.com
+    const pageHeader = provider.getCookieHeaderForUrl(
+      "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao"
+    );
+    expect(pageHeader).toContain("cf_clearance=dummy_cf_clearance_token");
+    expect(pageHeader).toContain("REMEMBERME=dummy_rememberme_token");
+    expect(pageHeader).toContain("lcc=JP");
+
+    // Subdomain matching on cdn3.astalavr.com (wildcard .astalavr.com matches, host-only does not)
+    const cdnHeader = provider.getCookieHeaderForUrl(
+      "https://cdn3.astalavr.com/videos/qDAVn/720p.mp4"
+    );
+    expect(cdnHeader).toContain("cf_clearance=dummy_cf_clearance_token");
+    expect(cdnHeader).not.toContain("REMEMBERME"); // host-only astalavr.com
+
+    // Unrelated domain (e.g. eporner.com) receives NO cookies
+    const unrelatedHeader = provider.getCookieHeaderForUrl(
+      "https://www.eporner.com/video-123"
+    );
+    expect(unrelatedHeader).toBeUndefined();
+  });
 });

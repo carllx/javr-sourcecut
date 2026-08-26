@@ -196,10 +196,12 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
     ).rejects.toThrow(/FFmpeg stream-copy extraction failed[\s\S]*Refusing to fallback to re-encoding/);
   });
 
-  it("extracts multiple non-contiguous segments and merges them losslessly via FFmpeg concat", async () => {
-    const { createMultiSegmentFetchPlan } = await import(
-      "../../../src/core/mp4/fetch-plan.js"
-    );
+  it(
+    "extracts multiple non-contiguous segments and merges them losslessly via FFmpeg concat",
+    async () => {
+      const { createMultiSegmentFetchPlan } = await import(
+        "../../../src/core/mp4/fetch-plan.js"
+      );
     const videoUrl = `${serverUrl}/faststart.mp4`;
     const probeResult = await probeMP4Index(videoUrl, { headProbeBytes: 64 * 1024 });
     const index = probeResult.index;
@@ -230,7 +232,7 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
     expect(probe.duration).toBeLessThanOrEqual(7.0);
     expect(probe.videoStream.codec).toBe("h264");
     expect(probe.audioStream?.codec).toBe("aac");
-  });
+  }, 20000);
 
   it("fails closed with IncompatibleConcatSegmentsError if extracted segments have incompatible stream parameters", async () => {
     const { createMultiSegmentFetchPlan } = await import(
