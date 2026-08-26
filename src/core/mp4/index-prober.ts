@@ -26,6 +26,39 @@ function cancelResponseBody(response: Response) {
   } catch {}
 }
 
+async function readResponseBodyStream(
+  response: Response,
+  options?: {
+    budgetTracker?: TransferBudgetTracker;
+    ledgerManager?: TransferLedgerManager;
+  }
+): Promise<Buffer> {
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        chunks.push(value);
+        options?.budgetTracker?.recordBytes(value.length);
+        if (options?.ledgerManager) {
+          await options.ledgerManager.recordNetworkSpend(value.length);
+        }
+      }
+    }
+    return Buffer.concat(chunks);
+  } catch (err) {
+    // If stream errors/truncates/aborts, all received chunks have already been
+    // recorded into budgetTracker and persisted into ledgerManager.cumulativeHistoricalSpentBytes.
+    throw err;
+  }
+}
+
 export async function probeMP4Index(
   url: string,
   options: IndexProbeOptions = {}
@@ -104,8 +137,12 @@ export async function probeMP4Index(
 
   const capEtag = capRes.headers.get("etag") || undefined;
 
-  const capArrayBuffer = await capRes.arrayBuffer();
-  const capBuffer = Buffer.from(capArrayBuffer);
+  // Stream-read capability probe body and record bytes incrementally
+  const capBuffer = await readResponseBodyStream(capRes, {
+    budgetTracker: options.budgetTracker,
+    ledgerManager: options.ledgerManager,
+  });
+
   if (capBuffer.length !== 1) {
     throw new Http206RequiredError(
       `Capability probe body length mismatch: expected 1 byte, received ${capBuffer.length} bytes`
@@ -114,10 +151,7 @@ export async function probeMP4Index(
 
   const capabilityProbeBytesTransferred = capBuffer.length;
 
-  // Record Stage A spend incrementally
-  options.budgetTracker?.recordBytes(capabilityProbeBytesTransferred);
   if (options.ledgerManager) {
-    await options.ledgerManager.recordNetworkSpend(capabilityProbeBytesTransferred);
     await options.ledgerManager.updateAuthoritativeFileSize(fileSize);
     if (capEtag) {
       await options.ledgerManager.updateRenditionEtag(capEtag);
@@ -206,8 +240,11 @@ export async function probeMP4Index(
     );
   }
 
-  const headArrayBuffer = await headRes.arrayBuffer();
-  const headBuffer = Buffer.from(headArrayBuffer);
+  // Stream-read head probe body and record bytes incrementally
+  const headBuffer = await readResponseBodyStream(headRes, {
+    budgetTracker: options.budgetTracker,
+    ledgerManager: options.ledgerManager,
+  });
 
   if (headBuffer.length !== expectedHeadLength) {
     throw new Http206RequiredError(
@@ -216,12 +253,6 @@ export async function probeMP4Index(
   }
 
   const headProbeBytesTransferred = headBuffer.length;
-
-  // Record Stage B spend incrementally
-  options.budgetTracker?.recordBytes(headProbeBytesTransferred);
-  if (options.ledgerManager) {
-    await options.ledgerManager.recordNetworkSpend(headProbeBytesTransferred);
-  }
 
   const establishedEtag =
     (isStrongEtag(capEtag) ? capEtag : undefined) ||
@@ -351,8 +382,11 @@ export async function probeMP4Index(
     );
   }
 
-  const tailArrayBuffer = await tailRes.arrayBuffer();
-  const tailBuffer = Buffer.from(tailArrayBuffer);
+  // Stream-read tail probe body and record bytes incrementally
+  const tailBuffer = await readResponseBodyStream(tailRes, {
+    budgetTracker: options.budgetTracker,
+    ledgerManager: options.ledgerManager,
+  });
 
   if (tailBuffer.length !== expectedTailBodyLength) {
     throw new Http206RequiredError(
@@ -361,12 +395,6 @@ export async function probeMP4Index(
   }
 
   const tailProbeBytesTransferred = tailBuffer.length;
-
-  // Record Stage C spend incrementally
-  options.budgetTracker?.recordBytes(tailProbeBytesTransferred);
-  if (options.ledgerManager) {
-    await options.ledgerManager.recordNetworkSpend(tailProbeBytesTransferred);
-  }
 
   const finalEffectiveEtag =
     priorStrongEtag ||
@@ -403,4 +431,5 @@ export async function probeMP4Index(
     );
   }
 }
+
 
