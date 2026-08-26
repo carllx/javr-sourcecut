@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const IMPIT_VERSION = '0.14.3';
 const root = path.join(os.tmpdir(), 'javr-sourcecut-impit-probe');
@@ -57,4 +57,4 @@ if (!installed) {
 
 console.log('IMPIT_BOOTSTRAP=ok');
 const here = path.dirname(fileURLToPath(import.meta.url));
-await import(path.join(here, 'astalavr-impit-probe-v3.mjs'));
+await import(pathToFileURL(path.join(here, 'astalavr-impit-probe-v3.mjs')).href);
