@@ -1,16 +1,27 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ByteRange } from "./types.js";
-import { Http206RequiredError } from "./types.js";
+import {
+  Http206RequiredError,
+  RenditionVersionMismatchError,
+} from "./types.js";
+import { isStrongEtag, type TransferLedgerManager } from "./ledger.js";
+import type { TransferBudgetTracker } from "./budget.js";
+
+export const DEFAULT_MAX_CHUNK_SIZE = 8 * 1024 * 1024; // 8 MiB bounded transfer chunk
 
 export interface PartialFetchOptions {
   fetchFn?: typeof fetch;
   headers?: Record<string, string>;
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
   allowOverwrite?: boolean;
+  budgetTracker?: TransferBudgetTracker;
+  expectedTotalFileSize?: number;
+  expectedEtag?: string;
 }
 
 export interface PartialFetchResult {
@@ -20,6 +31,8 @@ export interface PartialFetchResult {
   endByte: number;
   totalFileSize: number;
   contentType?: string;
+  etag?: string;
+  lastModified?: string;
 }
 
 function cancelResponseBody(response: Response) {
@@ -29,6 +42,29 @@ function cancelResponseBody(response: Response) {
       reader.cancel().catch(() => {});
     }
   } catch {}
+}
+
+export function partitionByteRangeIntoChunks(
+  range: ByteRange,
+  maxChunkSize: number = DEFAULT_MAX_CHUNK_SIZE
+): ByteRange[] {
+  if (maxChunkSize <= 0) {
+    throw new Error("maxChunkSize must be a positive integer");
+  }
+
+  const chunks: ByteRange[] = [];
+  let currentStart = range.startByte;
+
+  while (currentStart <= range.endByte) {
+    const currentEnd = Math.min(currentStart + maxChunkSize - 1, range.endByte);
+    chunks.push({
+      startByte: currentStart,
+      endByte: currentEnd,
+    });
+    currentStart = currentEnd + 1;
+  }
+
+  return chunks;
 }
 
 export async function fetchByteRange(
@@ -43,6 +79,11 @@ export async function fetchByteRange(
 
   if (range.startByte < 0 || range.endByte < range.startByte) {
     throw new Error(`Invalid byte range: ${range.startByte}-${range.endByte}`);
+  }
+
+  // Prospective budget check BEFORE issuing network request
+  if (options.budgetTracker) {
+    options.budgetTracker.checkProspectiveBudget(expectedBytes);
   }
 
   // Ensure destination directory exists
@@ -125,12 +166,57 @@ export async function fetchByteRange(
     );
   }
 
+  // Strict Fail-Closed Check 3: Content-Range TOTAL must exactly match authoritative index fileSize
+  if (
+    options.expectedTotalFileSize !== undefined &&
+    totalFileSize !== options.expectedTotalFileSize
+  ) {
+    cancelResponseBody(response);
+    throw new RenditionVersionMismatchError(
+      `Authoritative total file size changed during transfer: expected ${options.expectedTotalFileSize} bytes, received ${totalFileSize} bytes in Content-Range on ${url}`
+    );
+  }
+
   if (returnedStart !== range.startByte || returnedEnd !== range.endByte) {
     cancelResponseBody(response);
     throw new Http206RequiredError(
       `Server returned mismatched byte range: expected ${range.startByte}-${range.endByte}, received ${returnedStart}-${returnedEnd}`
     );
   }
+
+  // Strict Fail-Closed Check 4: Authoritative strong ETag must be present and match on every chunk
+  const responseEtag = response.headers.get("etag") || undefined;
+  if (options.expectedEtag && isStrongEtag(options.expectedEtag)) {
+    if (!responseEtag) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Authoritative strong ETag "${options.expectedEtag}" is required, but chunk response for ${url} (bytes ${range.startByte}-${range.endByte}) is missing an ETag header.`
+      );
+    }
+    if (!isStrongEtag(responseEtag)) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Authoritative strong ETag "${options.expectedEtag}" is required, but chunk response for ${url} (bytes ${range.startByte}-${range.endByte}) returned a weak ETag: "${responseEtag}".`
+      );
+    }
+    if (responseEtag !== options.expectedEtag) {
+      cancelResponseBody(response);
+      throw new RenditionVersionMismatchError(
+        `Strong ETag changed during transfer for ${url}: expected "${options.expectedEtag}", received "${responseEtag}". Aborting without assembly.`
+      );
+    }
+  } else if (
+    options.expectedEtag &&
+    responseEtag &&
+    isStrongEtag(responseEtag) &&
+    responseEtag !== options.expectedEtag
+  ) {
+    cancelResponseBody(response);
+    throw new RenditionVersionMismatchError(
+      `Strong ETag changed during transfer: expected ${options.expectedEtag}, received ${responseEtag} from ${url}`
+    );
+  }
+
 
   if (!response.body) {
     throw new Error(`Response body is empty for range ${range.startByte}-${range.endByte} on ${url}`);
@@ -144,6 +230,9 @@ export async function fetchByteRange(
 
     nodeReadable.on("data", (chunk: Buffer) => {
       transferredBytes += chunk.length;
+      if (options.budgetTracker) {
+        options.budgetTracker.recordBytes(chunk.length);
+      }
       if (options.onProgress) {
         options.onProgress(transferredBytes, expectedBytes);
       }
@@ -151,7 +240,7 @@ export async function fetchByteRange(
 
     await pipeline(nodeReadable, writeStream);
 
-    // Strict Fail-Closed Check 3: Transferred body bytes must exactly match expected bytes
+    // Strict Fail-Closed Check 5: Transferred body bytes must exactly match expected bytes
     if (transferredBytes !== expectedBytes) {
       await fsp.rm(partPath, { force: true }).catch(() => {});
       throw new Http206RequiredError(
@@ -168,10 +257,178 @@ export async function fetchByteRange(
       endByte: returnedEnd,
       totalFileSize,
       contentType: response.headers.get("content-type") || undefined,
+      etag: responseEtag,
+      lastModified: response.headers.get("last-modified") || undefined,
     };
   } catch (err: any) {
     writeStream.destroy();
     await fsp.rm(partPath, { force: true }).catch(() => {});
     throw err;
   }
+}
+
+export interface FetchPlannedByteRangesParams {
+  url: string;
+  ranges: ByteRange[];
+  workDir: string;
+  maxChunkSize?: number;
+  ledgerManager?: TransferLedgerManager;
+  budgetTracker?: TransferBudgetTracker;
+  fetchFn?: typeof fetch;
+  headers?: Record<string, string>;
+  expectedTotalFileSize?: number;
+  expectedEtag?: string;
+  onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
+}
+
+
+export interface ChunkFetchSummary {
+  range: ByteRange;
+  filePath: string;
+  byteLength: number;
+  fromCache: boolean;
+  etag?: string;
+  sha256?: string;
+}
+
+export interface FetchPlannedByteRangesResult {
+  chunks: ChunkFetchSummary[];
+  totalNetworkBytes: number;
+  totalPayloadBytes: number;
+  etag?: string;
+}
+
+export async function fetchPlannedByteRangesWithLedger(
+  params: FetchPlannedByteRangesParams
+): Promise<FetchPlannedByteRangesResult> {
+  const {
+    url,
+    ranges,
+    workDir,
+    maxChunkSize = DEFAULT_MAX_CHUNK_SIZE,
+    ledgerManager,
+    budgetTracker,
+    fetchFn,
+    headers,
+    onProgress,
+  } = params;
+
+  const chunksDir = path.join(workDir, "chunks");
+  await fsp.mkdir(chunksDir, { recursive: true });
+
+  const partitionedChunks = ranges.flatMap((r) =>
+    partitionByteRangeIntoChunks(r, maxChunkSize)
+  );
+
+  const totalPayloadBytes = partitionedChunks.reduce(
+    (sum, c) => sum + (c.endByte - c.startByte + 1),
+    0
+  );
+
+  let cumulativeNetworkBytes = 0;
+  let observedEtag: string | undefined;
+  const chunkSummaries: ChunkFetchSummary[] = [];
+
+  for (const chunk of partitionedChunks) {
+    const chunkId = `chunk_${chunk.startByte}_${chunk.endByte}`;
+    const chunkPath = path.join(chunksDir, `${chunkId}.bin`);
+    const chunkExpectedLength = chunk.endByte - chunk.startByte + 1;
+
+    // 1. Check ledger for cached, valid completed chunk
+    let validEntry = null;
+    if (ledgerManager) {
+      validEntry = await ledgerManager.getValidCompletedChunk(chunk);
+    }
+
+    if (validEntry) {
+      chunkSummaries.push({
+        range: chunk,
+        filePath: validEntry.filePath,
+        byteLength: validEntry.byteLength,
+        fromCache: true,
+        etag: validEntry.etag,
+        sha256: validEntry.sha256,
+      });
+      observedEtag = observedEtag || validEntry.etag;
+      onProgress?.(cumulativeNetworkBytes, totalPayloadBytes);
+      continue;
+    }
+
+    // 2. Fetch missing chunk over HTTP 206
+    let chunkBytesTransferredThisAttempt = 0;
+    try {
+      const activeStrongEtag = isStrongEtag(observedEtag)
+        ? observedEtag
+        : isStrongEtag(params.expectedEtag)
+        ? params.expectedEtag
+        : undefined;
+
+      const fetchRes = await fetchByteRange(url, chunk, chunkPath, {
+        fetchFn,
+        headers,
+        allowOverwrite: true,
+        budgetTracker,
+        expectedTotalFileSize: params.expectedTotalFileSize,
+        expectedEtag: activeStrongEtag,
+        onProgress: (chunkTransferred) => {
+          chunkBytesTransferredThisAttempt = chunkTransferred;
+          onProgress?.(cumulativeNetworkBytes + chunkTransferred, totalPayloadBytes);
+        },
+      });
+
+      cumulativeNetworkBytes += fetchRes.bytesDownloaded;
+      chunkBytesTransferredThisAttempt = 0;
+
+      if (fetchRes.etag && isStrongEtag(fetchRes.etag)) {
+        if (observedEtag && isStrongEtag(observedEtag) && fetchRes.etag !== observedEtag) {
+          throw new RenditionVersionMismatchError(
+            `Strong ETag changed midway through transfer: expected ${observedEtag}, received ${fetchRes.etag}`
+          );
+        }
+        observedEtag = fetchRes.etag;
+      } else if (!observedEtag && fetchRes.etag) {
+        observedEtag = fetchRes.etag;
+      }
+
+      // 3. Compute sha256 checksum for local integrity
+      const chunkBuffer = await fsp.readFile(chunkPath);
+      const sha256 = crypto.createHash("sha256").update(chunkBuffer).digest("hex");
+
+      // 4. Immediately record completed chunk in ledger
+
+      if (ledgerManager) {
+        await ledgerManager.recordCompletedChunk({
+          range: chunk,
+          byteLength: fetchRes.bytesDownloaded,
+          filePath: chunkPath,
+          sha256,
+          etag: fetchRes.etag,
+          transferredNetworkBytes: fetchRes.bytesDownloaded,
+        });
+      }
+
+      chunkSummaries.push({
+        range: chunk,
+        filePath: chunkPath,
+        byteLength: fetchRes.bytesDownloaded,
+        fromCache: false,
+        etag: fetchRes.etag,
+        sha256,
+      });
+    } catch (err: any) {
+      // Record in-flight failed attempt bytes in ledger so restart accounts for wasted bytes against budget
+      if (ledgerManager && chunkBytesTransferredThisAttempt > 0) {
+        await ledgerManager.recordFailedAttempt(chunkBytesTransferredThisAttempt);
+      }
+      throw err;
+    }
+  }
+
+
+  return {
+    chunks: chunkSummaries,
+    totalNetworkBytes: cumulativeNetworkBytes,
+    totalPayloadBytes,
+    etag: observedEtag,
+  };
 }

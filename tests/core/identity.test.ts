@@ -53,6 +53,78 @@ describe("Progressive Media Identity & Deterministic Naming", () => {
     expect(identity.baseName).toBe("eporner-i5MIJLt4gu0 - Test 082126 001 Carib 宇野かな美");
   });
 
+  it("formats structured performer aliases in parentheses and joins multiple performers with underscore", () => {
+    const descriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "alias123",
+      sourceUrl: "https://www.eporner.com/video-alias123/ipx-534-kaede-karen/",
+      rawTitle: "IPX-534 Kaede Karen",
+      declaredPerformers: [
+        { preferredName: "Kaede Karen", aliases: ["Karen Kaede"] },
+        { preferredName: "Yua Mikami", aliases: ["Mikami Yua", "Momona Kito"] },
+      ],
+      renditions: [],
+    };
+
+    const identity = buildMediaIdentity(descriptor);
+    expect(identity.canonicalCatalogId).toBe("IPX534");
+    expect(identity.baseName).toBe("Kaede Karen (Karen Kaede)_Yua Mikami (Mikami Yua, Momona Kito) - IPX534");
+    expect(identity.searchAliases).toContain("IPX534");
+    expect(identity.searchAliases).toContain("IPX-534");
+    expect(identity.searchAliases).toContain("Kaede Karen");
+    expect(identity.searchAliases).toContain("Karen Kaede");
+    expect(identity.searchAliases).toContain("Yua Mikami");
+    expect(identity.searchAliases).toContain("Mikami Yua");
+  });
+
+  it("strictly preserves leading zeros in catalog IDs without stripping or padding", () => {
+    const testCases = [
+      { raw: "ABC-001 Title", expectedCanonical: "ABC001", expectedHyphenated: "ABC-001" },
+      { raw: "ABC-01 Title", expectedCanonical: "ABC01", expectedHyphenated: "ABC-01" },
+      { raw: "ABC-1 Title", expectedCanonical: "ABC1", expectedHyphenated: "ABC-1" },
+      { raw: "JFB-446 Title", expectedCanonical: "JFB446", expectedHyphenated: "JFB-446" },
+      { raw: "WAVR-110 Title", expectedCanonical: "WAVR110", expectedHyphenated: "WAVR-110" },
+    ];
+
+    for (const tc of testCases) {
+      const descriptor: SourceDescriptor = {
+        provider: "eporner",
+        providerAssetId: "test_asset",
+        sourceUrl: "http://example.com",
+        rawTitle: tc.raw,
+        declaredPerformers: ["Performer One"],
+        renditions: [],
+      };
+      const identity = buildMediaIdentity(descriptor);
+      expect(identity.canonicalCatalogId).toBe(tc.expectedCanonical);
+      expect(identity.searchAliases).toContain(tc.expectedCanonical);
+      expect(identity.searchAliases).toContain(tc.expectedHyphenated);
+      expect(identity.baseName).toBe(`Performer One - ${tc.expectedCanonical}`);
+    }
+  });
+
+  it("progressively tracks catalog candidates, observed filenames, and search aliases", () => {
+    const descriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "vid999",
+      sourceUrl: "https://www.eporner.com/video-vid999/abw-099-sample/",
+      rawTitle: "ABW-099 Sample Title with candidate SSNI-100",
+      declaredPerformers: ["Actress A"],
+      observedFilenames: ["eporner_abw099_hd.mp4"],
+      renditions: [],
+    };
+
+    const identity = buildMediaIdentity(descriptor);
+    expect(identity.canonicalCatalogId).toBe("ABW099");
+    expect(identity.observedFilenames).toEqual(["eporner_abw099_hd.mp4"]);
+    expect(identity.catalogCandidates).toBeDefined();
+    expect(identity.catalogCandidates!.length).toBeGreaterThanOrEqual(1);
+    expect(identity.catalogCandidates![0].canonical).toBe("ABW099");
+    expect(identity.searchAliases).toContain("ABW099");
+    expect(identity.searchAliases).toContain("ABW-099");
+    expect(identity.searchAliases).toContain("vid999");
+  });
+
   it("sanitizes forbidden characters from filenames", () => {
     expect(sanitizeFilename('Foo: Bar / Baz * "Quux" <1> | ?')).toBe("Foo - Bar Baz Quux 1");
   });

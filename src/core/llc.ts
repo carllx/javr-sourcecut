@@ -267,24 +267,17 @@ export function parseLlcContent(rawContent: string): LlcProjectFile {
   }
 }
 
-export function normalizeLlcCutSegments(llcProject: LlcProjectFile): TimeRange {
-  if (!llcProject.cutSegments || !Array.isArray(llcProject.cutSegments) || llcProject.cutSegments.length === 0) {
-    throw new Error("LosslessCut project file does not contain any cutSegments");
-  }
-
-  // If there's a selected segment, prioritize it; otherwise pick the first segment
-  const selectedSegment = llcProject.cutSegments.find((seg) => seg.selected === true) || llcProject.cutSegments[0];
-
-  const startSeconds = selectedSegment.start !== undefined ? Number(selectedSegment.start) : 0;
+export function normalizeSingleSegment(seg: LlcCutSegment): TimeRange {
+  const startSeconds = seg.start !== undefined ? Number(seg.start) : 0;
   if (isNaN(startSeconds) || startSeconds < 0) {
-    throw new Error(`Invalid cut segment start time: ${selectedSegment.start}`);
+    throw new Error(`Invalid cut segment start time: ${seg.start}`);
   }
 
-  if (selectedSegment.end === undefined || isNaN(Number(selectedSegment.end))) {
-    throw new Error(`Missing or invalid cut segment end time: ${selectedSegment.end}`);
+  if (seg.end === undefined || isNaN(Number(seg.end))) {
+    throw new Error(`Missing or invalid cut segment end time: ${seg.end}`);
   }
 
-  const endSeconds = Number(selectedSegment.end);
+  const endSeconds = Number(seg.end);
   if (endSeconds <= startSeconds) {
     throw new Error(
       `Cut segment end time (${endSeconds}s) must be greater than start time (${startSeconds}s)`
@@ -297,7 +290,26 @@ export function normalizeLlcCutSegments(llcProject: LlcProjectFile): TimeRange {
   };
 }
 
+export function normalizeLlcCutSegments(llcProject: LlcProjectFile): TimeRange {
+  if (!llcProject.cutSegments || !Array.isArray(llcProject.cutSegments) || llcProject.cutSegments.length === 0) {
+    throw new Error("LosslessCut project file does not contain any cutSegments");
+  }
+
+  // If there's a selected segment, prioritize it; otherwise pick the first segment
+  const selectedSegment = llcProject.cutSegments.find((seg) => seg.selected === true) || llcProject.cutSegments[0];
+  return normalizeSingleSegment(selectedSegment);
+}
+
+export function normalizeLlcMultiSegments(llcProject: LlcProjectFile): TimeRange[] {
+  if (!llcProject.cutSegments || !Array.isArray(llcProject.cutSegments) || llcProject.cutSegments.length === 0) {
+    throw new Error("LosslessCut project file does not contain any cutSegments");
+  }
+
+  return llcProject.cutSegments.map((seg) => normalizeSingleSegment(seg));
+}
+
 export async function findLlcFileInWorkspace(
+
   workspaceDir: string,
   expectedLlcPath?: string
 ): Promise<string> {
@@ -336,7 +348,12 @@ export async function findLlcFileInWorkspace(
 
 export async function loadAndNormalizeLlc(
   llcPathOrWorkspace: string
-): Promise<{ timeRange: TimeRange; project: LlcProjectFile; resolvedPath: string }> {
+): Promise<{
+  timeRange: TimeRange;
+  timeRanges: TimeRange[];
+  project: LlcProjectFile;
+  resolvedPath: string;
+}> {
   let resolvedPath = path.resolve(llcPathOrWorkspace);
   const stat = await fs.stat(resolvedPath);
   if (stat.isDirectory()) {
@@ -346,10 +363,13 @@ export async function loadAndNormalizeLlc(
   const raw = await fs.readFile(resolvedPath, "utf-8");
   const project = parseLlcContent(raw);
   const timeRange = normalizeLlcCutSegments(project);
+  const timeRanges = normalizeLlcMultiSegments(project);
 
   return {
     timeRange,
+    timeRanges,
     project,
     resolvedPath,
   };
 }
+

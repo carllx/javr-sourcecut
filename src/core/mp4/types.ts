@@ -50,9 +50,11 @@ export interface MP4IndexProbeResult {
   headProbeBytesTransferred: number;
   tailProbeBytesTransferred: number;
   totalProbeBytesTransferred: number;
+  etag?: string;
   cachedHead?: CachedBufferWithRange;
   cachedTail?: CachedBufferWithRange;
 }
+
 
 export interface ByteRangeFetchPlan {
   sourceUrl: string;
@@ -62,6 +64,18 @@ export interface ByteRangeFetchPlan {
   audioByteRange?: ByteRange;
   combinedByteRange: ByteRange;
   segmentRanges: ByteRange[];
+  totalBytesToFetch: number;
+  fullFileBytes: number;
+  savingsRatio: number;
+  isProvablePartial: boolean;
+  moovByteRange?: ByteRange;
+}
+
+export interface MultiSegmentFetchPlan {
+  sourceUrl: string;
+  targetTimeRanges: TimeRange[];
+  segmentPlans: ByteRangeFetchPlan[];
+  discreteByteRanges: ByteRange[];
   totalBytesToFetch: number;
   fullFileBytes: number;
   savingsRatio: number;
@@ -89,3 +103,63 @@ export class Http206RequiredError extends CapabilityMismatchError {
     this.name = "Http206RequiredError";
   }
 }
+
+export class BudgetExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BudgetExceededError";
+  }
+}
+
+export class RenditionVersionMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RenditionVersionMismatchError";
+  }
+}
+
+export class IncompatibleConcatSegmentsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IncompatibleConcatSegmentsError";
+  }
+}
+
+export interface LedgerRenditionIdentity {
+  provider: string;
+  providerAssetId: string;
+  formatId: string;
+  fullFileBytes: number;
+  etag?: string;
+  lastModified?: string;
+}
+
+export interface LedgerChunkEntry {
+  chunkId: string;
+  range: ByteRange;
+  byteLength: number;
+  sha256?: string;
+  filePath: string;
+  etag?: string;
+  status: "completed" | "failed";
+  transferredNetworkBytes: number;
+  completedAt: string;
+}
+
+export interface TransferLedger {
+  version: number;
+  logicalRenditionId: string;
+  rendition: LedgerRenditionIdentity;
+  transactions: LedgerChunkEntry[];
+  cumulativeHistoricalSpentBytes?: number; // Monotonic total of all network bytes spent for this logical transfer
+  cumulativeFailedBytes: number;
+  estimatedBudgetBytes?: number; // Persisted envelope: estimated total bytes for the logical transfer
+  updatedAt: string;
+}
+
+
+export interface TransferBudgetOptions {
+  budgetMultiplier?: number; // default 1.5, >= 1.0
+}
+
+

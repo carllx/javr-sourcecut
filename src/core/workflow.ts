@@ -13,11 +13,14 @@ import {
   type SourceSessionProvider,
 } from "./session.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
+import { checkDuplicatePreflight, DuplicatePreflightError } from "./preflight.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
 import { loadAndNormalizeLlc, findLlcFileInWorkspace } from "./llc.js";
 import { runSelectiveFetch, type SelectiveFetchResult } from "./mp4/selective-fetch.js";
+import { normalizeCodecName } from "./mp4/extractor.js";
 import type { TimeRange } from "./mp4/types.js";
+
 import type { JobState } from "../types.js";
 
 export interface TracerSliceParams {
@@ -61,16 +64,27 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   const descriptor = await adapter.resolve(sourceUrl, sessionFetch);
   onLog(`Discovered source: "${descriptor.rawTitle}" (${descriptor.renditions.length} renditions)`);
 
-  // 3. Select proxy rendition
+  // 3. Duplicate Preflight Check (fail-closed before downloading proxy or creating job)
+  const preflight = await checkDuplicatePreflight(rootDir, descriptor);
+  if (preflight.status !== "not-seen" && preflight.matchedJob) {
+    onLog(`[PREFLIGHT DUPLICATE] ${preflight.status.toUpperCase()}: ${preflight.matchedReason}`);
+    throw new DuplicatePreflightError(
+      preflight.status,
+      preflight.matchedJob,
+      preflight.matchedReason || "Existing job detected"
+    );
+  }
+
+  // 4. Select proxy rendition
   const selectedProxy = selectProxyRendition(descriptor.renditions);
   onLog(`Selected proxy rendition: ${selectedProxy.formatId} (${selectedProxy.resolution}, ${selectedProxy.vcodec.toUpperCase()})`);
 
-  // 4. Create Job & deterministic flat workspace
+  // 5. Create Job & deterministic flat workspace
   const job = await createJob(rootDir, descriptor, selectedProxy);
   await saveJob(job);
   onLog(`Initialized job workspace: ${job.workspaceDir}`);
 
-  // 5. Download proxy
+  // 6. Download proxy
   await updateJobStatus(job, "proxy-downloading");
   onLog(`[2/5] Downloading proxy video to: ${job.proxyPath}`);
   await downloadFile(selectedProxy.directUrl, job.proxyPath, {
@@ -123,6 +137,7 @@ export interface ResumeJobParams {
   jobPathOrDir: string;
   llcPath?: string;
   qualityTarget?: QualityTargetOptions;
+  budgetMultiplier?: number;
   cookiesPath?: string;
   sessionProvider?: SourceSessionProvider;
   adapters?: SourceAdapter[];
@@ -136,6 +151,7 @@ export interface ResumeJobResult {
   job: JobState;
   llcPath: string;
   timeRange: TimeRange;
+  timeRanges: TimeRange[];
   selectedHq: MediaRendition;
   hqSelectionResult: HqSelectionResult;
   discoveredRenditions: MediaRendition[];
@@ -154,6 +170,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     jobPathOrDir,
     llcPath: explicitLlcPath,
     qualityTarget,
+    budgetMultiplier,
     cookiesPath,
     sessionProvider: explicitSessionProvider,
     adapters = [new EpornerAdapter()],
@@ -190,10 +207,16 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     ? path.resolve(explicitLlcPath)
     : await findLlcFileInWorkspace(job.workspaceDir, job.expectedLlcPath);
 
-  const { timeRange } = await loadAndNormalizeLlc(resolvedLlcPath);
+  const { timeRange, timeRanges } = await loadAndNormalizeLlc(resolvedLlcPath);
   onLog(
-    `[Resume 2/5] Parsed cut segment [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s] (duration ${(timeRange.endSeconds - timeRange.startSeconds).toFixed(3)}s) from ${resolvedLlcPath}`
+    `[Resume 2/5] Parsed ${timeRanges.length} cut segment(s) from ${resolvedLlcPath}:`
   );
+  for (let i = 0; i < timeRanges.length; i++) {
+    const s = timeRanges[i];
+    onLog(
+      `  Segment ${i + 1}: [${s.startSeconds.toFixed(3)}s -> ${s.endSeconds.toFixed(3)}s] (duration ${(s.endSeconds - s.startSeconds).toFixed(3)}s)`
+    );
+  }
 
   // 4. Invariant: Do not overwrite existing final output file if present
   const outputClipPath = job.finalOutputPath;
@@ -253,13 +276,21 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   );
 
   // 7. Execute bounded MP4 index probe and HTTP 206 selective fetch
-  onLog(`[Resume 5/5] Executing selective fetch for [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]...`);
+  onLog(`[Resume 5/5] Executing selective fetch for ${timeRanges.length} cut segment(s)...`);
   const selectiveFetchResult = await runSelectiveFetch({
     sourceUrl: selectedHq.directUrl,
     timeRange,
+    timeRanges,
     outputClipPath,
     workDir: job.workspaceDir,
+    renditionIdentity: {
+      provider: job.provider,
+      providerAssetId: job.providerAssetId,
+      formatId: selectedHq.formatId,
+      fullFileBytes: selectedHq.contentLength || 0,
+    },
     options: {
+      budgetMultiplier,
       fetchFn: sessionFetch,
       onProgress: (percent, transferred, total) => {
         onProgress?.(transferred, total);
@@ -278,23 +309,14 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   );
 
   // 8. Enforce authoritative ffprobe invariants before completing job
-  const normalizeCodec = (c?: string) => {
-    if (!c) return "";
-    const lower = c.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (lower === "av01" || lower === "av1") return "av1";
-    if (lower === "avc1" || lower === "h264" || lower === "x264") return "h264";
-    if (lower === "h265" || lower === "hevc" || lower === "hev1" || lower === "hvc1") return "hevc";
-    if (lower === "vp9" || lower === "vp09") return "vp9";
-    return lower;
-  };
-
-  const actualCodec = normalizeCodec(verifiedProbe.videoStream.codec);
-  const expectedCodec = normalizeCodec(selectedHq.vcodec);
+  const actualCodec = normalizeCodecName(verifiedProbe.videoStream.codec);
+  const expectedCodec = normalizeCodecName(selectedHq.vcodec);
   if (actualCodec !== expectedCodec) {
     throw new Error(
       `Output video codec mismatch: expected "${selectedHq.vcodec}" (${expectedCodec}), but ffprobe verified "${verifiedProbe.videoStream.codec}" (${actualCodec}). Refusing to complete job.`
     );
   }
+
 
   if (verifiedProbe.videoStream.height !== selectedHq.height) {
     throw new Error(
@@ -302,14 +324,18 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     );
   }
 
-  const expectedCutDuration = timeRange.endSeconds - timeRange.startSeconds;
+  const expectedCutDuration = timeRanges.reduce(
+    (sum, r) => sum + (r.endSeconds - r.startSeconds),
+    0
+  );
   const durationDiff = Math.abs(verifiedProbe.duration - expectedCutDuration);
-  const maxDurationTolerance = 5.0; // Fixed bounded keyframe alignment tolerance (<= 5s)
+  const maxDurationTolerance = Math.min(5.0 * timeRanges.length, 12.0); // Bounded keyframe alignment tolerance (<= 5s per segment, globally capped at 12s)
   if (durationDiff > maxDurationTolerance) {
     throw new Error(
-      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC [${timeRange.startSeconds.toFixed(3)}s -> ${timeRange.endSeconds.toFixed(3)}s]), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds fixed tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
+      `Output duration mismatch: expected ~${expectedCutDuration.toFixed(3)}s (from LLC ${timeRanges.length} segments), but ffprobe verified ${verifiedProbe.duration.toFixed(3)}s (diff ${durationDiff.toFixed(3)}s exceeds fixed tolerance ${maxDurationTolerance.toFixed(3)}s). Refusing to complete job.`
     );
   }
+
 
   // 9. Invariant: Verify existing proxy was completely untouched
   const proxyStatAfter = await fs.stat(job.proxyPath);
@@ -348,6 +374,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     job,
     llcPath: resolvedLlcPath,
     timeRange,
+    timeRanges,
     selectedHq,
     hqSelectionResult,
     discoveredRenditions: descriptor.renditions,
@@ -361,3 +388,4 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     lifecycleSavingsPercent,
   };
 }
+

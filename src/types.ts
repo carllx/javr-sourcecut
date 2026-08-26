@@ -13,12 +13,26 @@ export interface MediaRendition {
   supportsRange?: boolean;
 }
 
+export interface PerformerIdentity {
+  preferredName: string;
+  aliases?: string[];
+  hints?: string[];
+}
+
+export interface CatalogCandidate {
+  canonical: string;
+  hyphenated: string;
+  raw: string;
+  confidence: "high" | "medium" | "low";
+}
+
 export interface SourceDescriptor {
   provider: "eporner" | "astalavr" | "pikpak";
   providerAssetId: string;
   sourceUrl: string;
   rawTitle: string;
-  declaredPerformers: string[];
+  declaredPerformers: (string | PerformerIdentity)[];
+  observedFilenames?: string[];
   durationSeconds?: number;
   renditions: MediaRendition[];
 }
@@ -27,14 +41,23 @@ export interface ProgressiveMediaIdentity {
   provider: string;
   providerAssetId: string;
   observedTitle: string;
+  observedFilenames?: string[];
   canonicalCatalogId?: string; // e.g. "WAVR110"
+  catalogCandidates?: CatalogCandidate[];
   searchAliases: string[];      // e.g. ["WAVR110", "WAVR-110", "wavr110"]
-  performers: {
-    preferredName: string;
-    aliases?: string[];
-  }[];
+  performers: PerformerIdentity[];
   confidence: "high" | "medium" | "fallback";
+  provenance?: string;
   baseName: string;
+}
+
+export type DuplicateStatus = "not-seen" | "in-progress" | "completed";
+
+export interface DuplicatePreflightResult {
+  status: DuplicateStatus;
+  matchedJob?: JobState;
+  matchedReason?: string;
+  auxiliaryClues?: string[];
 }
 
 export type JobStatus =
