@@ -239,8 +239,8 @@ export class ProbeQueue {
       }
       this.onProfileUpdate?.(profile, card);
       this.onStatsChange?.();
-    } catch (err: any) {
-      const errorMessage = err?.message || String(err);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
 
       if (retryCount < this.maxAutoRetries) {
         // Schedule auto-retry with exponential backoff

@@ -77,9 +77,9 @@ export class EpornerCompanionApp {
   private setupMutationObserver(): void {
     if (typeof MutationObserver === "undefined") return;
 
-    let debounceTimer: any = null;
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
     this.mutationObserver = new MutationObserver(() => {
-      clearTimeout(debounceTimer);
+      if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         this.scanAndProcess(document.body);
       }, 150);

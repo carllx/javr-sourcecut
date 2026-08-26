@@ -6,6 +6,27 @@ export interface ParsedDetailResult {
 }
 
 /**
+ * Extracts resolution height and AV1 codec classification from link attributes.
+ */
+export function extractLinkRendition(
+  href: string,
+  linkText: string,
+  codecClass?: string
+): { height: number; isAv1: boolean } {
+  let height = 0;
+  const resMatch =
+    linkText.match(/(\d+)p/i) || href.match(/\/(\d+)\//) || href.match(/-(\d+)p/i);
+  if (resMatch && resMatch[1]) {
+    height = parseInt(resMatch[1], 10);
+  }
+
+  const isAv1 =
+    codecClass === "av1" || /av1/i.test(linkText) || /-av1\.mp4/i.test(href);
+
+  return { height, isAv1 };
+}
+
+/**
  * Parses Eporner video detail page HTML and extracts AV1 and overall rendition information.
  * Enforces strict validation to prevent network/HTML errors from being falsely classified as NO AV1.
  */
@@ -78,19 +99,12 @@ export function parseDetailPageHtml(
     const href = match[2];
     const linkText = match[3].replace(/<[^>]+>/g, "").trim();
 
-    let height = 0;
-    const resMatch =
-      linkText.match(/(\d+)p/i) || href.match(/\/(\d+)\//) || href.match(/-(\d+)p/i);
-    if (resMatch && resMatch[1]) {
-      height = parseInt(resMatch[1], 10);
+    const { height, isAv1 } = extractLinkRendition(href, linkText, codecClass);
+    if (height > 0) {
       allHeights.push(height);
-    }
-
-    const isAv1 =
-      codecClass === "av1" || /av1/i.test(linkText) || /-av1\.mp4/i.test(href);
-
-    if (isAv1 && height > 0 && !av1Heights.includes(height)) {
-      av1Heights.push(height);
+      if (isAv1 && !av1Heights.includes(height)) {
+        av1Heights.push(height);
+      }
     }
   }
 
@@ -101,16 +115,10 @@ export function parseDetailPageHtml(
       const href = match[1];
       const linkText = match[2].replace(/<[^>]+>/g, "").trim();
 
-      let height = 0;
-      const resMatch =
-        linkText.match(/(\d+)p/i) || href.match(/\/(\d+)\//) || href.match(/-(\d+)p/i);
-      if (resMatch && resMatch[1]) {
-        height = parseInt(resMatch[1], 10);
+      const { height, isAv1 } = extractLinkRendition(href, linkText);
+      if (height > 0) {
         allHeights.push(height);
-      }
-
-      if (/av1/i.test(linkText) || /-av1\.mp4/i.test(href)) {
-        if (height > 0 && !av1Heights.includes(height)) {
+        if (isAv1 && !av1Heights.includes(height)) {
           av1Heights.push(height);
         }
       }
