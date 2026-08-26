@@ -7,9 +7,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const distDir = path.resolve(rootDir, "dist");
+const userscriptsDir = path.resolve(rootDir, "userscripts");
 
 if (!fs.existsSync(distDir)) {
   fs.mkdirSync(distDir, { recursive: true });
+}
+if (!fs.existsSync(userscriptsDir)) {
+  fs.mkdirSync(userscriptsDir, { recursive: true });
 }
 
 const USERSCRIPT_HEADER = `// ==UserScript==
@@ -28,8 +32,8 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      eporner.com
 // @connect      www.eporner.com
 // @run-at       document-end
-// @updateURL    https://raw.githubusercontent.com/carllx/javr-sourcecut/main/dist/eporner-companion.user.js
-// @downloadURL  https://raw.githubusercontent.com/carllx/javr-sourcecut/main/dist/eporner-companion.user.js
+// @updateURL    https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js
+// @downloadURL  https://raw.githubusercontent.com/carllx/javr-sourcecut/main/userscripts/eporner-companion.user.js
 // ==/UserScript==
 
 `;
@@ -37,7 +41,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 async function build() {
   console.log("🔨 Building Eporner Companion Userscript...");
 
-  const outUserJs = path.join(distDir, "eporner-companion.user.js");
+  const outUserJs = path.join(userscriptsDir, "eporner-companion.user.js");
   const outDevUserJs = path.join(distDir, "eporner-companion.dev.user.js");
 
   // 1. Bundle TypeScript to IIFE

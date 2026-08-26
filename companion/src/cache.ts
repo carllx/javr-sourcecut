@@ -2,6 +2,27 @@ import type { RenditionProfile, StorageAdapter } from "./types.js";
 
 export const CACHE_STORAGE_KEY = "javr_eporner_av1_cache_v1";
 export const CACHE_SCHEMA_VERSION = 1;
+export const DEFAULT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+
+/**
+ * Validates whether a cached profile has expired based on updatedAt and TTL.
+ * Missing, non-numeric, or non-positive updatedAt is strictly treated as expired.
+ */
+export function isProfileExpired(
+  profile: RenditionProfile,
+  ttlMs: number = DEFAULT_CACHE_TTL_MS,
+  now: number = Date.now()
+): boolean {
+  if (
+    !profile ||
+    typeof profile.updatedAt !== "number" ||
+    isNaN(profile.updatedAt) ||
+    profile.updatedAt <= 0
+  ) {
+    return true;
+  }
+  return now - profile.updatedAt > ttlMs;
+}
 
 export interface SerializedCache {
   version: number;
@@ -67,12 +88,14 @@ export class RenditionCacheManager {
   private storage: StorageAdapter;
   private memoryCache = new Map<string, RenditionProfile>();
   private isLoaded = false;
+  private ttlMs: number;
 
-  constructor(storage?: StorageAdapter) {
+  constructor(storage?: StorageAdapter, ttlMs: number = DEFAULT_CACHE_TTL_MS) {
     this.storage = storage || new TampermonkeyStorageAdapter();
+    this.ttlMs = ttlMs;
   }
 
-  async loadCache(): Promise<Map<string, RenditionProfile>> {
+  async loadCache(now: number = Date.now()): Promise<Map<string, RenditionProfile>> {
     if (this.isLoaded) {
       return this.memoryCache;
     }
@@ -86,10 +109,11 @@ export class RenditionCacheManager {
 
     if (raw && raw.version === CACHE_SCHEMA_VERSION && raw.profiles) {
       for (const [id, profile] of Object.entries(raw.profiles)) {
-        // Enforce cache integrity: only valid detected or verified no_av1 are valid
+        // Enforce cache integrity and TTL: only non-expired detected/no_av1 are loaded
         if (
           profile &&
-          (profile.probeStatus === "detected" || profile.probeStatus === "no_av1")
+          (profile.probeStatus === "detected" || profile.probeStatus === "no_av1") &&
+          !isProfileExpired(profile, this.ttlMs, now)
         ) {
           this.memoryCache.set(id, profile);
         }
@@ -100,8 +124,16 @@ export class RenditionCacheManager {
     return this.memoryCache;
   }
 
-  getProfile(videoId: string): RenditionProfile | undefined {
-    return this.memoryCache.get(videoId);
+  getProfile(videoId: string, now: number = Date.now()): RenditionProfile | undefined {
+    const profile = this.memoryCache.get(videoId);
+    if (!profile) return undefined;
+
+    if (isProfileExpired(profile, this.ttlMs, now)) {
+      this.memoryCache.delete(videoId);
+      return undefined;
+    }
+
+    return profile;
   }
 
   async saveProfile(profile: RenditionProfile): Promise<boolean> {
@@ -110,7 +142,12 @@ export class RenditionCacheManager {
       return false;
     }
 
-    this.memoryCache.set(profile.videoId, profile);
+    const withTimestamp: RenditionProfile = {
+      ...profile,
+      updatedAt: profile.updatedAt && profile.updatedAt > 0 ? profile.updatedAt : Date.now(),
+    };
+
+    this.memoryCache.set(profile.videoId, withTimestamp);
     await this.persist();
     return true;
   }

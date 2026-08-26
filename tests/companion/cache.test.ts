@@ -90,4 +90,111 @@ describe("Companion Cache Manager", () => {
     const raw = storage.get(CACHE_STORAGE_KEY, null);
     expect(raw).toBeNull();
   });
+
+  describe("Cache TTL (7 Days) & Expiration Semantics", () => {
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const now = 1700000000000;
+
+    it("fresh cache hit: retrieves valid entry within TTL", async () => {
+      const profile: RenditionProfile = {
+        videoId: "fresh1",
+        sourceUrl: "https://www.eporner.com/video-fresh1/",
+        maxResolution: "4K",
+        av1Resolutions: ["2160p"],
+        highestAv1Resolution: "2160p",
+        has4kAv1: true,
+        probeStatus: "detected",
+        updatedAt: now - (SEVEN_DAYS_MS - 1000), // 1 second before expiry
+      };
+
+      await cacheManager.saveProfile(profile);
+      const hit = cacheManager.getProfile("fresh1", now);
+      expect(hit).toBeDefined();
+      expect(hit?.videoId).toBe("fresh1");
+    });
+
+    it("expired cache miss: evicts detected profile older than TTL", async () => {
+      const profile: RenditionProfile = {
+        videoId: "exp1",
+        sourceUrl: "https://www.eporner.com/video-exp1/",
+        maxResolution: "4K",
+        av1Resolutions: ["2160p"],
+        highestAv1Resolution: "2160p",
+        has4kAv1: true,
+        probeStatus: "detected",
+        updatedAt: now - (SEVEN_DAYS_MS + 1000), // 1 second after expiry
+      };
+
+      await cacheManager.saveProfile(profile);
+      // Profile is expired at `now`
+      const miss = cacheManager.getProfile("exp1", now);
+      expect(miss).toBeUndefined();
+
+      // Subsequent get without custom now should also be undefined
+      expect(cacheManager.getProfile("exp1", now)).toBeUndefined();
+    });
+
+    it("NO AV1 expiration: confirmed NO AV1 expires after TTL so capability is re-checked", async () => {
+      const noAv1Profile: RenditionProfile = {
+        videoId: "noav1-exp",
+        sourceUrl: "https://www.eporner.com/video-noav1-exp/",
+        maxResolution: "4K",
+        av1Resolutions: [],
+        highestAv1Resolution: null,
+        has4kAv1: false,
+        probeStatus: "no_av1",
+        updatedAt: now - (SEVEN_DAYS_MS + 5000),
+      };
+
+      await cacheManager.saveProfile(noAv1Profile);
+      const miss = cacheManager.getProfile("noav1-exp", now);
+      expect(miss).toBeUndefined();
+    });
+
+    it("missing or invalid updatedAt: treated as expired and not trusted", async () => {
+      // Simulate raw cache with missing or malformed updatedAt
+      storage.set(CACHE_STORAGE_KEY, {
+        version: 1,
+        profiles: {
+          malformed1: {
+            videoId: "malformed1",
+            sourceUrl: "https://www.eporner.com/video-malformed1/",
+            maxResolution: "4K",
+            av1Resolutions: ["2160p"],
+            highestAv1Resolution: "2160p",
+            has4kAv1: true,
+            probeStatus: "detected",
+            // missing updatedAt
+          },
+          malformed2: {
+            videoId: "malformed2",
+            sourceUrl: "https://www.eporner.com/video-malformed2/",
+            maxResolution: "4K",
+            av1Resolutions: [],
+            highestAv1Resolution: null,
+            has4kAv1: false,
+            probeStatus: "no_av1",
+            updatedAt: 0, // invalid timestamp
+          },
+          malformed3: {
+            videoId: "malformed3",
+            sourceUrl: "https://www.eporner.com/video-malformed3/",
+            maxResolution: "4K",
+            av1Resolutions: ["2160p"],
+            highestAv1Resolution: "2160p",
+            has4kAv1: true,
+            probeStatus: "detected",
+            updatedAt: "invalid" as any,
+          },
+        },
+      });
+
+      const freshManager = new RenditionCacheManager(storage);
+      await freshManager.loadCache(now);
+
+      expect(freshManager.getProfile("malformed1", now)).toBeUndefined();
+      expect(freshManager.getProfile("malformed2", now)).toBeUndefined();
+      expect(freshManager.getProfile("malformed3", now)).toBeUndefined();
+    });
+  });
 });

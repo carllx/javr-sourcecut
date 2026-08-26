@@ -53,6 +53,7 @@ describe("Companion Probe Queue", () => {
       highestAv1Resolution: "2160p",
       has4kAv1: true,
       probeStatus: "detected",
+      updatedAt: Date.now(),
     };
     await cacheManager.saveProfile(cachedProfile);
 
