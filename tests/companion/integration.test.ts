@@ -4,6 +4,10 @@ import { EpornerCompanionApp } from "../../companion/src/index.js";
 
 describe("Eporner Companion Integration & Lifecycle", () => {
   beforeEach(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.clear();
+    }
+
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
