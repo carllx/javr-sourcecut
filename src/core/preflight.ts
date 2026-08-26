@@ -6,7 +6,7 @@ import type {
   ProgressiveMediaIdentity,
   SourceDescriptor,
 } from "../types.js";
-import { buildMediaIdentity } from "./identity.js";
+import { buildMediaIdentity, extractLegacyWorkAliases } from "./identity.js";
 import { loadJob } from "./job.js";
 
 export class DuplicatePreflightError extends Error {
@@ -41,16 +41,21 @@ export async function checkDuplicatePreflight(
   let entries: { name: string; isDirectory: () => boolean }[] = [];
   try {
     entries = await fs.readdir(rootDir, { withFileTypes: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // If rootDir does not exist yet, no duplicates can exist
-    if (err.code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { status: "not-seen" };
     }
     throw err;
   }
 
-  const candidateAliases = new Set(
-    (identity.searchAliases || []).map((s) => s.toLowerCase().trim())
+  const candidateWorkAliases = new Set(
+    (identity.workSearchAliases || [
+      identity.canonicalCatalogId,
+      identity.provider && identity.providerAssetId
+        ? `${identity.provider}:${identity.providerAssetId}`
+        : undefined,
+    ].filter(Boolean) as string[]).map((s) => s.toLowerCase().trim())
   );
 
   for (const entry of entries) {
@@ -74,7 +79,7 @@ export async function checkDuplicatePreflight(
 
     let matchedReason: string | undefined;
 
-    // 1. Strong matching: Provider + Provider Asset ID
+    // 1. Strong matching: Provider + Provider Asset ID (strictly provider-scoped)
     if (
       job.provider &&
       descriptor.provider &&
@@ -101,12 +106,18 @@ export async function checkDuplicatePreflight(
     ) {
       matchedReason = `Matched canonical catalog ID: ${identity.canonicalCatalogId}`;
     }
-    // 4. Strong matching: Structured Search Aliases intersection
-    else if (job.identity?.searchAliases && job.identity.searchAliases.length > 0) {
-      const existingAliases = job.identity.searchAliases.map((s) => s.toLowerCase().trim());
-      const commonAlias = existingAliases.find((a) => a.length > 2 && candidateAliases.has(a));
-      if (commonAlias) {
-        matchedReason = `Matched search alias: "${commonAlias}"`;
+    // 4. Strong matching: Structured Work Search Aliases (catalog variants, provider-scoped IDs)
+    // NOTE: Performer names / performer aliases and low-confidence clues are search/indexing only and MUST NOT block
+    else {
+      const existingWorkAliases: string[] =
+        job.identity?.workSearchAliases && job.identity.workSearchAliases.length > 0
+          ? job.identity.workSearchAliases
+          : extractLegacyWorkAliases(job.identity, job.provider, job.providerAssetId);
+
+      const normalizedExisting = existingWorkAliases.map((s) => s.toLowerCase().trim());
+      const commonWorkAlias = normalizedExisting.find((a) => a.length > 2 && candidateWorkAliases.has(a));
+      if (commonWorkAlias) {
+        matchedReason = `Matched work catalog/asset alias: "${commonWorkAlias}"`;
       }
     }
 

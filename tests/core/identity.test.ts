@@ -120,9 +120,78 @@ describe("Progressive Media Identity & Deterministic Naming", () => {
     expect(identity.catalogCandidates).toBeDefined();
     expect(identity.catalogCandidates!.length).toBeGreaterThanOrEqual(1);
     expect(identity.catalogCandidates![0].canonical).toBe("ABW099");
+    expect(identity.catalogCandidates![0].provenance).toBe("observed-title");
+    expect(identity.catalogCandidates![0].confidence).toBe("medium");
+    expect(identity.workSearchAliases).toContain("ABW099");
+    expect(identity.workSearchAliases).toContain("ABW-099");
+    expect(identity.workSearchAliases).toContain("eporner:vid999");
+    expect(identity.performerSearchAliases).toContain("Actress A");
     expect(identity.searchAliases).toContain("ABW099");
-    expect(identity.searchAliases).toContain("ABW-099");
     expect(identity.searchAliases).toContain("vid999");
+    expect(identity.searchAliases).toContain("Actress A");
+  });
+
+  it("retains low-confidence filename-only catalog candidates without promoting them to canonical identity", () => {
+    const descriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "77788",
+      sourceUrl: "https://www.eporner.com/video-77788/unrelated-sample-title/",
+      rawTitle: "Unrelated Sample Title",
+      declaredPerformers: ["Actress X"],
+      observedFilenames: ["extra_ipx789_1080p.mp4"],
+      renditions: [],
+    };
+
+    const identity = buildMediaIdentity(descriptor);
+
+    // 1. Low-confidence filename candidate is retained as a clue
+    expect(identity.catalogCandidates).toBeDefined();
+    expect(identity.catalogCandidates?.length).toBe(1);
+    expect(identity.catalogCandidates?.[0].canonical).toBe("IPX789");
+    expect(identity.catalogCandidates?.[0].confidence).toBe("low");
+    expect(identity.catalogCandidates?.[0].provenance).toBe("observed-filename");
+
+    // 2. But DOES NOT become canonicalCatalogId
+    expect(identity.canonicalCatalogId).toBeUndefined();
+
+    // 3. Uses deterministic fallback naming
+    expect(identity.confidence).toBe("fallback");
+    expect(identity.baseName).toBe("eporner-77788 - Unrelated Sample Title");
+
+    // 4. Low-confidence candidate does NOT enter workSearchAliases (cannot falsely block as duplicate)
+    expect(identity.workSearchAliases).not.toContain("IPX789");
+    expect(identity.workSearchAliases).not.toContain("IPX-789");
+
+    // 5. But is present in searchAliases for general discovery
+    expect(identity.searchAliases).toContain("IPX789");
+    expect(identity.searchAliases).toContain("77788");
+  });
+
+  it("distinguishes candidate provenance across title, URL, and observed filenames without falsely elevated confidence", () => {
+    const descriptor: SourceDescriptor = {
+      provider: "eporner",
+      providerAssetId: "vid888",
+      sourceUrl: "https://www.eporner.com/video-vid888/midv-123-sample/",
+      rawTitle: "Title mentioning JUFE-456",
+      declaredPerformers: [],
+      observedFilenames: ["extra_ipx789_1080p.mp4"],
+      renditions: [],
+    };
+
+    const identity = buildMediaIdentity(descriptor);
+    expect(identity.catalogCandidates).toBeDefined();
+
+    const titleCand = identity.catalogCandidates!.find((c) => c.canonical === "JUFE456");
+    expect(titleCand?.provenance).toBe("observed-title");
+    expect(titleCand?.confidence).toBe("medium");
+
+    const urlCand = identity.catalogCandidates!.find((c) => c.canonical === "MIDV123");
+    expect(urlCand?.provenance).toBe("source-url");
+    expect(urlCand?.confidence).toBe("medium");
+
+    const fileCand = identity.catalogCandidates!.find((c) => c.canonical === "IPX789");
+    expect(fileCand?.provenance).toBe("observed-filename");
+    expect(fileCand?.confidence).toBe("low");
   });
 
   it("sanitizes forbidden characters from filenames", () => {

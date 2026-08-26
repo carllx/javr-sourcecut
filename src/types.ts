@@ -19,10 +19,19 @@ export interface PerformerIdentity {
   hints?: string[];
 }
 
+export type CandidateProvenance =
+  | "observed-title"
+  | "source-url"
+  | "observed-filename"
+  | "declared-hint"
+  | "manual"
+  | "external-authority";
+
 export interface CatalogCandidate {
   canonical: string;
   hyphenated: string;
   raw: string;
+  provenance: CandidateProvenance;
   confidence: "high" | "medium" | "low";
 }
 
@@ -44,10 +53,12 @@ export interface ProgressiveMediaIdentity {
   observedFilenames?: string[];
   canonicalCatalogId?: string; // e.g. "WAVR110"
   catalogCandidates?: CatalogCandidate[];
-  searchAliases: string[];      // e.g. ["WAVR110", "WAVR-110", "wavr110"]
+  workSearchAliases: string[];       // Work-identity aliases (canonical, hyphenated, providerAssetId, candidates)
+  performerSearchAliases: string[];  // Performer-identity aliases (preferred names, aliases)
+  searchAliases: string[];           // Unified search and indexing list (work + performer aliases)
   performers: PerformerIdentity[];
   confidence: "high" | "medium" | "fallback";
-  provenance?: string;
+  provenance?: CandidateProvenance;
   baseName: string;
 }
 
@@ -108,7 +119,7 @@ export interface JobState {
 export interface SourceAdapter {
   readonly provider: "eporner" | "astalavr" | "pikpak";
   canHandle(url: string): boolean;
-  resolve(url: string): Promise<SourceDescriptor>;
+  resolve(url: string, fetchFn?: typeof fetch): Promise<SourceDescriptor>;
 }
 
 export interface HITLPauseResult {
