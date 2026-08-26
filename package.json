@@ -9,15 +9,20 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "build:companion": "node companion/build.mjs",
     "test": "vitest run --exclude '**/*.browser.test.ts'",
     "test:browser": "vitest run tests/core/session.browser.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:companion": "vitest run tests/companion",
+    "typecheck": "tsc --noEmit && tsc --project companion/tsconfig.json --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.13.4",
+    "@types/tampermonkey": "^5.5.0",
+    "esbuild": "^0.28.2",
+    "happy-dom": "^20.11.6",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   }
