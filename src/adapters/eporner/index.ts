@@ -1,2 +1,6 @@
-export * from "./parser.js";
-export * from "./adapter.js";
+export { EpornerAdapter } from "./adapter.js";
+export {
+  extractVideoIdFromUrl as extractEpornerVideoIdFromUrl,
+  extractVideoIdFromUrl,
+  parseEpornerHtml,
+} from "./parser.js";

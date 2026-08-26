@@ -119,7 +119,7 @@ export interface JobState {
 export interface SourceAdapter {
   readonly provider: "eporner" | "astalavr" | "pikpak";
   canHandle(url: string): boolean;
-  resolve(url: string): Promise<SourceDescriptor>;
+  resolve(url: string, fetchFn?: typeof fetch): Promise<SourceDescriptor>;
 }
 
 export interface HITLPauseResult {

@@ -368,10 +368,11 @@ export function matchesCookie(
  * Connects to the page target, queries Network.getCookies for explicit target URLs,
  * and performs graceful browser shutdown via CDP Browser.close.
  */
-export async function extractEpornerCookiesFromProfile(
+export async function extractCookiesFromProfile(
   profileDir: string,
   options?: {
     urls?: string[];
+    allowedDomains?: string[];
     timeoutMs?: number;
   }
 ): Promise<NetscapeCookie[]> {
@@ -391,6 +392,7 @@ export async function extractEpornerCookiesFromProfile(
     "https://eporner.com",
     "https://www.eporner.com/login/",
   ];
+  const allowedDomains = options?.allowedDomains ?? ["eporner.com"];
 
   let proc: any = null;
   let browserWs: WebSocket | null = null;
@@ -522,8 +524,12 @@ export async function extractEpornerCookiesFromProfile(
 
     for (const c of rawCookies) {
       const domain = c.domain?.toLowerCase() ?? "";
-      // Strict domain filter: only Eporner domains are accepted into the session jar
-      if (domain !== "eporner.com" && !domain.endsWith(".eporner.com")) {
+      // Strict domain filter: only allowed domains are accepted into the session jar
+      const isAllowed = allowedDomains.some((d) => {
+        const clean = d.toLowerCase().replace(/^\./, "");
+        return domain === clean || domain.endsWith("." + clean);
+      });
+      if (!isAllowed) {
         continue;
       }
 
@@ -684,7 +690,21 @@ export class BrowserProfileSessionProvider implements SourceSessionProvider {
     }
 
     const browser = findBrowserExecutable();
-    const cookies = await extractEpornerCookiesFromProfile(profileDir);
+    const urls =
+      providerName === "astalavr"
+        ? ["https://www.astalavr.com", "https://astalavr.com"]
+        : [
+            "https://www.eporner.com",
+            "https://eporner.com",
+            "https://www.eporner.com/login/",
+          ];
+    const allowedDomains =
+      providerName === "astalavr" ? ["astalavr.com"] : ["eporner.com"];
+
+    const cookies = await extractCookiesFromProfile(profileDir, {
+      urls,
+      allowedDomains,
+    });
     if (cookies.length === 0) {
       return null;
     }
@@ -763,11 +783,12 @@ export class NoopSessionProvider implements SourceSessionProvider {
 /**
  * Resolves a SourceSessionProvider according to authoritative precedence:
  * A. Explicit cookies file (--cookies <path> or JAVR_COOKIES_FILE) -> NetscapeCookieFileSessionProvider
- * B. Dedicated browser profile exists (e.g. %LOCALAPPDATA%\javr-sourcecut\profiles\eporner) -> BrowserProfileSessionProvider
+ * B. Dedicated browser profile exists (e.g. %LOCALAPPDATA%\javr-sourcecut\profiles\<provider>) -> BrowserProfileSessionProvider
  * C. Local default cookies.txt in workspace -> NetscapeCookieFileSessionProvider
  * D. Otherwise -> NoopSessionProvider
  */
 export async function resolveSessionProvider(options?: {
+  provider?: string;
   cookiesPath?: string;
   cookieString?: string;
   profileDir?: string;
@@ -786,9 +807,10 @@ export async function resolveSessionProvider(options?: {
   }
 
   // B. Dedicated persistent browser profile
-  const profileDir = options?.profileDir ?? getDedicatedProfileDir("eporner");
+  const provider = options?.provider || "eporner";
+  const profileDir = options?.profileDir ?? getDedicatedProfileDir(provider);
   try {
-    const browserProvider = await BrowserProfileSessionProvider.fromDedicatedProfile("eporner", profileDir);
+    const browserProvider = await BrowserProfileSessionProvider.fromDedicatedProfile(provider, profileDir);
     if (browserProvider) {
       return browserProvider;
     }
@@ -813,12 +835,25 @@ export async function resolveSessionProvider(options?: {
   return new NoopSessionProvider();
 }
 
+export async function extractEpornerCookiesFromProfile(
+  profileDir: string,
+  options?: {
+    urls?: string[];
+    timeoutMs?: number;
+  }
+): Promise<NetscapeCookie[]> {
+  return extractCookiesFromProfile(profileDir, {
+    ...options,
+    allowedDomains: ["eporner.com"],
+  });
+}
+
 /**
  * Interactive CLI helper to launch a visible dedicated browser for one-time visual login.
  */
 export async function launchAuthBrowser(
   provider = "eporner",
-  loginUrl = "https://www.eporner.com/login/"
+  loginUrl?: string
 ): Promise<{ profileDir: string; browserType: string }> {
   const profileDir = getDedicatedProfileDir(provider);
   await fs.mkdir(profileDir, { recursive: true });
@@ -827,11 +862,16 @@ export async function launchAuthBrowser(
   await lock.acquire();
 
   const browser = findBrowserExecutable();
+  const defaultLoginUrl =
+    provider === "astalavr" ? "https://astalavr.com/" : "https://www.eporner.com/login/";
+  const targetUrl = loginUrl || defaultLoginUrl;
 
   console.log(`\nLaunching visible ${browser.type.toUpperCase()} with dedicated profile:`);
   console.log(` Profile: ${profileDir}`);
   console.log(` Browser: ${browser.executablePath}`);
-  console.log(`\nPlease log into Eporner in the opened browser window. When finished, you may close the browser.`);
+  console.log(
+    `\nPlease log into ${provider} in the opened browser window. When finished, you may close the browser.`
+  );
 
   let proc: any;
   if (process.platform === "win32") {
@@ -847,7 +887,7 @@ export async function launchAuthBrowser(
         "--new-window",
         "--no-first-run",
         "--no-default-browser-check",
-        loginUrl,
+        targetUrl,
       ],
       { stdio: "ignore", windowsHide: false }
     );
@@ -859,7 +899,7 @@ export async function launchAuthBrowser(
         "--new-window",
         "--no-first-run",
         "--no-default-browser-check",
-        loginUrl,
+        targetUrl,
       ],
       { stdio: "ignore" }
     );

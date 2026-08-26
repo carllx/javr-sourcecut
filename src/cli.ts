@@ -85,14 +85,14 @@ async function main() {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(`
 Usage:
-  # Ingestion mode (Slice 1):
-  javr-sourcecut <eporner-url> [root-directory] [--cookies <cookies.txt>]
+  # Ingestion mode (Slice 1 / 6):
+  javr-sourcecut <source-url> [root-directory] [--cookies <cookies.txt>]
 
-  # Resume mode (Slice 3/4):
+  # Resume mode (Slice 3 / 4 / 6):
   javr-sourcecut resume <job-directory-or-job.json> [options]
 
   # Dedicated browser authentication:
-  javr-sourcecut auth eporner [--reset]
+  javr-sourcecut auth <eporner|astalavr> [--reset]
 
 Options:
   --resume, resume         Resume an existing waiting-for-llc Job
@@ -106,8 +106,11 @@ Options:
   --help, -h               Show this help message
 
 Examples:
+  javr-sourcecut auth astalavr
+  javr-sourcecut "https://astalavr.com/videos/7gYMp/Kenzie-Reeves-VR"
   javr-sourcecut auth eporner
   javr-sourcecut auth eporner --reset
+  javr-sourcecut resume "./downloads/astalavr-7gYMp"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --cookies "./cookies.txt"
   javr-sourcecut resume "./downloads/eporner-5n1ArXshUMZ" --height 1080 --codec av1

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
+import { AstalaVrAdapter } from "../adapters/astalavr/index.js";
 import { selectProxyRendition } from "./proxy-selector.js";
 import {
   selectHighestPublicHqRendition,
@@ -23,6 +24,11 @@ import type { TimeRange } from "./mp4/types.js";
 
 import type { JobState } from "../types.js";
 
+export const DEFAULT_ADAPTERS: SourceAdapter[] = [
+  new EpornerAdapter(),
+  new AstalaVrAdapter(),
+];
+
 export interface TracerSliceParams {
   sourceUrl: string;
   rootDir: string;
@@ -39,7 +45,7 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   const {
     sourceUrl,
     rootDir,
-    adapters = [new EpornerAdapter()],
+    adapters = DEFAULT_ADAPTERS,
     fetchFn = fetch,
     cookiesPath,
     sessionProvider: explicitSessionProvider,
@@ -48,15 +54,16 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
     onLog = () => {},
   } = params;
 
-  const sessionProvider =
-    explicitSessionProvider ?? (await resolveSessionProvider({ cookiesPath }));
-  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
-
   // 1. Adapter Selection
   const adapter = adapters.find((a) => a.canHandle(sourceUrl));
   if (!adapter) {
     throw new Error(`No compatible source adapter found for URL: ${sourceUrl}`);
   }
+
+  const sessionProvider =
+    explicitSessionProvider ??
+    (await resolveSessionProvider({ cookiesPath, provider: adapter.provider }));
+  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
 
   onLog(`[1/5] Ingesting URL with adapter "${adapter.provider}"...`);
 
@@ -173,20 +180,21 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     budgetMultiplier,
     cookiesPath,
     sessionProvider: explicitSessionProvider,
-    adapters = [new EpornerAdapter()],
+    adapters = DEFAULT_ADAPTERS,
     fetchFn = fetch,
     verifierFn = verifyMediaFile,
     onProgress,
     onLog = () => {},
   } = params;
 
-  const sessionProvider =
-    explicitSessionProvider ?? (await resolveSessionProvider({ cookiesPath }));
-  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
-
   // 1. Load existing job.json from disk
   const job = await loadJob(jobPathOrDir);
   onLog(`[Resume 1/5] Loaded Job "${job.jobId}" from ${job.workspaceDir} (status: ${job.status})`);
+
+  const sessionProvider =
+    explicitSessionProvider ??
+    (await resolveSessionProvider({ cookiesPath, provider: job.provider }));
+  const sessionFetch = sessionProvider.createSessionFetch(fetchFn);
 
   // 2. Invariant: Existing proxy must exist on disk and MUST NOT be re-downloaded or modified
   let proxyStatBefore: { mtimeMs: number; size: number };
@@ -233,8 +241,10 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
     }
   }
 
-  // 5. Re-resolve current live Eporner renditions (do not trust stale direct URLs in job.json)
-  const adapter = adapters.find((a) => a.canHandle(job.sourceUrl));
+  // 5. Re-resolve current live renditions (do not trust stale direct URLs in job.json)
+  const adapter =
+    adapters.find((a) => a.canHandle(job.sourceUrl)) ??
+    adapters.find((a) => a.provider === job.provider);
   if (!adapter) {
     throw new Error(`No compatible source adapter found for source URL: ${job.sourceUrl}`);
   }
@@ -368,7 +378,7 @@ export async function resumeJobWorkflow(params: ResumeJobParams): Promise<Resume
   );
   await saveJob(job);
 
-  onLog(`\n[SUCCESS] Eporner Resume E2E completed successfully! Output: ${outputClipPath}`);
+  onLog(`\n[SUCCESS] Resume E2E completed successfully (${job.provider})! Output: ${outputClipPath}`);
 
   return {
     job,

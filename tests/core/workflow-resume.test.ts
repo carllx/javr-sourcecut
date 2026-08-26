@@ -1329,4 +1329,274 @@ describe("Workflow Resume E2E", () => {
   });
 });
 
+describe("AstalaVR Tracer Slice 6 Workflow Resume E2E", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "javr-astala-resume-test-"));
+    vi.stubEnv("JAVR_PROFILES_DIR", path.join(tmpDir, "profiles"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("resumes an existing AstalaVR job from disk, selects top 2048p h264, and completes through Shared Core", async () => {
+    const workspaceDir = path.join(tmpDir, "astalavr-7gYMp");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "astalavr-7gYMp.proxy.mp4");
+    const proxyContent = Buffer.from("dummy-astala-proxy-mp4-content");
+    await fs.writeFile(proxyPath, proxyContent);
+    const proxyStatBefore = await fs.stat(proxyPath);
+
+    const llcPath = path.join(workspaceDir, "astalavr-7gYMp.llc");
+    const llcContent = `
+{
+  version: 2,
+  mediaFileName: 'astalavr-7gYMp.proxy.mp4',
+  cutSegments: [
+    {
+      start: 50.0,
+      end: 150.0,
+      selected: true,
+    },
+  ],
+}
+`;
+    await fs.writeFile(llcPath, llcContent, "utf-8");
+
+    const finalOutputPath = path.join(workspaceDir, "astalavr-7gYMp.mp4");
+
+    const jobState: JobState = {
+      jobId: "astalavr-7gYMp",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://astalavr.com/videos/7gYMp/Kenzie-Reeves-VR",
+      provider: "astalavr",
+      providerAssetId: "7gYMp",
+      identity: {
+        provider: "astalavr",
+        providerAssetId: "7gYMp",
+        observedTitle: "Kenzie Reeves VR",
+        searchAliases: ["astalavr:7gYMp"],
+        workSearchAliases: ["astalavr:7gYMp"],
+        performerSearchAliases: ["Kenzie Reeves"],
+        performers: [{ preferredName: "Kenzie Reeves" }],
+        confidence: "medium",
+        baseName: "astalavr-7gYMp",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "720p-h264",
+        resolution: "720p",
+        height: 720,
+        fps: 60,
+        vcodec: "h264",
+        directUrl: "https://cdn3.astalavr.com/7gYMp/720P.mp4?token=old",
+      },
+      proxyPath,
+      expectedLlcPath: llcPath,
+      finalOutputPath,
+      renditions: [],
+    };
+
+    await saveJob(jobState);
+
+    // Mock live AstalaVR descriptor re-resolution with fresh ephemeral token
+    const mockDescriptor: SourceDescriptor = {
+      provider: "astalavr",
+      providerAssetId: "7gYMp",
+      sourceUrl: "https://astalavr.com/videos/7gYMp/Kenzie-Reeves-VR",
+      rawTitle: "Kenzie Reeves VR",
+      declaredPerformers: ["Kenzie Reeves"],
+      observedFilenames: ["720P.mp4", "1440P.mp4", "2048P.mp4"],
+      durationSeconds: 2603,
+      renditions: [
+        {
+          formatId: "720p-h264",
+          resolution: "720p",
+          height: 720,
+          fps: 60,
+          vcodec: "h264",
+          directUrl: "https://cdn3.astalavr.com/7gYMp/720P.mp4?token=fresh_720",
+        },
+        {
+          formatId: "1440p-h264",
+          resolution: "1440p",
+          height: 1440,
+          fps: 60,
+          vcodec: "h264",
+          directUrl: "https://cdn3.astalavr.com/7gYMp/1440P.mp4?token=fresh_1440",
+        },
+        {
+          formatId: "2048p-h264",
+          resolution: "2048p",
+          height: 2048,
+          fps: 60,
+          vcodec: "h264",
+          directUrl: "https://cdn3.astalavr.com/7gYMp/2048P.mp4?token=fresh_2048",
+        },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "astalavr",
+      canHandle: (url) => url.includes("astalavr.com"),
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      return new Response(new Uint8Array([0x00]), {
+        status: 206,
+        headers: {
+          "Content-Range": "bytes 0-0/5000000000",
+          "Content-Type": "video/mp4",
+          "Content-Length": "1",
+        },
+      });
+    });
+
+    vi.spyOn(selectiveFetchModule, "runSelectiveFetch").mockImplementation(async (params) => {
+      await fs.writeFile(params.outputClipPath, "mock-assembled-mp4-output");
+      return {
+        outputClipPath: params.outputClipPath,
+        plan: {} as any,
+        index: {} as any,
+        probeResult: {
+          format: { filename: params.outputClipPath, duration: "100.0" } as any,
+          videoStream: { index: 0, codec: "h264", width: 3840, height: 2048, fps: 60 },
+          duration: 100.0,
+          isValid: true,
+        },
+        indexProbeResult: {} as any,
+        transferredBytes: 50000000,
+        fullFileBytes: 5000000000,
+        savingsPercent: 99,
+      };
+    });
+
+    const result = await resumeJobWorkflow({
+      jobPathOrDir: workspaceDir,
+      adapters: [mockAdapter],
+      fetchFn: mockFetch as any,
+      sessionProvider: new NoopSessionProvider(),
+    });
+
+    expect(result.job.status).toBe("completed");
+    expect(result.selectedHq.formatId).toBe("2048p-h264");
+    expect(result.selectedHq.height).toBe(2048);
+    expect(result.selectedHq.directUrl).toBe("https://cdn3.astalavr.com/7gYMp/2048P.mp4?token=fresh_2048");
+    expect(result.outputClipPath).toBe(finalOutputPath);
+    expect(result.selectiveFetchSavingsPercent).toBe(99);
+
+    // Invariant: Verify proxy file was completely untouched
+    const proxyStatAfter = await fs.stat(proxyPath);
+    expect(proxyStatAfter.mtimeMs).toBe(proxyStatBefore.mtimeMs);
+    expect(proxyStatAfter.size).toBe(proxyStatBefore.size);
+
+    // Verify job.json saved as completed
+    const reloaded = await loadJob(workspaceDir);
+    expect(reloaded.status).toBe("completed");
+  });
+
+  it("handles token expiration or auth rejection during re-resolve by entering clean intervention state", async () => {
+    const workspaceDir = path.join(tmpDir, "astalavr-auth-fail");
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const proxyPath = path.join(workspaceDir, "astalavr-auth-fail.proxy.mp4");
+    await fs.writeFile(proxyPath, Buffer.from("proxy"));
+
+    const llcPath = path.join(workspaceDir, "astalavr-auth-fail.llc");
+    await fs.writeFile(
+      llcPath,
+      JSON.stringify({
+        version: 2,
+        mediaFileName: "astalavr-auth-fail.proxy.mp4",
+        cutSegments: [{ start: 0, end: 10, selected: true }],
+      })
+    );
+
+    const jobState: JobState = {
+      jobId: "astalavr-auth-fail",
+      status: "waiting-for-llc",
+      createdAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: "2026-08-25T10:05:00.000Z",
+      sourceUrl: "https://astalavr.com/videos/authfail",
+      provider: "astalavr",
+      providerAssetId: "authfail",
+      identity: {
+        provider: "astalavr",
+        providerAssetId: "authfail",
+        observedTitle: "Auth Fail",
+        searchAliases: ["astalavr:authfail"],
+        workSearchAliases: ["astalavr:authfail"],
+        performerSearchAliases: [],
+        performers: [],
+        confidence: "fallback",
+        baseName: "astalavr-authfail",
+      },
+      workspaceDir,
+      selectedProxy: {
+        formatId: "720p-h264",
+        resolution: "720p",
+        height: 720,
+        vcodec: "h264",
+        directUrl: "https://cdn3.astalavr.com/authfail/720P.mp4",
+      },
+      proxyPath,
+      expectedLlcPath: llcPath,
+      finalOutputPath: path.join(workspaceDir, "out.mp4"),
+      renditions: [],
+    };
+
+    await saveJob(jobState);
+
+    // Mock adapter where 2048p returns 403 on range probe
+    const mockDescriptor: SourceDescriptor = {
+      provider: "astalavr",
+      providerAssetId: "authfail",
+      sourceUrl: "https://astalavr.com/videos/authfail",
+      rawTitle: "Auth Fail",
+      declaredPerformers: [],
+      durationSeconds: 100,
+      renditions: [
+        {
+          formatId: "2048p-h264",
+          resolution: "2048p",
+          height: 2048,
+          vcodec: "h264",
+          directUrl: "https://cdn3.astalavr.com/authfail/2048P.mp4",
+        },
+      ],
+    };
+
+    const mockAdapter: SourceAdapter = {
+      provider: "astalavr",
+      canHandle: () => true,
+      resolve: vi.fn().mockResolvedValue(mockDescriptor),
+    };
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response("Forbidden", { status: 403, statusText: "Forbidden" })
+    );
+
+    await expect(
+      resumeJobWorkflow({
+        jobPathOrDir: workspaceDir,
+        adapters: [mockAdapter],
+        fetchFn: mockFetch as any,
+        sessionProvider: new NoopSessionProvider(),
+      })
+    ).rejects.toThrow(/All candidates at target resolution 2048p failed live Range capability verification/i);
+
+    const reloaded = await loadJob(workspaceDir);
+    expect(reloaded.status).toBe("needs-user-intervention");
+    expect(reloaded.interventionReason).toContain("Authenticated session transport is not configured");
+  });
+});
+
+
 
