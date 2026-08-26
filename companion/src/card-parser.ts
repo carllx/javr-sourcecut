@@ -42,6 +42,18 @@ export function isResolution4kPlus(text: string): boolean {
   if (/vr\s*(?:4k|5k|6k|8k|2160p)/i.test(normalized)) {
     return true;
   }
+  // Match 4K (2160p) format as used in Eporner .mvhdico spans
+  const kFormatMatch = normalized.match(/(\d+)k\s*\(?(\d+)p\)?/i);
+  if (kFormatMatch && kFormatMatch[2]) {
+    const p = parseInt(kFormatMatch[2], 10);
+    if (p >= 2160) return true;
+  }
+  // Match width x height format (e.g. 3840x2160)
+  const wxMatch = normalized.match(/(\d{3,})x(\d{3,})/i);
+  if (wxMatch && wxMatch[2]) {
+    const height = parseInt(wxMatch[2], 10);
+    if (height >= 2160) return true;
+  }
   // Match explicit numeric heights >= 2160
   const heightMatch = normalized.match(/(\d{4,})p?/);
   if (heightMatch && heightMatch[1]) {
@@ -55,9 +67,38 @@ export function isResolution4kPlus(text: string): boolean {
 
 /**
  * Extracts resolution string from a card element.
+ * Fully covers legacy .mvhdico containers as well as modern badge classes.
  */
 export function extractCardResolution(cardEl: HTMLElement): string {
-  // Check explicit badge classes often used by Eporner
+  // 1. Check legacy .mvhdico container (used on Eporner list pages)
+  const mvhdico = cardEl.querySelector(".mvhdico");
+  if (mvhdico) {
+    const spans = mvhdico.querySelectorAll("span");
+    const nonVrTexts: string[] = [];
+    const allTexts: string[] = [];
+    spans.forEach((s) => {
+      const text = s.textContent?.trim();
+      if (text) {
+        allTexts.push(text);
+        if (!s.classList.contains("vrico")) {
+          nonVrTexts.push(text);
+        }
+      }
+    });
+
+    if (nonVrTexts.length > 0) {
+      return nonVrTexts.join(" ");
+    }
+    if (allTexts.length > 0) {
+      return allTexts.join(" ");
+    }
+    const directText = mvhdico.textContent?.trim();
+    if (directText) {
+      return directText;
+    }
+  }
+
+  // 2. Check explicit badge classes
   const badgeEls = cardEl.querySelectorAll(
     ".mvhd, .mv4k, .mvvr, .mvhdef, .hd-label, .quality, span.mvhdef, span.mvhd, span.mv4k"
   );
@@ -71,9 +112,11 @@ export function extractCardResolution(cardEl: HTMLElement): string {
     return badgeTexts.join(" ");
   }
 
-  // Fallback: check all text in card
+  // 3. Fallback: check all text in card
   const fullText = cardEl.textContent || "";
-  const match = fullText.match(/\b(4K\s*2160p|4K|2160p|VR\s*4K|VR|1080p\s*60fps|1080p|720p|480p)\b/i);
+  const match = fullText.match(
+    /\b(4K\s*\(?2160p\)?|4K\s*2160p|4K|2160p|VR\s*4K|VR|1080p\s*60fps|1080p|720p|480p|3840x2160)\b/i
+  );
   if (match && match[1]) {
     return match[1].trim();
   }
@@ -103,7 +146,7 @@ export function parseCandidateCards(root: ParentNode = document): CandidateCard[
   for (const element of cardElements) {
     // Find link inside card
     const linkEl = element.querySelector<HTMLAnchorElement>(
-      "a[href*='/video-'], a[href*='/video/'], a[href*='/hd-porn/']"
+      "a[href*='/video-'], a[href*='/video/'], a[href*='/hd-porn/'], .mbtit a"
     );
     if (!linkEl) continue;
 

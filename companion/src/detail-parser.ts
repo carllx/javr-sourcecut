@@ -140,9 +140,17 @@ export function parseDetailPageHtml(
       ? `${av1Heights[0]}p`
       : "unknown";
 
-  let probeStatus: ProbeStatus = "no_av1";
+  let probeStatus: ProbeStatus = "unknown";
+  let errorMsg: string | undefined;
+
   if (av1Resolutions.length > 0) {
     probeStatus = "detected";
+  } else if (allHeights.length > 0) {
+    probeStatus = "no_av1";
+  } else {
+    // Eporner markers matched, but 0 download renditions found -> unknown, NOT no_av1
+    probeStatus = "unknown";
+    errorMsg = "No download rendition links parsed from detail page";
   }
 
   return {
@@ -153,6 +161,7 @@ export function parseDetailPageHtml(
     highestAv1Resolution,
     has4kAv1,
     probeStatus,
+    error: errorMsg,
     updatedAt: Date.now(),
   };
 }

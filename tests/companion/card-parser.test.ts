@@ -24,19 +24,50 @@ describe("Companion Card Parser & Filters", () => {
     it("recognizes 4K and higher resolution labels", () => {
       expect(isResolution4kPlus("4K")).toBe(true);
       expect(isResolution4kPlus("4K 2160p")).toBe(true);
+      expect(isResolution4kPlus("4K (2160p)")).toBe(true);
       expect(isResolution4kPlus("2160p")).toBe(true);
       expect(isResolution4kPlus("VR 4K")).toBe(true);
       expect(isResolution4kPlus("5K 2880p")).toBe(true);
       expect(isResolution4kPlus("8K 4320p")).toBe(true);
+      expect(isResolution4kPlus("3840x2160")).toBe(true);
     });
 
     it("rejects sub-4K resolutions", () => {
       expect(isResolution4kPlus("1080p")).toBe(false);
       expect(isResolution4kPlus("1080p 60fps")).toBe(false);
+      expect(isResolution4kPlus("2K (1440p)")).toBe(false);
+      expect(isResolution4kPlus("1920x1080")).toBe(false);
       expect(isResolution4kPlus("720p")).toBe(false);
       expect(isResolution4kPlus("HD")).toBe(false);
       expect(isResolution4kPlus("480p")).toBe(false);
       expect(isResolution4kPlus("unknown")).toBe(false);
+    });
+  });
+
+  describe("extractCardResolution & .mvhdico compatibility", () => {
+    it("extracts resolution from legacy .mvhdico structure skipping .vrico badge", () => {
+      const cardEl = document.createElement("div");
+      cardEl.innerHTML = `
+        <div class="mvhdico">
+          <span class="vrico">VR</span>
+          <span>4K (2160p)</span>
+        </div>
+      `;
+      const res = extractCardResolution(cardEl);
+      expect(res).toBe("4K (2160p)");
+      expect(isResolution4kPlus(res)).toBe(true);
+    });
+
+    it("extracts sub-4K resolution correctly from .mvhdico", () => {
+      const cardEl = document.createElement("div");
+      cardEl.innerHTML = `
+        <div class="mvhdico">
+          <span>1080p</span>
+        </div>
+      `;
+      const res = extractCardResolution(cardEl);
+      expect(res).toBe("1080p");
+      expect(isResolution4kPlus(res)).toBe(false);
     });
   });
 

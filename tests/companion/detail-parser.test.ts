@@ -113,4 +113,25 @@ describe("Companion Detail Parser", () => {
     expect(garbageProfile.probeStatus).toBe("unknown");
     expect(garbageProfile.probeStatus).not.toBe("no_av1");
   });
+
+  it("marks Eporner video page with missing/modified download section as unknown, NEVER no_av1", () => {
+    const htmlWithNoDownloads = `
+      <!DOCTYPE html>
+      <html>
+        <head><title>Deleted or Stream-only Video - EPORNER</title></head>
+        <body>
+          <div id="ep_player" class="player-container">
+            <video src="blob:http://..."></video>
+          </div>
+          <!-- downloaddiv is completely absent or empty -->
+          <div id="downloaddiv"></div>
+        </body>
+      </html>
+    `;
+
+    const profile = parseDetailPageHtml(htmlWithNoDownloads, "no-dl-1", "https://www.eporner.com/video-no-dl-1/");
+    expect(profile.probeStatus).toBe("unknown");
+    expect(profile.probeStatus).not.toBe("no_av1");
+    expect(profile.error).toContain("No download rendition links");
+  });
 });
