@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { extractClipFromPlan } from "../../../src/core/mp4/extractor.js";
+
 import { probeMP4Index } from "../../../src/core/mp4/index-prober.js";
 import { createByteRangeFetchPlan } from "../../../src/core/mp4/fetch-plan.js";
 import { verifyMediaFile } from "../../../src/core/verifier.js";
@@ -230,5 +231,62 @@ describe("FFmpeg Clip Extraction from Partial Fetch", () => {
     expect(probe.videoStream.codec).toBe("h264");
     expect(probe.audioStream?.codec).toBe("aac");
   });
+
+  it("fails closed with IncompatibleConcatSegmentsError if extracted segments have incompatible stream parameters", async () => {
+    const { createMultiSegmentFetchPlan } = await import(
+      "../../../src/core/mp4/fetch-plan.js"
+    );
+    const { IncompatibleConcatSegmentsError } = await import(
+      "../../../src/core/mp4/types.js"
+    );
+    const verifierModule = await import("../../../src/core/verifier.js");
+
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const probeResult = await probeMP4Index(videoUrl, { headProbeBytes: 64 * 1024 });
+    const index = probeResult.index;
+
+    const targetRanges = [
+      { startSeconds: 2.0, endSeconds: 5.0 },
+      { startSeconds: 10.0, endSeconds: 13.0 },
+    ];
+
+    const multiPlan = createMultiSegmentFetchPlan(index, targetRanges, videoUrl);
+    const outputClipPath = path.join(tempDir, "incompatible_merge.mp4");
+
+    // Spy on verifyMediaFile so segment 0 returns h264/1080p and segment 1 returns av1/2160p
+    let callCount = 0;
+    const realVerify = verifierModule.verifyMediaFile;
+    const verifySpy = vi.spyOn(verifierModule, "verifyMediaFile").mockImplementation(async (filePath) => {
+      const real = await realVerify(filePath);
+      callCount++;
+      if (callCount === 2) {
+        // Mock segment 1 having incompatible codec and height
+        return {
+          ...real,
+          videoStream: {
+            ...real.videoStream,
+            codec: "av1",
+            height: 2160,
+          },
+        };
+      }
+      return real;
+    });
+
+    try {
+      await expect(
+        extractClipFromPlan({
+          plan: multiPlan,
+          index,
+          outputClipPath,
+          workDir: path.join(tempDir, "incompatible-workdir"),
+          cachedHead: probeResult.cachedHead,
+        })
+      ).rejects.toThrow(IncompatibleConcatSegmentsError);
+    } finally {
+      verifySpy.mockRestore();
+    }
+  });
 });
+
 

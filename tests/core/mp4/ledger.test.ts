@@ -300,5 +300,76 @@ describe("TransferLedgerManager", () => {
     expect(manager.ledger.rendition.fullFileBytes).toBe(50_000_000);
     expect(manager.ledger.logicalRenditionId).toBe("eporner:vid123:2160p-av1:50000000");
   });
+
+  it("proves Run 1 probe + chunks consume bytes, restart preserves bytes, ETag changes invalidate chunks but preserve historical spent bytes, preventing budget headroom reset", async () => {
+    const { TransferBudgetTracker } = await import("../../../src/core/mp4/budget.js");
+    const { BudgetExceededError } = await import("../../../src/core/mp4/types.js");
+
+    const estimatedBytes = 1000;
+    const budgetMultiplier = 1.5; // max budget: 1500
+
+    // --- Run 1: Probe (100B) + Chunk 1 (500B) ---
+    const manager1 = new TransferLedgerManager({
+      workspaceDir: tmpDir,
+      rendition: { ...sampleRendition, etag: '"etag-v1"' },
+    });
+    await manager1.loadOrCreateLedger();
+
+    // Record probe spend
+    await manager1.recordNetworkSpend(100);
+
+    // Record Chunk 1 (0-499)
+    const chunk1Path = path.join(tmpDir, "chunks", "chunk_0_499.bin");
+    await fs.mkdir(path.dirname(chunk1Path), { recursive: true });
+    await fs.writeFile(chunk1Path, Buffer.alloc(500, 1));
+    await manager1.recordCompletedChunk({
+      range: { startByte: 0, endByte: 499 },
+      byteLength: 500,
+      filePath: chunk1Path,
+      etag: '"etag-v1"',
+      transferredNetworkBytes: 500,
+    });
+
+    expect(manager1.cumulativeHistoricalSpentBytes).toBe(600);
+
+    // --- Run 2: Restart on same version ---
+    const manager2 = new TransferLedgerManager({
+      workspaceDir: tmpDir,
+      rendition: { ...sampleRendition, etag: '"etag-v1"' },
+    });
+    await manager2.loadOrCreateLedger();
+    expect(manager2.cumulativeHistoricalSpentBytes).toBe(600);
+    expect(manager2.ledger.transactions.length).toBe(1);
+
+    // --- Run 3: Restart where server changed ETag to "etag-v2" ---
+    const manager3 = new TransferLedgerManager({
+      workspaceDir: tmpDir,
+      rendition: { ...sampleRendition, etag: '"etag-v2"' },
+    });
+    await manager3.loadOrCreateLedger();
+
+    // Chunk transactions must be invalidated
+    expect(manager3.ledger.transactions.length).toBe(0);
+    // Historical spent bytes must remain strictly preserved
+    expect(manager3.cumulativeHistoricalSpentBytes).toBe(600);
+
+    // Seed budget tracker from persistent historical total
+    const budgetTracker3 = new TransferBudgetTracker({
+      estimatedBytes,
+      budgetMultiplier,
+      historicalTransferredBytes: manager3.cumulativeHistoricalSpentBytes,
+    });
+
+    expect(budgetTracker3.remainingBudget).toBe(900); // 1500 - 600
+
+    // Run 3 probe takes 100B
+    expect(() => budgetTracker3.checkProspectiveBudget(100)).not.toThrow();
+    budgetTracker3.recordBytes(100);
+    await manager3.recordNetworkSpend(100);
+
+    // Re-downloading full estimated content (900B) would now breach budget (600 + 100 + 900 = 1600 > 1500)
+    expect(() => budgetTracker3.checkProspectiveBudget(900)).toThrow(BudgetExceededError);
+  });
 });
+
 

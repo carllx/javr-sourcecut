@@ -111,6 +111,20 @@ export class BudgetExceededError extends Error {
   }
 }
 
+export class RenditionVersionMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RenditionVersionMismatchError";
+  }
+}
+
+export class IncompatibleConcatSegmentsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IncompatibleConcatSegmentsError";
+  }
+}
+
 export interface LedgerRenditionIdentity {
   provider: string;
   providerAssetId: string;
@@ -137,6 +151,7 @@ export interface TransferLedger {
   logicalRenditionId: string;
   rendition: LedgerRenditionIdentity;
   transactions: LedgerChunkEntry[];
+  cumulativeHistoricalSpentBytes?: number; // Monotonic total of all network bytes spent for this logical transfer
   cumulativeFailedBytes: number;
   updatedAt: string;
 }
@@ -144,4 +159,5 @@ export interface TransferLedger {
 export interface TransferBudgetOptions {
   budgetMultiplier?: number; // default 1.5, >= 1.0
 }
+
 

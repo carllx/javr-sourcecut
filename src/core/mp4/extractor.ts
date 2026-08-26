@@ -10,6 +10,7 @@ import type {
   MultiSegmentFetchPlan,
   TimeRange,
 } from "./types.js";
+import { IncompatibleConcatSegmentsError } from "./types.js";
 import {
   fetchByteRange,
   fetchPlannedByteRangesWithLedger,
@@ -31,6 +32,8 @@ export interface ExtractClipParams {
   ledgerManager?: TransferLedgerManager;
   budgetTracker?: TransferBudgetTracker;
   maxChunkSize?: number;
+  expectedTotalFileSize?: number;
+  expectedEtag?: string;
   fetchFn?: typeof fetch;
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
 }
@@ -54,6 +57,8 @@ export async function extractClipFromPlan(
     ledgerManager,
     budgetTracker,
     maxChunkSize = DEFAULT_MAX_CHUNK_SIZE,
+    expectedTotalFileSize,
+    expectedEtag,
     fetchFn = fetch,
     onProgress,
   } = params;
@@ -82,6 +87,8 @@ export async function extractClipFromPlan(
     ledgerManager,
     budgetTracker,
     fetchFn,
+    expectedTotalFileSize: expectedTotalFileSize || index.fileSize,
+    expectedEtag,
     onProgress,
   });
   totalBytesFetched += chunkFetchResult.totalNetworkBytes;
@@ -104,9 +111,18 @@ export async function extractClipFromPlan(
       plan.sourceUrl,
       { startByte: 0, endByte: headEndByte },
       headPath,
-      { fetchFn, budgetTracker, allowOverwrite: true }
+      {
+        fetchFn,
+        budgetTracker,
+        allowOverwrite: true,
+        expectedTotalFileSize: expectedTotalFileSize || index.fileSize,
+        expectedEtag,
+      }
     );
     totalBytesFetched += headFetch.bytesDownloaded;
+    if (ledgerManager) {
+      await ledgerManager.recordNetworkSpend(headFetch.bytesDownloaded);
+    }
     headBuffer = await fs.readFile(headPath);
   }
 
@@ -133,12 +149,22 @@ export async function extractClipFromPlan(
         plan.sourceUrl,
         { startByte: moovStart, endByte: moovEnd },
         tailMoovPath,
-        { fetchFn, budgetTracker, allowOverwrite: true }
+        {
+          fetchFn,
+          budgetTracker,
+          allowOverwrite: true,
+          expectedTotalFileSize: expectedTotalFileSize || index.fileSize,
+          expectedEtag,
+        }
       );
       totalBytesFetched += tailFetch.bytesDownloaded;
+      if (ledgerManager) {
+        await ledgerManager.recordNetworkSpend(tailFetch.bytesDownloaded);
+      }
       moovBuffer = await fs.readFile(tailMoovPath);
     }
   }
+
 
   // 3. Assemble sparse MP4 with original absolute offsets preserved
   const fileHandle = await fs.open(sparseMp4Path, "w+");
@@ -170,6 +196,7 @@ export async function extractClipFromPlan(
 
   // 4. Extract target segments via FFmpeg stream-copy
   const tempSegmentPaths: string[] = [];
+  const segProbes: FfprobeProbeResult[] = [];
 
   try {
     for (let i = 0; i < targetSegments.length; i++) {
@@ -203,13 +230,20 @@ export async function extractClipFromPlan(
         throw new Error(`Extracted segment ${i} failed container verification.`);
       }
 
+      segProbes.push(segProbe);
+
       if (targetSegments.length > 1) {
         tempSegmentPaths.push(segOutputPath);
       }
     }
 
-    // 5. If multi-segment, merge via FFmpeg concat demuxer
+    // 5. If multi-segment, check pre-concat stream compatibility across all segments before merging
     if (targetSegments.length > 1) {
+      const seg0 = segProbes[0];
+      for (let i = 1; i < segProbes.length; i++) {
+        assertConcatStreamCompatibility(seg0, segProbes[i], i);
+      }
+
       const concatLines = tempSegmentPaths.map(
         (p) => `file '${p.replace(/'/g, "'\\''").replace(/\\/g, "/")}'`
       );
@@ -232,6 +266,7 @@ export async function extractClipFromPlan(
       }
     }
 
+
     // 6. Authoritative verify of final output clip via ffprobe
     const probeResult = await verifyMediaFile(outputClipPath);
 
@@ -242,8 +277,6 @@ export async function extractClipFromPlan(
     };
   } finally {
     // Clean temporary reconstruction files (preserve chunk files in chunksDir)
-    await fs.rm(headPath, { force: true }).catch(() => {});
-    await fs.rm(tailMoovPath, { force: true }).catch(() => {});
     await fs.rm(sparseMp4Path, { force: true }).catch(() => {});
     await fs.rm(concatListPath, { force: true }).catch(() => {});
     for (const segPath of tempSegmentPaths) {
@@ -251,3 +284,74 @@ export async function extractClipFromPlan(
     }
   }
 }
+
+export function normalizeCodecName(codec?: string): string {
+  if (!codec) return "";
+  const lower = codec.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (lower === "av01" || lower === "av1") return "av1";
+  if (lower === "h264" || lower === "avc1" || lower === "x264") return "h264";
+  if (lower === "h265" || lower === "hevc" || lower === "hev1" || lower === "hvc1" || lower === "x265") return "hevc";
+  return lower;
+}
+
+export function assertConcatStreamCompatibility(
+  seg0: FfprobeProbeResult,
+  segI: FfprobeProbeResult,
+  segmentIndex: number
+): void {
+  // 1. Video codec
+  const c0 = normalizeCodecName(seg0.videoStream.codec);
+  const cI = normalizeCodecName(segI.videoStream.codec);
+  if (c0 !== cI) {
+    throw new IncompatibleConcatSegmentsError(
+      `Incompatible video codec between segments: segment 0 has "${seg0.videoStream.codec}", segment ${segmentIndex} has "${segI.videoStream.codec}". Refusing to concat without transcoding.`
+    );
+  }
+
+  // 2. Video height
+  if (seg0.videoStream.height !== segI.videoStream.height) {
+    throw new IncompatibleConcatSegmentsError(
+      `Incompatible video height between segments: segment 0 has ${seg0.videoStream.height}p, segment ${segmentIndex} has ${segI.videoStream.height}p. Refusing to concat without transcoding.`
+    );
+  }
+
+  // 3. Video frame rate (fps)
+  const fps0 = seg0.videoStream.fps ?? 0;
+  const fpsI = segI.videoStream.fps ?? 0;
+  if (fps0 > 0 && fpsI > 0 && Math.abs(fps0 - fpsI) > 0.5) {
+    throw new IncompatibleConcatSegmentsError(
+      `Incompatible video frame rate between segments: segment 0 has ${fps0.toFixed(2)} fps, segment ${segmentIndex} has ${fpsI.toFixed(2)} fps. Refusing to concat without transcoding.`
+    );
+  }
+
+  // 4. Audio presence
+  const seg0HasAudio = Boolean(seg0.audioStream);
+  const segIHasAudio = Boolean(segI.audioStream);
+  if (seg0HasAudio !== segIHasAudio) {
+    throw new IncompatibleConcatSegmentsError(
+      `Incompatible audio presence between segments: segment 0 audio is ${seg0HasAudio ? "present" : "absent"}, segment ${segmentIndex} audio is ${segIHasAudio ? "present" : "absent"}. Refusing to concat without transcoding.`
+    );
+  }
+
+  // 5. Audio stream parameters (if present)
+  if (seg0.audioStream && segI.audioStream) {
+    const a0 = normalizeCodecName(seg0.audioStream.codec);
+    const aI = normalizeCodecName(segI.audioStream.codec);
+    if (a0 !== aI) {
+      throw new IncompatibleConcatSegmentsError(
+        `Incompatible audio codec between segments: segment 0 has "${seg0.audioStream.codec}", segment ${segmentIndex} has "${segI.audioStream.codec}". Refusing to concat without transcoding.`
+      );
+    }
+    if (seg0.audioStream.channels !== segI.audioStream.channels) {
+      throw new IncompatibleConcatSegmentsError(
+        `Incompatible audio channels between segments: segment 0 has ${seg0.audioStream.channels} channels, segment ${segmentIndex} has ${segI.audioStream.channels} channels. Refusing to concat without transcoding.`
+      );
+    }
+    if (seg0.audioStream.sampleRate !== segI.audioStream.sampleRate) {
+      throw new IncompatibleConcatSegmentsError(
+        `Incompatible audio sample rate between segments: segment 0 has ${seg0.audioStream.sampleRate} Hz, segment ${segmentIndex} has ${segI.audioStream.sampleRate} Hz. Refusing to concat without transcoding.`
+      );
+    }
+  }
+}
+

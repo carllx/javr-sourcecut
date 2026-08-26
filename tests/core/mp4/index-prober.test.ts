@@ -124,6 +124,28 @@ describe("Bounded MP4 Index Prober", () => {
         return;
       }
 
+      if (url.includes("conflicting-head-total")) {
+        if (rangeHeader === "bytes=0-0") {
+          res.writeHead(206, {
+            "Content-Type": "video/mp4",
+            "Content-Range": `bytes 0-0/${totalSize}`,
+            "Content-Length": "1",
+          });
+          res.end(targetBuffer.subarray(0, 1));
+          return;
+        }
+        // Head probe (bytes=0-headEnd) returns a changed total file size
+        res.writeHead(206, {
+          "Content-Type": "video/mp4",
+          "Content-Range": `bytes 0-100/${totalSize + 5000}`,
+          "Content-Length": "101",
+        });
+        res.end(targetBuffer.subarray(0, 101));
+        return;
+      }
+
+
+
       if (!rangeHeader) {
         res.writeHead(200, {
           "Content-Type": "video/mp4",
@@ -239,9 +261,11 @@ describe("Bounded MP4 Index Prober", () => {
     ).rejects.toThrow(Http206RequiredError);
   });
 
-  it("fails closed with Http206RequiredError when capability response body is truncated", async () => {
+  it("fails closed with RenditionVersionMismatchError when head probe returns conflicting total file size", async () => {
+    const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
     await expect(
-      probeMP4Index(`${serverUrl}/truncated-body.mp4`)
-    ).rejects.toThrow(Http206RequiredError);
+      probeMP4Index(`${serverUrl}/conflicting-head-total.mp4`)
+    ).rejects.toThrow(RenditionVersionMismatchError);
   });
 });
+

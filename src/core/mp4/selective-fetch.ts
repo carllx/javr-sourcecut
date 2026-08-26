@@ -24,11 +24,13 @@ export interface SelectiveFetchParams {
   options?: IndexProbeOptions & {
     budgetMultiplier?: number;
     ledgerManager?: TransferLedgerManager;
+    maxChunkSize?: number;
     onProgress?: (percent: number, transferredBytes: number, totalExpectedBytes: number) => void;
     onProbeBytesTransferred?: (bytes: number) => void;
     onDataBytesTransferred?: (bytes: number) => void;
   };
 }
+
 
 export interface SelectiveFetchResult {
   outputClipPath: string;
@@ -146,7 +148,10 @@ export async function runSelectiveFetch(
     await ledgerManager.loadOrCreateLedger();
   }
 
+  let priorHistoricalBytes = 0;
   if (ledgerManager) {
+    priorHistoricalBytes = ledgerManager.cumulativeHistoricalSpentBytes;
+    await ledgerManager.recordNetworkSpend(indexProbeResult.totalProbeBytesTransferred);
     await ledgerManager.updateAuthoritativeFileSize(fullFileBytes);
     if (indexProbeResult.etag) {
       await ledgerManager.updateRenditionEtag(indexProbeResult.etag);
@@ -156,11 +161,10 @@ export async function runSelectiveFetch(
   const budgetTracker = new TransferBudgetTracker({
     estimatedBytes: expectedTotalNetworkBytes,
     budgetMultiplier: options.budgetMultiplier ?? 1.5,
-    historicalTransferredBytes: ledgerManager?.cumulativeHistoricalNetworkBytes || 0,
+    historicalTransferredBytes: priorHistoricalBytes,
   });
 
-
-  // Record probe bytes in budget tracker
+  // Record current run probe bytes in budget tracker
   budgetTracker.recordBytes(indexProbeResult.totalProbeBytesTransferred);
 
   // 6. Execute partial HTTP 206 fetch and extract clip via FFmpeg
@@ -173,6 +177,9 @@ export async function runSelectiveFetch(
     cachedTail: indexProbeResult.cachedTail,
     ledgerManager,
     budgetTracker,
+    maxChunkSize: options.maxChunkSize,
+    expectedTotalFileSize: fullFileBytes,
+    expectedEtag: indexProbeResult.etag || renditionIdentity?.etag,
     fetchFn: options.fetchFn,
     onProgress: (transferred, total) => {
       if (options.onProgress && total > 0) {
@@ -181,6 +188,7 @@ export async function runSelectiveFetch(
       }
     },
   });
+
 
   // 7. Total transferred network bytes includes all probing and extraction network transfers
   const totalTransferredBytes =

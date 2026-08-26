@@ -1,6 +1,11 @@
 import type { MP4Index, MP4IndexProbeResult } from "./types.js";
-import { Http206RequiredError, UnprovablePartialPlanError } from "./types.js";
+import {
+  Http206RequiredError,
+  RenditionVersionMismatchError,
+  UnprovablePartialPlanError,
+} from "./types.js";
 import { parseMP4Buffer } from "./box-parser.js";
+
 
 export interface IndexProbeOptions {
   fetchFn?: typeof fetch;
@@ -157,10 +162,11 @@ export async function probeMP4Index(
 
   if (returnedHeadTotal !== fileSize) {
     cancelResponseBody(headRes);
-    throw new Http206RequiredError(
+    throw new RenditionVersionMismatchError(
       `Head probe returned conflicting total file size: ${returnedHeadTotal} vs initial ${fileSize}`
     );
   }
+
 
   if (returnedHeadStart !== 0 || returnedHeadEnd !== headEnd) {
     cancelResponseBody(headRes);
@@ -271,10 +277,11 @@ export async function probeMP4Index(
 
   if (returnedTailTotal !== fileSize) {
     cancelResponseBody(tailRes);
-    throw new Http206RequiredError(
+    throw new RenditionVersionMismatchError(
       `Tail probe returned conflicting total file size: ${returnedTailTotal} vs initial ${fileSize}`
     );
   }
+
 
   if (returnedTailStart !== tailStart || returnedTailEnd !== tailEnd) {
     cancelResponseBody(tailRes);

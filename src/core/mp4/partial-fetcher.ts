@@ -5,8 +5,11 @@ import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ByteRange } from "./types.js";
-import { Http206RequiredError } from "./types.js";
-import type { TransferLedgerManager } from "./ledger.js";
+import {
+  Http206RequiredError,
+  RenditionVersionMismatchError,
+} from "./types.js";
+import { isStrongEtag, type TransferLedgerManager } from "./ledger.js";
 import type { TransferBudgetTracker } from "./budget.js";
 
 export const DEFAULT_MAX_CHUNK_SIZE = 8 * 1024 * 1024; // 8 MiB bounded transfer chunk
@@ -17,6 +20,8 @@ export interface PartialFetchOptions {
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
   allowOverwrite?: boolean;
   budgetTracker?: TransferBudgetTracker;
+  expectedTotalFileSize?: number;
+  expectedEtag?: string;
 }
 
 export interface PartialFetchResult {
@@ -161,10 +166,36 @@ export async function fetchByteRange(
     );
   }
 
+  // Strict Fail-Closed Check 3: Content-Range TOTAL must exactly match authoritative index fileSize
+  if (
+    options.expectedTotalFileSize !== undefined &&
+    totalFileSize !== options.expectedTotalFileSize
+  ) {
+    cancelResponseBody(response);
+    throw new RenditionVersionMismatchError(
+      `Authoritative total file size changed during transfer: expected ${options.expectedTotalFileSize} bytes, received ${totalFileSize} bytes in Content-Range on ${url}`
+    );
+  }
+
   if (returnedStart !== range.startByte || returnedEnd !== range.endByte) {
     cancelResponseBody(response);
     throw new Http206RequiredError(
       `Server returned mismatched byte range: expected ${range.startByte}-${range.endByte}, received ${returnedStart}-${returnedEnd}`
+    );
+  }
+
+  // Strict Fail-Closed Check 4: Strong ETag match
+  const responseEtag = response.headers.get("etag") || undefined;
+  if (
+    options.expectedEtag &&
+    isStrongEtag(options.expectedEtag) &&
+    responseEtag &&
+    isStrongEtag(responseEtag) &&
+    responseEtag !== options.expectedEtag
+  ) {
+    cancelResponseBody(response);
+    throw new RenditionVersionMismatchError(
+      `Strong ETag changed during transfer: expected ${options.expectedEtag}, received ${responseEtag} from ${url}`
     );
   }
 
@@ -190,7 +221,7 @@ export async function fetchByteRange(
 
     await pipeline(nodeReadable, writeStream);
 
-    // Strict Fail-Closed Check 3: Transferred body bytes must exactly match expected bytes
+    // Strict Fail-Closed Check 5: Transferred body bytes must exactly match expected bytes
     if (transferredBytes !== expectedBytes) {
       await fsp.rm(partPath, { force: true }).catch(() => {});
       throw new Http206RequiredError(
@@ -207,7 +238,7 @@ export async function fetchByteRange(
       endByte: returnedEnd,
       totalFileSize,
       contentType: response.headers.get("content-type") || undefined,
-      etag: response.headers.get("etag") || undefined,
+      etag: responseEtag,
       lastModified: response.headers.get("last-modified") || undefined,
     };
   } catch (err: any) {
@@ -226,8 +257,11 @@ export interface FetchPlannedByteRangesParams {
   budgetTracker?: TransferBudgetTracker;
   fetchFn?: typeof fetch;
   headers?: Record<string, string>;
+  expectedTotalFileSize?: number;
+  expectedEtag?: string;
   onProgress?: (transferredBytes: number, totalExpectedBytes: number) => void;
 }
+
 
 export interface ChunkFetchSummary {
   range: ByteRange;
@@ -304,11 +338,19 @@ export async function fetchPlannedByteRangesWithLedger(
     // 2. Fetch missing chunk over HTTP 206
     let chunkBytesTransferredThisAttempt = 0;
     try {
+      const activeStrongEtag = isStrongEtag(observedEtag)
+        ? observedEtag
+        : isStrongEtag(params.expectedEtag)
+        ? params.expectedEtag
+        : undefined;
+
       const fetchRes = await fetchByteRange(url, chunk, chunkPath, {
         fetchFn,
         headers,
         allowOverwrite: true,
         budgetTracker,
+        expectedTotalFileSize: params.expectedTotalFileSize,
+        expectedEtag: activeStrongEtag,
         onProgress: (chunkTransferred) => {
           chunkBytesTransferredThisAttempt = chunkTransferred;
           onProgress?.(cumulativeNetworkBytes + chunkTransferred, totalPayloadBytes);
@@ -317,13 +359,24 @@ export async function fetchPlannedByteRangesWithLedger(
 
       cumulativeNetworkBytes += fetchRes.bytesDownloaded;
       chunkBytesTransferredThisAttempt = 0;
-      observedEtag = observedEtag || fetchRes.etag;
+
+      if (fetchRes.etag && isStrongEtag(fetchRes.etag)) {
+        if (observedEtag && isStrongEtag(observedEtag) && fetchRes.etag !== observedEtag) {
+          throw new RenditionVersionMismatchError(
+            `Strong ETag changed midway through transfer: expected ${observedEtag}, received ${fetchRes.etag}`
+          );
+        }
+        observedEtag = fetchRes.etag;
+      } else if (!observedEtag && fetchRes.etag) {
+        observedEtag = fetchRes.etag;
+      }
 
       // 3. Compute sha256 checksum for local integrity
       const chunkBuffer = await fsp.readFile(chunkPath);
       const sha256 = crypto.createHash("sha256").update(chunkBuffer).digest("hex");
 
       // 4. Immediately record completed chunk in ledger
+
       if (ledgerManager) {
         await ledgerManager.recordCompletedChunk({
           range: chunk,

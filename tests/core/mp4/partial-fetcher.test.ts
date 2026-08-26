@@ -365,6 +365,47 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
       expect(result.chunks[1].fromCache).toBe(false);
       expect(result.totalNetworkBytes).toBe(8); // Only chunk 8-15 fetched over network!
     });
+
+    it("aborts immediately with RenditionVersionMismatchError if Content-Range total size disagrees with authoritative file size", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "size_mismatch_test");
+      await fs.mkdir(testDir, { recursive: true });
+
+      // Server returns mockPayload.length (50), but expectedTotalFileSize is 99999
+      await expect(
+        fetchPlannedByteRangesWithLedger({
+          url: `${serverUrl}/valid-video.mp4`,
+          ranges: [{ startByte: 0, endByte: 10 }],
+          workDir: testDir,
+          expectedTotalFileSize: 99999,
+        })
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts immediately with RenditionVersionMismatchError if strong ETag changes midway through multi-chunk transfer", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "etag_mismatch_test");
+      await fs.mkdir(testDir, { recursive: true });
+
+      // Expected strong ETag is "different-strong-etag", server returns "mock-strong-etag"
+      await expect(
+        fetchPlannedByteRangesWithLedger({
+          url: `${serverUrl}/valid-video.mp4`,
+          ranges: [{ startByte: 0, endByte: 10 }],
+          workDir: testDir,
+          expectedEtag: '"different-strong-etag"',
+        })
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
   });
 });
+
 

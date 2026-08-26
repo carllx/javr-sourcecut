@@ -58,16 +58,37 @@ export class TransferLedgerManager {
     return this._ledger?.cumulativeFailedBytes || 0;
   }
 
+  get cumulativeHistoricalSpentBytes(): number {
+    return this._ledger?.cumulativeHistoricalSpentBytes || 0;
+  }
+
   /**
-   * Cumulative historical network bytes across all successful and failed attempts for this logical transfer.
+   * Cumulative historical network bytes across all successful, failed, and probe attempts for this logical transfer.
+   * Monotonically persists across restarts and cache invalidations.
    */
   get cumulativeHistoricalNetworkBytes(): number {
     if (!this._ledger) return 0;
+    if (typeof this._ledger.cumulativeHistoricalSpentBytes === "number") {
+      return this._ledger.cumulativeHistoricalSpentBytes;
+    }
     const completedTxBytes = this._ledger.transactions.reduce(
       (sum, tx) => sum + (tx.transferredNetworkBytes || 0),
       0
     );
     return completedTxBytes + (this._ledger.cumulativeFailedBytes || 0);
+  }
+
+  /**
+   * Monotonically records network bytes spent (e.g. probes or chunk downloads) for this logical transfer.
+   */
+  async recordNetworkSpend(bytes: number): Promise<void> {
+    if (bytes <= 0) return;
+    if (!this._ledger) {
+      await this.loadOrCreateLedger();
+    }
+    this.ledger.cumulativeHistoricalSpentBytes =
+      (this.ledger.cumulativeHistoricalSpentBytes || 0) + bytes;
+    await this.saveLedger();
   }
 
   async loadOrCreateLedger(): Promise<TransferLedger> {
@@ -83,8 +104,17 @@ export class TransferLedgerManager {
       // File does not exist or is invalid JSON
     }
 
+    const preservedHistoricalSpentBytes =
+      existingLedger?.cumulativeHistoricalSpentBytes ??
+      ((existingLedger?.transactions || []).reduce(
+        (sum, tx) => sum + (tx.transferredNetworkBytes || 0),
+        0
+      ) + (existingLedger?.cumulativeFailedBytes || 0));
+    const preservedFailedBytes = existingLedger?.cumulativeFailedBytes || 0;
+
     if (existingLedger && existingLedger.logicalRenditionId === this.logicalRenditionId) {
       this._ledger = existingLedger;
+      this._ledger.cumulativeHistoricalSpentBytes = preservedHistoricalSpentBytes;
 
       // Check if remote strong ETag has changed
       const existingEtag = existingLedger.rendition.etag;
@@ -95,9 +125,11 @@ export class TransferLedgerManager {
         isStrongEtag(currentEtag) &&
         existingEtag !== currentEtag
       ) {
-        // Invalidate old transactions
+        // Strong ETag changed -> invalidate cached chunk transactions, but PRESERVE monotonic historical spend
         this._ledger.transactions = [];
         this._ledger.rendition = this.rendition;
+        this._ledger.cumulativeHistoricalSpentBytes = preservedHistoricalSpentBytes;
+        this._ledger.cumulativeFailedBytes = preservedFailedBytes;
         this._ledger.updatedAt = new Date().toISOString();
         await this.saveLedger();
       } else if (currentEtag && existingLedger.rendition.etag !== currentEtag) {
@@ -111,7 +143,8 @@ export class TransferLedgerManager {
         logicalRenditionId: this.logicalRenditionId,
         rendition: this.rendition,
         transactions: [],
-        cumulativeFailedBytes: existingLedger?.cumulativeFailedBytes || 0,
+        cumulativeHistoricalSpentBytes: preservedHistoricalSpentBytes,
+        cumulativeFailedBytes: preservedFailedBytes,
         updatedAt: new Date().toISOString(),
       };
       await this.saveLedger();
@@ -132,7 +165,7 @@ export class TransferLedgerManager {
       isStrongEtag(currentEtag) &&
       existingEtag !== currentEtag
     ) {
-      // Strong ETag changed -> invalidate cached transactions for this rendition
+      // Strong ETag changed -> invalidate cached transactions, preserving monotonic historical spend
       this._ledger.transactions = [];
       this._ledger.rendition.etag = currentEtag;
       await this.saveLedger();
@@ -141,6 +174,7 @@ export class TransferLedgerManager {
       await this.saveLedger();
     }
   }
+
 
   /**
    * Updates authoritative full file size if resolved from HTTP 206 Content-Range / MP4 index probe.
@@ -277,12 +311,14 @@ export class TransferLedgerManager {
     );
 
     this.ledger.transactions.push(entry);
+    this.ledger.cumulativeHistoricalSpentBytes =
+      (this.ledger.cumulativeHistoricalSpentBytes || 0) + params.transferredNetworkBytes;
     await this.saveLedger();
     return entry;
   }
 
   /**
-   * Records failed attempt bytes into cumulativeFailedBytes and persists atomically.
+   * Records failed attempt bytes into cumulativeFailedBytes and cumulativeHistoricalSpentBytes and persists atomically.
    */
   async recordFailedAttempt(bytes: number): Promise<void> {
     if (bytes <= 0) return;
@@ -291,6 +327,9 @@ export class TransferLedgerManager {
     }
 
     this.ledger.cumulativeFailedBytes += bytes;
+    this.ledger.cumulativeHistoricalSpentBytes =
+      (this.ledger.cumulativeHistoricalSpentBytes || 0) + bytes;
     await this.saveLedger();
   }
 }
+
