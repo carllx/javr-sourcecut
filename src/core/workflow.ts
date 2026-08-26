@@ -13,6 +13,7 @@ import {
   type SourceSessionProvider,
 } from "./session.js";
 import { createJob, loadJob, saveJob, updateJobStatus } from "./job.js";
+import { checkDuplicatePreflight, DuplicatePreflightError } from "./preflight.js";
 import { downloadFile } from "./downloader.js";
 import { verifyMediaFile } from "./verifier.js";
 import { loadAndNormalizeLlc, findLlcFileInWorkspace } from "./llc.js";
@@ -63,16 +64,27 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   const descriptor = await adapter.resolve(sourceUrl, sessionFetch);
   onLog(`Discovered source: "${descriptor.rawTitle}" (${descriptor.renditions.length} renditions)`);
 
-  // 3. Select proxy rendition
+  // 3. Duplicate Preflight Check (fail-closed before downloading proxy or creating job)
+  const preflight = await checkDuplicatePreflight(rootDir, descriptor);
+  if (preflight.status !== "not-seen" && preflight.matchedJob) {
+    onLog(`[PREFLIGHT DUPLICATE] ${preflight.status.toUpperCase()}: ${preflight.matchedReason}`);
+    throw new DuplicatePreflightError(
+      preflight.status,
+      preflight.matchedJob,
+      preflight.matchedReason || "Existing job detected"
+    );
+  }
+
+  // 4. Select proxy rendition
   const selectedProxy = selectProxyRendition(descriptor.renditions);
   onLog(`Selected proxy rendition: ${selectedProxy.formatId} (${selectedProxy.resolution}, ${selectedProxy.vcodec.toUpperCase()})`);
 
-  // 4. Create Job & deterministic flat workspace
+  // 5. Create Job & deterministic flat workspace
   const job = await createJob(rootDir, descriptor, selectedProxy);
   await saveJob(job);
   onLog(`Initialized job workspace: ${job.workspaceDir}`);
 
-  // 5. Download proxy
+  // 6. Download proxy
   await updateJobStatus(job, "proxy-downloading");
   onLog(`[2/5] Downloading proxy video to: ${job.proxyPath}`);
   await downloadFile(selectedProxy.directUrl, job.proxyPath, {

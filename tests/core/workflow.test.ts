@@ -127,6 +127,8 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
     expect(jobJsonContent.status).toBe("waiting-for-llc");
     expect(jobJsonContent.selectedProxy.formatId).toBe("480p-av1");
     expect(jobJsonContent.identity.canonicalCatalogId).toBe("WAVR110");
+    expect(jobJsonContent.identity.searchAliases).toContain("WAVR110");
+    expect(jobJsonContent.identity.searchAliases).toContain("WAVR-110");
 
     // Check workspace has no extra subdirectories (flat layout)
     const files = await fs.readdir(result.workspaceDir);
@@ -134,5 +136,15 @@ describe("Eporner Tracer Slice 1 End-to-End Workflow", () => {
       "Yua Mikami - WAVR110.proxy.mp4",
       "job.json",
     ]);
+
+    // Secondary attempt with the same URL must halt with DuplicatePreflightError before download
+    await expect(
+      runTracerSlice({
+        sourceUrl: epornerVideoUrl,
+        rootDir: tempRoot,
+        sessionProvider: new NoopSessionProvider(),
+        verifierFn: mockVerifier,
+      })
+    ).rejects.toThrow(/Duplicate preflight halted/i);
   });
 });
