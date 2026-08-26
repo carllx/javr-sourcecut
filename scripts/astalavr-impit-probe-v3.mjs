@@ -43,11 +43,8 @@ function findBrowser() {
       ]
     : [
         '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-        '/usr/bin/microsoft-edge',
+        '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/usr/bin/microsoft-edge',
       ];
   return candidates.find(p => p && fs.existsSync(p)) || null;
 }
