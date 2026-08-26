@@ -32,9 +32,7 @@ function safeUrl(raw) {
 }
 
 function findBrowser() {
-  if (process.env.JAVR_BROWSER_PATH && fs.existsSync(process.env.JAVR_BROWSER_PATH)) {
-    return process.env.JAVR_BROWSER_PATH;
-  }
+  if (process.env.JAVR_BROWSER_PATH && fs.existsSync(process.env.JAVR_BROWSER_PATH)) return process.env.JAVR_BROWSER_PATH;
   const candidates = process.platform === 'win32'
     ? [
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -54,34 +52,23 @@ function findBrowser() {
   return candidates.find(p => p && fs.existsSync(p)) || null;
 }
 
-async function sleep(ms) {
-  await new Promise(r => setTimeout(r, ms));
-}
+async function sleep(ms) { await new Promise(r => setTimeout(r, ms)); }
 
 async function readExistingProfileCookies() {
   if (!fs.existsSync(PROFILE_DIR)) throw new Error(`Dedicated AstalaVR profile does not exist: ${PROFILE_DIR}`);
   if (typeof WebSocket !== 'function') throw new Error(`Node ${process.version} does not expose global WebSocket; probe requires Node 22+.`);
-
   const browserPath = findBrowser();
   if (!browserPath) throw new Error('Chrome/Edge executable not found. No login attempt was made.');
-
   const activePortFile = path.join(PROFILE_DIR, 'DevToolsActivePort');
   await fsp.rm(activePortFile, { force: true }).catch(() => {});
-
   const proc = spawn(browserPath, [
     `--user-data-dir=${PROFILE_DIR}`,
-    '--remote-debugging-port=0',
-    '--remote-debugging-address=127.0.0.1',
-    '--headless=new',
-    '--no-first-run',
-    '--no-default-browser-check',
-    'about:blank',
+    '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
+    '--headless=new', '--no-first-run', '--no-default-browser-check', 'about:blank',
   ], { stdio: 'ignore', windowsHide: true });
-
   let exited = false;
   let exitCode = null;
   proc.once('exit', code => { exited = true; exitCode = code; });
-
   let port = 0;
   let wsPath = '';
   try {
@@ -100,15 +87,12 @@ async function readExistingProfileCookies() {
       await sleep(100);
     }
     if (!port || !wsPath) throw new Error('Timed out opening existing profile for read-only CDP cookie extraction. No login attempt was made.');
-
-    const wsUrl = `ws://127.0.0.1:${port}${wsPath}`;
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`);
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('CDP WebSocket open timed out')), 4000);
       ws.onopen = () => { clearTimeout(timer); resolve(); };
       ws.onerror = () => { clearTimeout(timer); reject(new Error('CDP WebSocket connection failed')); };
     });
-
     const send = (id, method, params = {}) => new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`${method} timed out`)), 4000);
       const handler = event => {
@@ -124,30 +108,23 @@ async function readExistingProfileCookies() {
       ws.addEventListener('message', handler);
       ws.send(JSON.stringify({ id, method, params }));
     });
-
     const result = await send(101, 'Storage.getCookies');
     const all = Array.isArray(result.cookies) ? result.cookies : [];
     const cookies = all.filter(c => {
       const d = String(c.domain || '').toLowerCase().replace(/^\./, '');
       return d === 'astalavr.com' || d.endsWith('.astalavr.com');
     }).map(c => ({
-      domain: String(c.domain || ''),
-      path: String(c.path || '/'),
-      secure: Boolean(c.secure),
+      domain: String(c.domain || ''), path: String(c.path || '/'), secure: Boolean(c.secure),
       expires: typeof c.expires === 'number' ? c.expires : 0,
-      name: String(c.name || ''),
-      value: String(c.value || ''),
+      name: String(c.name || ''), value: String(c.value || ''),
     })).filter(c => c.name);
-
-    try { await send(999, 'Browser.close'); } catch {}
+    try { ws.send(JSON.stringify({ id: 999, method: 'Browser.close', params: {} })); } catch {}
     try { ws.close(); } catch {}
     return cookies;
   } finally {
     const deadline = Date.now() + 1500;
     while (!exited && Date.now() < deadline) await sleep(50);
-    if (!exited) {
-      try { proc.kill(); } catch {}
-    }
+    if (!exited) try { proc.kill(); } catch {}
   }
 }
 
@@ -193,12 +170,12 @@ function ensureImpit() {
   if (!fs.existsSync(pkg)) fs.writeFileSync(pkg, JSON.stringify({ name: 'javr-sourcecut-impit-probe', private: true, type: 'module' }, null, 2));
   const req = createRequire(pkg);
   try { return req.resolve('impit'); } catch {}
-
   console.log(`IMPIT_INSTALL=starting:${IMPIT_VERSION}`);
   let result;
   if (process.platform === 'win32') {
     const cmd = `npm install --prefix "${root}" --no-save impit@${IMPIT_VERSION}`;
-    result = spawnSync('cmd.exe', ['/d', '/s', '/c', cmd], { stdio: 'inherit', windowsHide: true });
+    const shell = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+    result = spawnSync(shell, ['/d', '/s', '/c', cmd], { stdio: 'inherit', windowsHide: true, shell: false });
   } else {
     result = spawnSync('npm', ['install', '--prefix', root, '--no-save', `impit@${IMPIT_VERSION}`], { stdio: 'inherit' });
   }
@@ -212,42 +189,28 @@ async function main() {
   console.log('MODE=standalone existing-profile page fetch + bytes=0-0 media probe only');
   console.log('PROBE_VERSION=v3-no-project-build');
   console.log(`PROFILE_DIR=${PROFILE_DIR}`);
-
   let cookies;
-  try {
-    cookies = await readExistingProfileCookies();
-  } catch (e) {
-    red('PROFILE_READ_FAILED', e instanceof Error ? e.message : String(e));
-    return;
-  }
-  if (!cookies.length) {
-    red('PROFILE_SESSION_MISSING', 'Existing profile exposed no astalavr.com cookies. No login attempt was made.');
-    return;
-  }
-
+  try { cookies = await readExistingProfileCookies(); }
+  catch (e) { red('PROFILE_READ_FAILED', e instanceof Error ? e.message : String(e)); return; }
+  if (!cookies.length) { red('PROFILE_SESSION_MISSING', 'Existing profile exposed no astalavr.com cookies. No login attempt was made.'); return; }
   const pageCookies = cookieHeader(cookies, TARGET);
   console.log('PROFILE_SESSION=present');
   console.log(`COOKIE_COUNT=${cookies.length}`);
   console.log(`PAGE_COOKIE_NAMES=${cookieNames(pageCookies).join(',') || 'none'}`);
-
   let impitEntry;
   try { impitEntry = ensureImpit(); }
   catch (e) { red('IMPIT_INSTALL_FAILED', e instanceof Error ? e.message : String(e)); return; }
-
   let mod;
   try { mod = await import(pathToFileURL(impitEntry).href); }
   catch (e) { red('IMPIT_IMPORT_FAILED', e instanceof Error ? e.message : String(e)); return; }
   const Impit = mod.Impit || mod.default?.Impit || mod.default;
   if (typeof Impit !== 'function') { red('IMPIT_API_MISMATCH', 'Impit constructor not found.'); return; }
   const client = new Impit({ browser: 'chrome' });
-
   const pageHeaders = {
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    Referer: 'https://astalavr.com/',
+    'Accept-Language': 'en-US,en;q=0.9', Referer: 'https://astalavr.com/',
   };
   if (pageCookies) pageHeaders.Cookie = pageCookies;
-
   let page;
   try { page = await client.fetch(TARGET, { method: 'GET', redirect: 'follow', headers: pageHeaders }); }
   catch (e) { red('PAGE_TRANSPORT_ERROR', e instanceof Error ? e.message : String(e)); return; }
@@ -255,10 +218,8 @@ async function main() {
   console.log(`PAGE_CONTENT_TYPE=${page.headers.get('content-type') || 'unknown'}`);
   if (page.status !== 200) {
     try { await page.body?.cancel?.(); } catch {}
-    red('PAGE_NOT_200', 'Chrome-impersonated transport could not obtain the designated live page. Do not rerun login automatically.');
-    return;
+    red('PAGE_NOT_200', 'Chrome-impersonated transport could not obtain the designated live page. Do not rerun login automatically.'); return;
   }
-
   let html;
   try { html = await page.text(); }
   catch (e) { red('PAGE_BODY_ERROR', e instanceof Error ? e.message : String(e)); return; }
@@ -266,24 +227,16 @@ async function main() {
   console.log(`PROVIDER_ASSET_ID=${parsed.id}`);
   console.log(`RENDITION_COUNT=${parsed.renditions.length}`);
   if (!parsed.renditions.length) { red('NO_RENDITIONS', 'Live page returned 200 but no Direct MP4 <source> URL was found.'); return; }
-
   const media = parsed.renditions[0];
   const mediaCookies = cookieHeader(cookies, media.src);
   console.log(`LOWEST_RENDITION=${media.quality}`);
   console.log(`MEDIA_TARGET=${safeUrl(media.src)}`);
   console.log(`MEDIA_COOKIE_NAMES=${cookieNames(mediaCookies).join(',') || 'none'}`);
-
   const headers = {
-    Accept: '*/*',
-    Range: 'bytes=0-0',
-    Referer: TARGET,
-    Origin: 'https://astalavr.com',
-    'Sec-Fetch-Site': 'same-site',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Dest': 'video',
+    Accept: '*/*', Range: 'bytes=0-0', Referer: TARGET, Origin: 'https://astalavr.com',
+    'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'video',
   };
   if (mediaCookies) headers.Cookie = mediaCookies;
-
   let res;
   try { res = await client.fetch(media.src, { method: 'GET', redirect: 'follow', headers }); }
   catch (e) { red('MEDIA_TRANSPORT_ERROR', e instanceof Error ? e.message : String(e)); return; }
@@ -294,18 +247,15 @@ async function main() {
   console.log(`MEDIA_CONTENT_LENGTH=${cl || 'missing'}`);
   if (res.status !== 206) {
     try { await res.body?.cancel?.(); } catch {}
-    red('MEDIA_NOT_206', 'Server did not honor the one-byte Range request; body was not intentionally consumed.');
-    return;
+    red('MEDIA_NOT_206', 'Server did not honor the one-byte Range request; body was not intentionally consumed.'); return;
   }
   if (!/^bytes\s+0-0\/(\d+)$/i.test(cr)) {
     try { await res.body?.cancel?.(); } catch {}
-    red('BAD_CONTENT_RANGE', cr || 'missing Content-Range');
-    return;
+    red('BAD_CONTENT_RANGE', cr || 'missing Content-Range'); return;
   }
   const bytes = (await res.arrayBuffer()).byteLength;
   console.log(`MEDIA_BODY_BYTES=${bytes}`);
   if (bytes !== 1) { red('BAD_RANGE_BODY_LENGTH', `Expected 1 byte, received ${bytes}`); return; }
-
   console.log('RESULT=GREEN');
   console.log('NEXT=Browser-impersonated HTTP transport is sufficient for page + strict media Range; no CDP bulk media transport is justified.');
 }
