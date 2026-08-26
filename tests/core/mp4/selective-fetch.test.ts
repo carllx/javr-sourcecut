@@ -103,9 +103,11 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
           "Content-Range": `bytes ${start}-${end}/${targetBuffer.length}`,
           "Content-Length": chunk.length.toString(),
           "Content-Type": "video/mp4",
+          "ETag": '"mock-strong-etag"',
         });
         res.end(chunk);
         return;
+
       }
 
       res.writeHead(400);
@@ -242,4 +244,102 @@ describe("Controlled Direct-MP4 Selective Fetch Orchestrator", () => {
       })
     ).rejects.toThrow(Http206RequiredError);
   });
+
+  it("executes multi-segment selective fetch with budget tracking and merges segments into coherent verified output", async () => {
+    networkRequestLog = [];
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const outputClipPath = path.join(tempDir, "multi_clip_merged.mp4");
+
+    const result = await runSelectiveFetch({
+      sourceUrl: videoUrl,
+      timeRanges: [
+        { startSeconds: 2.0, endSeconds: 4.0 },
+        { startSeconds: 9.0, endSeconds: 11.0 },
+      ],
+      outputClipPath,
+      workDir: path.join(tempDir, "multi-sel-workdir"),
+      options: {
+        budgetMultiplier: 1.5,
+      },
+    });
+
+    expect(result.outputClipPath).toBe(outputClipPath);
+    expect(result.multiPlan).toBeDefined();
+    expect(result.multiPlan?.discreteByteRanges.length).toBe(2);
+
+    // Verify final merged probe
+    expect(result.probeResult.isValid).toBe(true);
+    expect(result.probeResult.duration).toBeGreaterThanOrEqual(3.5);
+    expect(result.probeResult.duration).toBeLessThanOrEqual(5.0);
+    expect(result.probeResult.videoStream.codec).toBe("h264");
+    expect(result.savingsPercent).toBeGreaterThanOrEqual(10);
+  });
+
+  it("proves Run 1 spends probe/data bytes, process stops with budget exhausted, Run 2 resume fails prospectively before issuing probe requests", async () => {
+    const { BudgetExceededError } = await import("../../../src/core/mp4/types.js");
+    const resumeWorkDir = path.join(tempDir, "pre_probe_budget_resume_test");
+    const videoUrl = `${serverUrl}/faststart.mp4`;
+    const outputClipPath = path.join(resumeWorkDir, "output.mp4");
+
+    const renditionIdentity = {
+      provider: "eporner",
+      providerAssetId: "pre-probe-test",
+      formatId: "1080p",
+      fullFileBytes: faststartBuffer.length,
+      etag: '"mock-strong-etag"',
+    };
+
+    // Run 1: initial run establishing ledger and spending network bytes
+    networkRequestLog = [];
+    const result1 = await runSelectiveFetch({
+      sourceUrl: videoUrl,
+      timeRange: { startSeconds: 2.0, endSeconds: 4.0 },
+      outputClipPath,
+      workDir: resumeWorkDir,
+      renditionIdentity,
+      options: {
+        budgetMultiplier: 1.5,
+      },
+    });
+
+    expect(result1.probeResult.isValid).toBe(true);
+
+    // Simulate process stop after heavy spend: manually artificially inflate historical spend to exhaust budget
+    const { TransferLedgerManager } = await import("../../../src/core/mp4/ledger.js");
+    const manager = new TransferLedgerManager({
+      workspaceDir: resumeWorkDir,
+      rendition: renditionIdentity,
+    });
+    await manager.loadOrCreateLedger();
+
+    // Persist budget envelope and inflate historical spend so remaining budget is 0
+    const envelope = manager.estimatedBudgetBytes || result1.transferredBytes;
+    await manager.updateEstimatedBudgetBytes(envelope);
+    await manager.recordNetworkSpend(Math.ceil(envelope * 1.5) + 100);
+
+    // Run 2: Resume attempt on exhausted budget
+    networkRequestLog = [];
+    await expect(
+      runSelectiveFetch({
+        sourceUrl: videoUrl,
+        timeRange: { startSeconds: 2.0, endSeconds: 4.0 },
+        outputClipPath: path.join(resumeWorkDir, "output_run2.mp4"),
+        workDir: resumeWorkDir,
+        renditionIdentity,
+        options: {
+          budgetMultiplier: 1.5,
+        },
+      })
+    ).rejects.toThrow(BudgetExceededError);
+
+    // Crucial Invariant: ZERO network requests issued on Run 2!
+    // Failed prospectively before capability probe, head probe, tail probe, or media download!
+    expect(networkRequestLog.length).toBe(0);
+  });
 });
+
+
+
+
+
+

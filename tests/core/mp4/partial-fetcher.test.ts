@@ -91,6 +91,43 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
         return;
       }
 
+      if (url.includes("missing-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          // No ETag header sent
+        });
+        res.end(chunk);
+        return;
+      }
+
+      if (url.includes("weak-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": 'W/"weak-etag-value"',
+        });
+        res.end(chunk);
+        return;
+      }
+
+      if (url.includes("different-strong-chunk-etag")) {
+        const chunk = mockPayload.subarray(0, 10);
+        res.writeHead(206, {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes 0-9/${mockPayload.length}`,
+          "Content-Length": chunk.length.toString(),
+          "ETag": '"different-strong-etag"',
+        });
+        res.end(chunk);
+        return;
+      }
+
+
       const rangeHeader = req.headers.range;
       if (!rangeHeader) {
         res.writeHead(200, {
@@ -112,10 +149,12 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
           "Content-Type": "application/octet-stream",
           "Content-Range": `bytes ${start}-${end}/${mockPayload.length}`,
           "Content-Length": chunk.length.toString(),
+          "ETag": '"mock-strong-etag"',
         });
         res.end(chunk);
         return;
       }
+
 
       res.writeHead(400);
       res.end();
@@ -218,4 +257,273 @@ describe("Strict HTTP 206 Partial Fetcher", () => {
     expect(await fs.access(dest).then(() => true).catch(() => false)).toBe(false);
     expect(await fs.access(`${dest}.part`).then(() => true).catch(() => false)).toBe(false);
   });
+
+  describe("partitionByteRangeIntoChunks", () => {
+    it("partitions large byte range into bounded max-size chunks", async () => {
+      const { partitionByteRangeIntoChunks } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+
+      const range = { startByte: 1000, endByte: 2500 };
+      const chunks = partitionByteRangeIntoChunks(range, 500);
+
+      expect(chunks).toEqual([
+        { startByte: 1000, endByte: 1499 },
+        { startByte: 1500, endByte: 1999 },
+        { startByte: 2000, endByte: 2499 },
+        { startByte: 2500, endByte: 2500 },
+      ]);
+    });
+
+    it("returns single chunk if range is smaller than maxChunkSize", async () => {
+      const { partitionByteRangeIntoChunks } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+
+      const range = { startByte: 0, endByte: 400 };
+      const chunks = partitionByteRangeIntoChunks(range, 500);
+      expect(chunks).toEqual([{ startByte: 0, endByte: 400 }]);
+    });
+  });
+
+  describe("fetchPlannedByteRangesWithLedger (Bounded Chunks & Resume)", () => {
+    it("fetches partitioned chunks, records them in ledger, and reuses on restart with zero network bytes", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { TransferLedgerManager } = await import("../../../src/core/mp4/ledger.js");
+      const { TransferBudgetTracker } = await import("../../../src/core/mp4/budget.js");
+
+      const ledgerManager = new TransferLedgerManager({
+        workspaceDir: tempDir,
+        rendition: {
+          provider: "eporner",
+          providerAssetId: "test1",
+          formatId: "1080p",
+          fullFileBytes: mockPayload.length,
+          etag: '"mock-strong-etag"',
+        },
+      });
+
+      const budgetTracker = new TransferBudgetTracker({
+        estimatedBytes: 20,
+        budgetMultiplier: 1.5,
+      });
+
+      // Fetch range 0-19 in chunks of size 8
+      const result1 = await fetchPlannedByteRangesWithLedger({
+        url: `${serverUrl}/valid-video.mp4`,
+        ranges: [{ startByte: 0, endByte: 19 }],
+        workDir: tempDir,
+        maxChunkSize: 8,
+        ledgerManager,
+        budgetTracker,
+      });
+
+      expect(result1.chunks).toHaveLength(3); // 0-7, 8-15, 16-19
+      expect(result1.totalNetworkBytes).toBe(20);
+      expect(result1.chunks.every((c) => !c.fromCache)).toBe(true);
+
+      // Now run second fetch on the same range -> should be 100% cached
+      const budgetTracker2 = new TransferBudgetTracker({
+        estimatedBytes: 20,
+        budgetMultiplier: 1.5,
+      });
+
+      const result2 = await fetchPlannedByteRangesWithLedger({
+        url: `${serverUrl}/valid-video.mp4`,
+        ranges: [{ startByte: 0, endByte: 19 }],
+        workDir: tempDir,
+        maxChunkSize: 8,
+        ledgerManager,
+        budgetTracker: budgetTracker2,
+      });
+
+      expect(result2.chunks).toHaveLength(3);
+      expect(result2.totalNetworkBytes).toBe(0);
+      expect(result2.chunks.every((c) => c.fromCache)).toBe(true);
+    });
+
+    it("resumes interrupted fetch by downloading ONLY the missing chunk", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { TransferLedgerManager } = await import("../../../src/core/mp4/ledger.js");
+      const { TransferBudgetTracker } = await import("../../../src/core/mp4/budget.js");
+
+      const resumeDir = path.join(tempDir, "resume_sub");
+      await fs.mkdir(resumeDir, { recursive: true });
+
+      const ledgerManager = new TransferLedgerManager({
+        workspaceDir: resumeDir,
+        rendition: {
+          provider: "eporner",
+          providerAssetId: "test2",
+          formatId: "1080p",
+          fullFileBytes: mockPayload.length,
+          etag: '"mock-strong-etag"',
+        },
+      });
+
+      // Manually record first chunk (0-7) as already completed
+      const chunk0Path = path.join(resumeDir, "chunks", "chunk_0_7.bin");
+      await fs.mkdir(path.dirname(chunk0Path), { recursive: true });
+      await fs.writeFile(chunk0Path, mockPayload.subarray(0, 8));
+      const crypto = await import("node:crypto");
+      const sha0 = crypto.createHash("sha256").update(mockPayload.subarray(0, 8)).digest("hex");
+
+      await ledgerManager.recordCompletedChunk({
+        range: { startByte: 0, endByte: 7 },
+        byteLength: 8,
+        filePath: chunk0Path,
+        sha256: sha0,
+        etag: '"mock-strong-etag"',
+        transferredNetworkBytes: 8,
+      });
+
+
+      const budgetTracker = new TransferBudgetTracker({
+        estimatedBytes: 16,
+        budgetMultiplier: 1.5,
+      });
+
+      // Fetch range 0-15 with chunk size 8 (chunk 0-7 is cached, chunk 8-15 is missing)
+      const result = await fetchPlannedByteRangesWithLedger({
+        url: `${serverUrl}/valid-video.mp4`,
+        ranges: [{ startByte: 0, endByte: 15 }],
+        workDir: resumeDir,
+        maxChunkSize: 8,
+        ledgerManager,
+        budgetTracker,
+      });
+
+      expect(result.chunks).toHaveLength(2);
+      expect(result.chunks[0].fromCache).toBe(true);
+      expect(result.chunks[1].fromCache).toBe(false);
+      expect(result.totalNetworkBytes).toBe(8); // Only chunk 8-15 fetched over network!
+    });
+
+    it("aborts immediately with RenditionVersionMismatchError if Content-Range total size disagrees with authoritative file size", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "size_mismatch_test");
+      await fs.mkdir(testDir, { recursive: true });
+
+      // Server returns mockPayload.length (50), but expectedTotalFileSize is 99999
+      await expect(
+        fetchPlannedByteRangesWithLedger({
+          url: `${serverUrl}/valid-video.mp4`,
+          ranges: [{ startByte: 0, endByte: 10 }],
+          workDir: testDir,
+          expectedTotalFileSize: 99999,
+        })
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts immediately with RenditionVersionMismatchError if strong ETag changes midway through multi-chunk transfer", async () => {
+      const { fetchPlannedByteRangesWithLedger } = await import(
+        "../../../src/core/mp4/partial-fetcher.js"
+      );
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "etag_mismatch_test");
+      await fs.mkdir(testDir, { recursive: true });
+
+      // Expected strong ETag is "different-strong-etag", server returns "mock-strong-etag"
+      await expect(
+        fetchPlannedByteRangesWithLedger({
+          url: `${serverUrl}/valid-video.mp4`,
+          ranges: [{ startByte: 0, endByte: 10 }],
+          workDir: testDir,
+          expectedEtag: '"different-strong-etag"',
+        })
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is missing", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "missing_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_missing.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/missing-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is weak (W/...)", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "weak_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_weak.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/weak-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("aborts with RenditionVersionMismatchError when expectedEtag is strong but chunk response ETag is different strong ETag", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+      const { RenditionVersionMismatchError } = await import("../../../src/core/mp4/types.js");
+
+      const testDir = path.join(tempDir, "different_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_diff.bin");
+
+      await expect(
+        fetchByteRange(
+          `${serverUrl}/different-strong-chunk-etag.mp4`,
+          { startByte: 0, endByte: 9 },
+          destPath,
+          {
+            expectedEtag: '"authoritative-strong-etag"',
+          }
+        )
+      ).rejects.toThrow(RenditionVersionMismatchError);
+    });
+
+    it("passes when expectedEtag is strong and chunk response ETag is exactly equal", async () => {
+      const { fetchByteRange } = await import("../../../src/core/mp4/partial-fetcher.js");
+
+      const testDir = path.join(tempDir, "matching_etag_chunk_test");
+      await fs.mkdir(testDir, { recursive: true });
+      const destPath = path.join(testDir, "chunk_matching.bin");
+
+      const result = await fetchByteRange(
+        `${serverUrl}/valid-video.mp4`, // server returns "mock-strong-etag"
+        { startByte: 0, endByte: 9 },
+        destPath,
+        {
+          expectedEtag: '"mock-strong-etag"',
+        }
+      );
+
+      expect(result.bytesDownloaded).toBe(10);
+      expect(result.etag).toBe('"mock-strong-etag"');
+    });
+  });
 });
+
+
+
