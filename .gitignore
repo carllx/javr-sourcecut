@@ -14,3 +14,7 @@ cookies.txt
 
 # Local Acceptance Artifacts
 acceptance-*.json
+downloads/
+*.mp4
+*.llc
+*.part

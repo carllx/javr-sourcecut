@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { HITLPauseResult, MediaRendition, QualityTargetOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { EpornerAdapter } from "../adapters/eporner/index.js";
-import { AstalaVrAdapter } from "../adapters/astalavr/index.js";
+import { AstalaVrAdapter, buildLocalAstalaVrDescriptor } from "../adapters/astalavr/index.js";
+import { AstalaVrBridgeServer } from "./astalavr-bridge.js";
 import { selectProxyRendition } from "./proxy-selector.js";
 import {
   selectHighestPublicHqRendition,
@@ -100,16 +101,21 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
 
   // 2. Discover formats and metadata (Fail closed before job creation if initial page fetch fails)
   let descriptor: SourceDescriptor;
-  try {
-    descriptor = await adapter.resolve(sourceUrl, sessionFetch);
-  } catch (err: any) {
-    if (isAuthOrAccessError(err)) {
-      const guidance = !sessionProvider.hasSession
-        ? `Authentication or browser session is required to access "${sourceUrl}". Please run 'javr-sourcecut auth ${adapter.provider}' or supply --cookies.`
-        : `Session access failed for "${sourceUrl}". Please re-authenticate via 'javr-sourcecut auth ${adapter.provider}' or update --cookies.`;
-      throw new Error(`Failed to resolve source page (${err.message}). ${guidance}`);
+  if (adapter.provider === "astalavr") {
+    // AstalaVR uses local URL resolution without Node page fetch to respect browser companion flow
+    descriptor = buildLocalAstalaVrDescriptor(sourceUrl);
+  } else {
+    try {
+      descriptor = await adapter.resolve(sourceUrl, sessionFetch);
+    } catch (err: any) {
+      if (isAuthOrAccessError(err)) {
+        const guidance = !sessionProvider.hasSession
+          ? `Authentication or browser session is required to access "${sourceUrl}". Please run 'javr-sourcecut auth ${adapter.provider}' or supply --cookies.`
+          : `Session access failed for "${sourceUrl}". Please re-authenticate via 'javr-sourcecut auth ${adapter.provider}' or update --cookies.`;
+        throw new Error(`Failed to resolve source page (${err.message}). ${guidance}`);
+      }
+      throw err;
     }
-    throw err;
   }
 
   onLog(`Discovered source: "${descriptor.rawTitle}" (${descriptor.renditions.length} renditions)`);
@@ -138,10 +144,37 @@ export async function runTracerSlice(params: TracerSliceParams): Promise<HITLPau
   await updateJobStatus(job, "proxy-downloading");
   onLog(`[2/5] Downloading proxy video to: ${job.proxyPath}`);
   try {
-    await downloadFile(selectedProxy.directUrl, job.proxyPath, {
-      fetchFn: sessionFetch,
-      onProgress,
-    });
+    if (adapter.provider === "astalavr") {
+      onLog("=======================================================");
+      onLog(" AstalaVR Agent 720p Proxy Acquisition Bridge");
+      onLog("=======================================================");
+      onLog(` Asset ID:        ${descriptor.providerAssetId}`);
+      onLog(` Target Rendition: 720p`);
+      onLog(` Output Path:     ${job.proxyPath}`);
+      onLog(" State:           WAITING_FOR_BROWSER_PLAYBACK");
+      onLog(" (Please open the video in your browser with AstalaVR Companion userscript installed)");
+      onLog("=======================================================\n");
+
+      const bridge = new AstalaVrBridgeServer();
+      const bridgeResult = await bridge.startJob({
+        assetId: descriptor.providerAssetId,
+        outputPath: job.proxyPath,
+        verifierFn,
+        onProgress,
+        onLog: (msg) => onLog(`[Bridge] ${msg}`),
+      });
+
+      if (!bridgeResult.pass || !bridgeResult.ffprobePass) {
+        throw new Error(
+          `AstalaVR bridge proxy download failed (${bridgeResult.failureKind || "UNKNOWN_ERROR"}).`
+        );
+      }
+    } else {
+      await downloadFile(selectedProxy.directUrl, job.proxyPath, {
+        fetchFn: sessionFetch,
+        onProgress,
+      });
+    }
   } catch (err: any) {
     // Cleanup any partial file
     await fs.rm(`${job.proxyPath}.part`, { force: true }).catch(() => {});

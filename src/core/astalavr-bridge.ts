@@ -6,10 +6,15 @@ import { verifyMediaFile, type FfprobeProbeResult } from "./verifier.js";
 
 export const ASTALAVR_BRIDGE_PORT = 38815;
 
+export function getAstalaVrBridgePort(): number {
+  return Number(process.env.ASTALAVR_BRIDGE_PORT) || ASTALAVR_BRIDGE_PORT;
+}
+
 export interface AstalaVrBridgeJobOptions {
   assetId: string;
   outputPath: string;
   port?: number;
+  verifierFn?: typeof verifyMediaFile;
   onProgress?: (bytesWritten: number, totalBytes?: number) => void;
   onLog?: (message: string) => void;
 }
@@ -43,6 +48,7 @@ export class AstalaVrBridgeServer {
     totalBytes: number | null;
     failed: boolean;
     failureKind?: AstalaVrBridgeJobResult["failureKind"];
+    verifierFn?: typeof verifyMediaFile;
     onProgress?: (bytesWritten: number, totalBytes?: number) => void;
     onLog?: (message: string) => void;
     resolve: (result: AstalaVrBridgeJobResult) => void;
@@ -50,7 +56,7 @@ export class AstalaVrBridgeServer {
   } | null = null;
 
   async startJob(options: AstalaVrBridgeJobOptions): Promise<AstalaVrBridgeJobResult> {
-    const port = options.port || ASTALAVR_BRIDGE_PORT;
+    const port = options.port || getAstalaVrBridgePort();
     const resolvedOutput = path.resolve(options.outputPath);
     const partPath = `${resolvedOutput}.part`;
 
@@ -78,6 +84,7 @@ export class AstalaVrBridgeServer {
         bytesWritten: 0,
         totalBytes: null,
         failed: false,
+        verifierFn: options.verifierFn,
         onProgress: options.onProgress,
         onLog: options.onLog,
         resolve: (result) => {
@@ -334,7 +341,8 @@ export class AstalaVrBridgeServer {
           let probeResult: FfprobeProbeResult | undefined;
           let ffprobePass = false;
           try {
-            probeResult = await verifyMediaFile(job.outputPath, { requireAudio: false });
+            const verifier = job.verifierFn || verifyMediaFile;
+            probeResult = await verifier(job.outputPath, { requireAudio: false });
             ffprobePass = Boolean(probeResult && probeResult.isValid && probeResult.duration > 0);
           } catch {
             ffprobePass = false;

@@ -15,6 +15,66 @@ export function extractVideoIdFromUrl(url: string): string | null {
   return null;
 }
 
+export function extractTitleSlugFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url.startsWith("http") ? url : `https://${url}`);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const vidIdx = parts.findIndex((p) => p.toLowerCase() === "videos");
+    if (vidIdx !== -1 && parts.length > vidIdx + 2) {
+      const rawSlug = parts[vidIdx + 2];
+      const decoded = decodeURIComponent(rawSlug).trim();
+      if (decoded) return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+export function buildLocalAstalaVrDescriptor(
+  url: string,
+  videoId?: string
+): SourceDescriptor {
+  const resolvedVideoId = videoId || extractVideoIdFromUrl(url);
+  if (!resolvedVideoId) {
+    throw new Error(`Invalid AstalaVR URL: ${url}`);
+  }
+
+  const titleSlug = extractTitleSlugFromUrl(url);
+  const rawTitle = titleSlug || `astalavr-${resolvedVideoId}`;
+
+  const renditions: MediaRendition[] = [
+    {
+      formatId: "720p-h264",
+      resolution: "720p",
+      height: 720,
+      vcodec: "h264",
+      directUrl: "",
+    },
+    {
+      formatId: "1440p-h264",
+      resolution: "1440p",
+      height: 1440,
+      vcodec: "h264",
+      directUrl: "",
+    },
+    {
+      formatId: "1920p-h264",
+      resolution: "1920p",
+      height: 1920,
+      vcodec: "h264",
+      directUrl: "",
+    },
+  ];
+
+  return {
+    provider: "astalavr",
+    providerAssetId: resolvedVideoId,
+    sourceUrl: url,
+    rawTitle,
+    declaredPerformers: [],
+    renditions,
+  };
+}
+
 export function parseAstalaVrHtml(
   html: string,
   sourceUrl: string,
