@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Window } from "happy-dom";
-import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p } from "../../companion/src/astalavr.js";
+import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p, inspectActivePlayer } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
 describe("AstalaVR Companion Probe", () => {
@@ -325,6 +325,114 @@ describe("AstalaVR Companion Probe", () => {
 
     app.destroy();
     spy.mockRestore();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
+  });
+
+  it("11. inspectActivePlayer returns matching cached rendition (720p) without leaking token", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=cached_token_123",
+      },
+      {
+        formatId: "1440p-unknown",
+        resolution: "1440p",
+        height: 1440,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/1440P.mp4?token=cached_token_456",
+      },
+    ];
+
+    doc.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <video src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=active_player_secret_789"></video>
+      </dl8-video>
+    `;
+
+    const videoEl = doc.querySelector("video") as any;
+    Object.defineProperty(videoEl, "readyState", { value: 4, configurable: true });
+    Object.defineProperty(videoEl, "networkState", { value: 2, configurable: true });
+    Object.defineProperty(videoEl, "paused", { value: false, configurable: true });
+    Object.defineProperty(videoEl, "duration", { value: 1800.5, configurable: true });
+    Object.defineProperty(videoEl, "videoWidth", { value: 1280, configurable: true });
+    Object.defineProperty(videoEl, "videoHeight", { value: 720, configurable: true });
+
+    const info = inspectActivePlayer(doc as any, cachedRenditions as any);
+    expect(info.activePlayerFound).toBe(true);
+    expect(info.tagName).toBe("VIDEO");
+    expect(info.readyState).toBe(4);
+    expect(info.networkState).toBe(2);
+    expect(info.paused).toBe(false);
+    expect(info.duration).toBe(1800.5);
+    expect(info.videoWidth).toBe(1280);
+    expect(info.videoHeight).toBe(720);
+    expect(info.currentSrcKind).toBe("DIRECT_CDN");
+    expect(info.currentSrcHost).toBe("cdn3.astalavr.com");
+    expect(info.currentSrcPath).toBe("/qDAVn/720P.mp4");
+    expect(info.currentSrcHasToken).toBe(true);
+    expect(info.matchedCachedRendition).toBe("720p");
+  });
+
+  it("12. inspectActivePlayer identifies blob: currentSrcKind with MATCHED_CACHED_RENDITION=NONE", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    doc.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <video src="blob:https://astalavr.com/550e8400-e29b-41d4-a716-446655440000"></video>
+      </dl8-video>
+    `;
+
+    const info = inspectActivePlayer(doc as any, []);
+    expect(info.activePlayerFound).toBe(true);
+    expect(info.currentSrcKind).toBe("BLOB");
+    expect(info.matchedCachedRendition).toBe("NONE");
+  });
+
+  it("13. clicking Inspect active player renders sanitized inspection report in UI", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+        <video src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=super_secret_query"></video>
+      </dl8-video>
+    `;
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const inspectBtn = window.document.getElementById("astalavr-inspect-player-btn") as HTMLButtonElement;
+    expect(inspectBtn).not.toBeNull();
+
+    inspectBtn.click();
+
+    const inspectResultEl = window.document.getElementById("astalavr-inspect-player-result")!;
+    expect(inspectResultEl.style.display).toBe("block");
+    expect(inspectResultEl.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
+    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_HOST=</strong>cdn3.astalavr.com");
+    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_PATH=</strong>/qDAVn/720P.mp4");
+    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_HAS_TOKEN=</strong>YES");
+    expect(inspectResultEl.innerHTML).toContain("MATCHED_CACHED_RENDITION=</strong>720p");
+    expect(inspectResultEl.innerHTML).not.toContain("super_secret_query");
+    expect(inspectResultEl.innerHTML).not.toContain("token=");
+
+    app.destroy();
     (globalThis as any).window = originalWindow;
     (globalThis as any).document = originalDocument;
   });

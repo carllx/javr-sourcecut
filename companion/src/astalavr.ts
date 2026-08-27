@@ -230,3 +230,103 @@ export function testBrowserMedia720p(
     }
   });
 }
+
+export interface ActivePlayerInspection {
+  activePlayerFound: boolean;
+  tagName?: string;
+  readyState?: number;
+  networkState?: number;
+  paused?: boolean;
+  duration?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+  currentSrcKind: "DIRECT_CDN" | "BLOB" | "OTHER" | "EMPTY";
+  currentSrcHost?: string;
+  currentSrcPath?: string;
+  currentSrcHasToken?: boolean;
+  matchedCachedRendition: "720p" | "1440p" | "2048p" | "NONE";
+}
+
+export function inspectActivePlayer(
+  doc: Document = document,
+  cachedRenditions: AstalaVrRenditionSummary[] = []
+): ActivePlayerInspection {
+  const videoEl =
+    doc.querySelector("dl8-video video") ||
+    doc.querySelector("dl8-video")?.shadowRoot?.querySelector("video") ||
+    doc.querySelector("video") ||
+    (doc.querySelector("dl8-video") as HTMLVideoElement | null);
+
+  if (!videoEl || typeof (videoEl as any).tagName !== "string") {
+    return {
+      activePlayerFound: false,
+      currentSrcKind: "EMPTY",
+      matchedCachedRendition: "NONE",
+    };
+  }
+
+  const v = videoEl as HTMLVideoElement;
+  const rawSrc = v.currentSrc || v.src || v.getAttribute("src") || "";
+
+  let currentSrcKind: "DIRECT_CDN" | "BLOB" | "OTHER" | "EMPTY" = "EMPTY";
+  let currentSrcHost: string | undefined;
+  let currentSrcPath: string | undefined;
+  let currentSrcHasToken: boolean | undefined;
+  let matchedCachedRendition: "720p" | "1440p" | "2048p" | "NONE" = "NONE";
+
+  if (!rawSrc) {
+    currentSrcKind = "EMPTY";
+  } else if (rawSrc.startsWith("blob:")) {
+    currentSrcKind = "BLOB";
+  } else {
+    try {
+      const parsed = new URL(rawSrc, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+      currentSrcHost = parsed.hostname;
+      currentSrcPath = parsed.pathname;
+      currentSrcHasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
+
+      if (parsed.hostname.includes("astalavr.com") || parsed.hostname.includes("cdn")) {
+        currentSrcKind = "DIRECT_CDN";
+      } else {
+        currentSrcKind = "OTHER";
+      }
+
+      // Match origin + pathname against cached renditions
+      const playerOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
+      for (const r of cachedRenditions) {
+        try {
+          const rParsed = new URL(r.fullDirectUrl);
+          const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
+          if (playerOriginPath === rOriginPath) {
+            if (r.resolution === "720p" || r.height === 720) {
+              matchedCachedRendition = "720p";
+            } else if (r.resolution === "1440p" || r.height === 1440) {
+              matchedCachedRendition = "1440p";
+            } else if (r.resolution === "2048p" || r.height === 2048) {
+              matchedCachedRendition = "2048p";
+            }
+            break;
+          }
+        } catch {}
+      }
+    } catch {
+      currentSrcKind = "OTHER";
+    }
+  }
+
+  return {
+    activePlayerFound: true,
+    tagName: v.tagName.toUpperCase(),
+    readyState: v.readyState,
+    networkState: v.networkState,
+    paused: v.paused,
+    duration: typeof v.duration === "number" && !isNaN(v.duration) ? v.duration : undefined,
+    videoWidth: typeof v.videoWidth === "number" ? v.videoWidth : undefined,
+    videoHeight: typeof v.videoHeight === "number" ? v.videoHeight : undefined,
+    currentSrcKind,
+    currentSrcHost,
+    currentSrcPath,
+    currentSrcHasToken,
+    matchedCachedRendition,
+  };
+}

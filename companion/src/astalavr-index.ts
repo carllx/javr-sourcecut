@@ -1,4 +1,4 @@
-import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p, type AstalaVrRenditionSummary } from "./astalavr.js";
+import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p, inspectActivePlayer, type AstalaVrRenditionSummary } from "./astalavr.js";
 
 export class AstalaVrProbeApp {
   private panelElement: HTMLElement | null = null;
@@ -258,6 +258,61 @@ export class AstalaVrProbeApp {
         btnContainer.appendChild(test720Btn);
         btnContainer.appendChild(resultEl);
       }
+
+      // Add Inspect active player button
+      const inspectBtn = document.createElement("button");
+      inspectBtn.id = "astalavr-inspect-player-btn";
+      inspectBtn.textContent = "🔍 Inspect active player";
+      inspectBtn.style.width = "100%";
+      inspectBtn.style.padding = "6px 12px";
+      inspectBtn.style.backgroundColor = "#0d9488";
+      inspectBtn.style.color = "#ffffff";
+      inspectBtn.style.border = "none";
+      inspectBtn.style.borderRadius = "4px";
+      inspectBtn.style.cursor = "pointer";
+      inspectBtn.style.fontWeight = "bold";
+
+      const inspectResultEl = document.createElement("div");
+      inspectResultEl.id = "astalavr-inspect-player-result";
+      inspectResultEl.style.fontSize = "11px";
+      inspectResultEl.style.padding = "6px 8px";
+      inspectResultEl.style.borderRadius = "4px";
+      inspectResultEl.style.backgroundColor = "#1e293b";
+      inspectResultEl.style.color = "#f1f5f9";
+      inspectResultEl.style.display = "none";
+      inspectResultEl.style.lineHeight = "1.4";
+
+      inspectBtn.onclick = () => {
+        const info = inspectActivePlayer(document, effectiveRenditions);
+        inspectResultEl.style.display = "block";
+
+        let resultText = `<div><strong>ACTIVE_PLAYER_FOUND=</strong>${info.activePlayerFound ? "YES" : "NO"}</div>`;
+        if (info.activePlayerFound) {
+          resultText += `<div><strong>TAG_NAME=</strong>${info.tagName || "unknown"}</div>`;
+          resultText += `<div><strong>READY_STATE=</strong>${info.readyState ?? "unknown"}</div>`;
+          resultText += `<div><strong>NETWORK_STATE=</strong>${info.networkState ?? "unknown"}</div>`;
+          resultText += `<div><strong>PAUSED=</strong>${info.paused !== undefined ? String(info.paused).toUpperCase() : "unknown"}</div>`;
+          resultText += `<div><strong>DURATION=</strong>${info.duration !== undefined ? info.duration.toFixed(2) + "s" : "unknown"}</div>`;
+          resultText += `<div><strong>VIDEO_WIDTH=</strong>${info.videoWidth ?? "unknown"}</div>`;
+          resultText += `<div><strong>VIDEO_HEIGHT=</strong>${info.videoHeight ?? "unknown"}</div>`;
+          resultText += `<div style="margin-top: 4px;"><strong>CURRENT_SRC_KIND=</strong>${info.currentSrcKind}</div>`;
+          if (info.currentSrcHost) {
+            resultText += `<div><strong>CURRENT_SRC_HOST=</strong>${info.currentSrcHost}</div>`;
+          }
+          if (info.currentSrcPath) {
+            resultText += `<div><strong>CURRENT_SRC_PATH=</strong>${info.currentSrcPath}</div>`;
+          }
+          if (info.currentSrcHasToken !== undefined) {
+            resultText += `<div><strong>CURRENT_SRC_HAS_TOKEN=</strong>${info.currentSrcHasToken ? "YES" : "NO"}</div>`;
+          }
+          resultText += `<div style="margin-top: 4px; color: #38bdf8;"><strong>MATCHED_CACHED_RENDITION=</strong>${info.matchedCachedRendition}</div>`;
+        }
+
+        inspectResultEl.innerHTML = resultText;
+      };
+
+      btnContainer.appendChild(inspectBtn);
+      btnContainer.appendChild(inspectResultEl);
 
       btnContainer.appendChild(copyBtn);
       this.contentElement.appendChild(btnContainer);

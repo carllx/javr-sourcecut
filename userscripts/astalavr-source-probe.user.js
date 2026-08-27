@@ -181,6 +181,75 @@
       }
     });
   }
+  function inspectActivePlayer(doc = document, cachedRenditions = []) {
+    const videoEl = doc.querySelector("dl8-video video") || doc.querySelector("dl8-video")?.shadowRoot?.querySelector("video") || doc.querySelector("video") || doc.querySelector("dl8-video");
+    if (!videoEl || typeof videoEl.tagName !== "string") {
+      return {
+        activePlayerFound: false,
+        currentSrcKind: "EMPTY",
+        matchedCachedRendition: "NONE"
+      };
+    }
+    const v = videoEl;
+    const rawSrc = v.currentSrc || v.src || v.getAttribute("src") || "";
+    let currentSrcKind = "EMPTY";
+    let currentSrcHost;
+    let currentSrcPath;
+    let currentSrcHasToken;
+    let matchedCachedRendition = "NONE";
+    if (!rawSrc) {
+      currentSrcKind = "EMPTY";
+    } else if (rawSrc.startsWith("blob:")) {
+      currentSrcKind = "BLOB";
+    } else {
+      try {
+        const parsed = new URL(rawSrc, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        currentSrcHost = parsed.hostname;
+        currentSrcPath = parsed.pathname;
+        currentSrcHasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
+        if (parsed.hostname.includes("astalavr.com") || parsed.hostname.includes("cdn")) {
+          currentSrcKind = "DIRECT_CDN";
+        } else {
+          currentSrcKind = "OTHER";
+        }
+        const playerOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
+        for (const r of cachedRenditions) {
+          try {
+            const rParsed = new URL(r.fullDirectUrl);
+            const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
+            if (playerOriginPath === rOriginPath) {
+              if (r.resolution === "720p" || r.height === 720) {
+                matchedCachedRendition = "720p";
+              } else if (r.resolution === "1440p" || r.height === 1440) {
+                matchedCachedRendition = "1440p";
+              } else if (r.resolution === "2048p" || r.height === 2048) {
+                matchedCachedRendition = "2048p";
+              }
+              break;
+            }
+          } catch {
+          }
+        }
+      } catch {
+        currentSrcKind = "OTHER";
+      }
+    }
+    return {
+      activePlayerFound: true,
+      tagName: v.tagName.toUpperCase(),
+      readyState: v.readyState,
+      networkState: v.networkState,
+      paused: v.paused,
+      duration: typeof v.duration === "number" && !isNaN(v.duration) ? v.duration : void 0,
+      videoWidth: typeof v.videoWidth === "number" ? v.videoWidth : void 0,
+      videoHeight: typeof v.videoHeight === "number" ? v.videoHeight : void 0,
+      currentSrcKind,
+      currentSrcHost,
+      currentSrcPath,
+      currentSrcHasToken,
+      matchedCachedRendition
+    };
+  }
 
   // companion/src/astalavr-index.ts
   var AstalaVrProbeApp = class {
@@ -407,6 +476,54 @@
           btnContainer.appendChild(test720Btn);
           btnContainer.appendChild(resultEl);
         }
+        const inspectBtn = document.createElement("button");
+        inspectBtn.id = "astalavr-inspect-player-btn";
+        inspectBtn.textContent = "\u{1F50D} Inspect active player";
+        inspectBtn.style.width = "100%";
+        inspectBtn.style.padding = "6px 12px";
+        inspectBtn.style.backgroundColor = "#0d9488";
+        inspectBtn.style.color = "#ffffff";
+        inspectBtn.style.border = "none";
+        inspectBtn.style.borderRadius = "4px";
+        inspectBtn.style.cursor = "pointer";
+        inspectBtn.style.fontWeight = "bold";
+        const inspectResultEl = document.createElement("div");
+        inspectResultEl.id = "astalavr-inspect-player-result";
+        inspectResultEl.style.fontSize = "11px";
+        inspectResultEl.style.padding = "6px 8px";
+        inspectResultEl.style.borderRadius = "4px";
+        inspectResultEl.style.backgroundColor = "#1e293b";
+        inspectResultEl.style.color = "#f1f5f9";
+        inspectResultEl.style.display = "none";
+        inspectResultEl.style.lineHeight = "1.4";
+        inspectBtn.onclick = () => {
+          const info = inspectActivePlayer(document, effectiveRenditions);
+          inspectResultEl.style.display = "block";
+          let resultText = `<div><strong>ACTIVE_PLAYER_FOUND=</strong>${info.activePlayerFound ? "YES" : "NO"}</div>`;
+          if (info.activePlayerFound) {
+            resultText += `<div><strong>TAG_NAME=</strong>${info.tagName || "unknown"}</div>`;
+            resultText += `<div><strong>READY_STATE=</strong>${info.readyState ?? "unknown"}</div>`;
+            resultText += `<div><strong>NETWORK_STATE=</strong>${info.networkState ?? "unknown"}</div>`;
+            resultText += `<div><strong>PAUSED=</strong>${info.paused !== void 0 ? String(info.paused).toUpperCase() : "unknown"}</div>`;
+            resultText += `<div><strong>DURATION=</strong>${info.duration !== void 0 ? info.duration.toFixed(2) + "s" : "unknown"}</div>`;
+            resultText += `<div><strong>VIDEO_WIDTH=</strong>${info.videoWidth ?? "unknown"}</div>`;
+            resultText += `<div><strong>VIDEO_HEIGHT=</strong>${info.videoHeight ?? "unknown"}</div>`;
+            resultText += `<div style="margin-top: 4px;"><strong>CURRENT_SRC_KIND=</strong>${info.currentSrcKind}</div>`;
+            if (info.currentSrcHost) {
+              resultText += `<div><strong>CURRENT_SRC_HOST=</strong>${info.currentSrcHost}</div>`;
+            }
+            if (info.currentSrcPath) {
+              resultText += `<div><strong>CURRENT_SRC_PATH=</strong>${info.currentSrcPath}</div>`;
+            }
+            if (info.currentSrcHasToken !== void 0) {
+              resultText += `<div><strong>CURRENT_SRC_HAS_TOKEN=</strong>${info.currentSrcHasToken ? "YES" : "NO"}</div>`;
+            }
+            resultText += `<div style="margin-top: 4px; color: #38bdf8;"><strong>MATCHED_CACHED_RENDITION=</strong>${info.matchedCachedRendition}</div>`;
+          }
+          inspectResultEl.innerHTML = resultText;
+        };
+        btnContainer.appendChild(inspectBtn);
+        btnContainer.appendChild(inspectResultEl);
         btnContainer.appendChild(copyBtn);
         this.contentElement.appendChild(btnContainer);
       }
