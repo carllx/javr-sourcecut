@@ -182,15 +182,33 @@
     });
   }
   function inspectActivePlayer(doc = document, cachedRenditions = []) {
-    const videoEl = doc.querySelector("dl8-video video") || doc.querySelector("dl8-video")?.shadowRoot?.querySelector("video") || doc.querySelector("video") || doc.querySelector("dl8-video");
-    if (!videoEl || typeof videoEl.tagName !== "string") {
+    const dl8VideoEl = doc.querySelector("dl8-video");
+    let candidateEl = null;
+    if (dl8VideoEl) {
+      const innerVideo = dl8VideoEl.querySelector("video");
+      if (innerVideo) {
+        candidateEl = innerVideo;
+      } else if (dl8VideoEl.shadowRoot) {
+        const shadowVideo = dl8VideoEl.shadowRoot.querySelector("video");
+        if (shadowVideo) {
+          candidateEl = shadowVideo;
+        }
+      }
+      if (!candidateEl) {
+        const elAsAny = dl8VideoEl;
+        if (typeof elAsAny.currentSrc === "string" || typeof elAsAny.src === "string" || typeof elAsAny.readyState === "number") {
+          candidateEl = dl8VideoEl;
+        }
+      }
+    }
+    if (!candidateEl || typeof candidateEl.tagName !== "string") {
       return {
         activePlayerFound: false,
         currentSrcKind: "EMPTY",
         matchedCachedRendition: "NONE"
       };
     }
-    const v = videoEl;
+    const v = candidateEl;
     const rawSrc = v.currentSrc || v.src || v.getAttribute("src") || "";
     let currentSrcKind = "EMPTY";
     let currentSrcHost;
@@ -497,6 +515,11 @@
         inspectResultEl.style.display = "none";
         inspectResultEl.style.lineHeight = "1.4";
         inspectBtn.onclick = () => {
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = void 0;
+          }
           const info = inspectActivePlayer(document, effectiveRenditions);
           inspectResultEl.style.display = "block";
           let resultText = `<div><strong>ACTIVE_PLAYER_FOUND=</strong>${info.activePlayerFound ? "YES" : "NO"}</div>`;

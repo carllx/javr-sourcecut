@@ -436,4 +436,59 @@ describe("AstalaVR Companion Probe", () => {
     (globalThis as any).window = originalWindow;
     (globalThis as any).document = originalDocument;
   });
+
+  it("14. clicking Inspect active player stops polling so result is preserved on subsequent DOM changes", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+        <video src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=super_secret_query"></video>
+      </dl8-video>
+    `;
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const inspectBtn = window.document.getElementById("astalavr-inspect-player-btn") as HTMLButtonElement;
+    expect(inspectBtn).not.toBeNull();
+
+    // Click inspect button
+    inspectBtn.click();
+
+    const inspectResultEl = window.document.getElementById("astalavr-inspect-player-result")!;
+    expect(inspectResultEl.style.display).toBe("block");
+    expect(inspectResultEl.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
+
+    // Clear sources or mutate DOM
+    window.document.querySelector("dl8-video")!.innerHTML = "";
+    // Wait interval
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Result must remain visible and intact
+    expect(window.document.getElementById("astalavr-inspect-player-result")!.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
+
+    app.destroy();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
+  });
+
+  it("15. unrelated external video outside dl8-video is rejected -> ACTIVE_PLAYER_FOUND=NO", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    doc.body.innerHTML = `
+      <dl8-video title="TMAVR285"></dl8-video>
+      <video id="unrelated-ad-video" src="https://ads.example.com/ad.mp4"></video>
+    `;
+
+    const info = inspectActivePlayer(doc as any, []);
+    expect(info.activePlayerFound).toBe(false);
+    expect(info.currentSrcKind).toBe("EMPTY");
+    expect(info.matchedCachedRendition).toBe("NONE");
+  });
 });

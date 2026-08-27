@@ -283,6 +283,13 @@ export class AstalaVrProbeApp {
       inspectResultEl.style.lineHeight = "1.4";
 
       inspectBtn.onclick = () => {
+        // Freeze scheduled polling so inspection result UI is preserved
+        this.isTestingBrowserMedia = true;
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = undefined;
+        }
+
         const info = inspectActivePlayer(document, effectiveRenditions);
         inspectResultEl.style.display = "block";
 

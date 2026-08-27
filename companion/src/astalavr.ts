@@ -251,13 +251,36 @@ export function inspectActivePlayer(
   doc: Document = document,
   cachedRenditions: AstalaVrRenditionSummary[] = []
 ): ActivePlayerInspection {
-  const videoEl =
-    doc.querySelector("dl8-video video") ||
-    doc.querySelector("dl8-video")?.shadowRoot?.querySelector("video") ||
-    doc.querySelector("video") ||
-    (doc.querySelector("dl8-video") as HTMLVideoElement | null);
+  const dl8VideoEl = doc.querySelector("dl8-video");
+  let candidateEl: Element | null = null;
 
-  if (!videoEl || typeof (videoEl as any).tagName !== "string") {
+  if (dl8VideoEl) {
+    // 1. Check light DOM child <video> inside <dl8-video>
+    const innerVideo = dl8VideoEl.querySelector("video");
+    if (innerVideo) {
+      candidateEl = innerVideo;
+    } else if (dl8VideoEl.shadowRoot) {
+      // 2. Check open shadowRoot <video> inside <dl8-video>
+      const shadowVideo = dl8VideoEl.shadowRoot.querySelector("video");
+      if (shadowVideo) {
+        candidateEl = shadowVideo;
+      }
+    }
+
+    // 3. If no inner video found, check if <dl8-video> custom element exposes media-like properties
+    if (!candidateEl) {
+      const elAsAny = dl8VideoEl as any;
+      if (
+        typeof elAsAny.currentSrc === "string" ||
+        typeof elAsAny.src === "string" ||
+        typeof elAsAny.readyState === "number"
+      ) {
+        candidateEl = dl8VideoEl;
+      }
+    }
+  }
+
+  if (!candidateEl || typeof (candidateEl as any).tagName !== "string") {
     return {
       activePlayerFound: false,
       currentSrcKind: "EMPTY",
@@ -265,7 +288,7 @@ export function inspectActivePlayer(
     };
   }
 
-  const v = videoEl as HTMLVideoElement;
+  const v = candidateEl as HTMLVideoElement;
   const rawSrc = v.currentSrc || v.src || v.getAttribute("src") || "";
 
   let currentSrcKind: "DIRECT_CDN" | "BLOB" | "OTHER" | "EMPTY" = "EMPTY";
