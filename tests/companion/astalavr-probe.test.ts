@@ -13,6 +13,7 @@ import {
   download720pProxyFile,
   checkActiveBridgeJob,
   transfer720pProxyToBridge,
+  transfer720pProxyStream,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -3321,6 +3322,148 @@ describe("AstalaVR Companion Probe", () => {
 
       expect(res.pass).toBe(false);
       expect(res.failureKind).toBe("FILE_WRITE_ERROR");
+    });
+
+    it("10. upstream 1 MiB Range delivered in multiple reader chunks calls sink.writeChunk exactly ONCE", async () => {
+      const writtenChunks: { chunk: Uint8Array; offset: number; totalBytes: number }[] = [];
+      const mockSink = {
+        writeChunk: vi.fn(async (chunk: Uint8Array, offset: number, totalBytes: number) => {
+          writtenChunks.push({ chunk, offset, totalBytes });
+        }),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        if (details.method === "GET" && details.headers?.Range === "bytes=0-0") {
+          setTimeout(() => {
+            if (details.onreadystatechange) {
+              details.onreadystatechange({
+                readyState: 2,
+                status: 206,
+                responseHeaders: "Content-Range: bytes 0-0/1048576\r\n",
+              });
+            }
+          }, 5);
+        }
+        return { abort: () => {} };
+      });
+
+      // Deliver 1 MiB range across 4 separate 256 KiB stream reads
+      const mockPageFetch = vi.fn(async () => {
+        let chunkIdx = 0;
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (chunkIdx < 4) {
+                  chunkIdx++;
+                  const c = new Uint8Array(262144);
+                  c.fill(chunkIdx);
+                  return { done: false, value: c };
+                }
+                return { done: true, value: undefined };
+              },
+              cancel: async () => {},
+              releaseLock: () => {},
+            }),
+          },
+        };
+      });
+
+      const res = await transfer720pProxyStream(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockSink,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(mockSink.writeChunk).toHaveBeenCalledTimes(1);
+      expect(writtenChunks.length).toBe(1);
+      expect(writtenChunks[0].chunk.byteLength).toBe(1048576);
+      expect(writtenChunks[0].offset).toBe(0);
+      expect(writtenChunks[0].totalBytes).toBe(1048576);
+      // Verify first 256k was chunk 1 and next 256k was chunk 2
+      expect(writtenChunks[0].chunk[0]).toBe(1);
+      expect(writtenChunks[0].chunk[262144]).toBe(2);
+    });
+
+    it("11. multi-range transfer: two 1 MiB ranges + one short range calls sink.writeChunk exactly 3 times with exact lengths", async () => {
+      const TOTAL = 2500000; // 1048576 + 1048576 + 402848
+      const writtenChunks: { length: number; offset: number; totalBytes: number }[] = [];
+      const mockSink = {
+        writeChunk: vi.fn(async (chunk: Uint8Array, offset: number, totalBytes: number) => {
+          writtenChunks.push({ length: chunk.byteLength, offset, totalBytes });
+        }),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        if (details.method === "GET" && details.headers?.Range === "bytes=0-0") {
+          setTimeout(() => {
+            if (details.onreadystatechange) {
+              details.onreadystatechange({
+                readyState: 2,
+                status: 206,
+                responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+              });
+            }
+          }, 5);
+        }
+        return { abort: () => {} };
+      });
+
+      const mockPageFetch = vi.fn(async (url: string, init: any) => {
+        const rangeHdr = init.headers.Range;
+        const m = rangeHdr.match(/bytes=(\d+)-(\d+)/);
+        const start = parseInt(m[1], 10);
+        const end = parseInt(m[2], 10);
+        const len = end - start + 1;
+
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", String(len)]]),
+          body: {
+            getReader: () => {
+              let sent = false;
+              return {
+                read: async () => {
+                  if (!sent) {
+                    sent = true;
+                    return { done: false, value: new Uint8Array(len) };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await transfer720pProxyStream(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockSink,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(mockSink.writeChunk).toHaveBeenCalledTimes(3);
+      expect(writtenChunks).toEqual([
+        { length: 1048576, offset: 0, totalBytes: TOTAL },
+        { length: 1048576, offset: 1048576, totalBytes: TOTAL },
+        { length: 402848, offset: 2097152, totalBytes: TOTAL },
+      ]);
     });
   });
 });

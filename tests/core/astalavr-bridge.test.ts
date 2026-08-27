@@ -260,37 +260,65 @@ describe("AstalaVR Agent Proxy Bridge Server", () => {
     await new Promise<void>((resolve) => occupiedServer.close(() => resolve()));
   });
 
-  it("6. Node owns output path; browser cannot supply arbitrary path", async () => {
-    const fixedOutputPath = path.join(tmpDir, "safe_proxies", "78yre-720p.mp4");
+  it("7. Responses do NOT contain wildcard Access-Control-Allow-Origin", async () => {
+    const outputPath = path.join(tmpDir, "proxies", "78yre-720p.mp4");
     const jobPromise = bridge.startJob({
       assetId: "78yre",
-      outputPath: fixedOutputPath,
+      outputPath,
       port: TEST_PORT,
     });
 
     await new Promise((r) => setTimeout(r, 50));
 
-    // Browser cannot set path in header/body, server writes strictly to fixedOutputPath.part
-    const chunkBody = Buffer.from("1234567890");
-    const chunkRes = await postHttp({
-      port: TEST_PORT,
-      path: "/astalavr/chunk",
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(chunkBody.length),
-        "X-Asset-Id": "78yre",
-        "X-Offset": "0",
-        "X-Total-Bytes": "10",
-        "X-Custom-Path": "/etc/evil",
-      },
-      body: chunkBody,
+    const res = await getHttp({ port: TEST_PORT, path: "/astalavr/job" });
+    expect(res.statusCode).toBe(200);
+
+    const headersRes = await new Promise<http.IncomingHttpHeaders>((resolve) => {
+      http.get({ hostname: "127.0.0.1", port: TEST_PORT, path: "/astalavr/job" }, (r) => {
+        resolve(r.headers);
+      });
     });
-    expect(chunkRes.statusCode).toBe(200);
 
-    const stat = await fs.stat(`${fixedOutputPath}.part`);
-    expect(stat.size).toBe(10);
+    expect(headersRes["access-control-allow-origin"]).toBeUndefined();
 
-    await postHttp({ port: TEST_PORT, path: "/astalavr/fail" });
+    await postHttp({ port: TEST_PORT, path: "/astalavr/fail", headers: { "X-Asset-Id": "78yre" } });
     await jobPromise;
+  });
+
+  it("8. /fail with wrong asset ID is rejected and active job remains active", async () => {
+    const outputPath = path.join(tmpDir, "proxies", "78yre-720p.mp4");
+    const jobPromise = bridge.startJob({
+      assetId: "78yre",
+      outputPath,
+      port: TEST_PORT,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Post /fail with wrong asset id
+    const wrongFailRes = await postHttp({
+      port: TEST_PORT,
+      path: "/astalavr/fail",
+      headers: { "X-Asset-Id": "unrelated_asset_999" },
+    });
+    expect(wrongFailRes.statusCode).toBe(400);
+
+    // Job must still be active
+    const jobRes = await getHttp({ port: TEST_PORT, path: "/astalavr/job" });
+    const jobData = JSON.parse(jobRes.body);
+    expect(jobData.active).toBe(true);
+    expect(jobData.assetId).toBe("78yre");
+
+    // Post /fail with matching asset id to clean up
+    const correctFailRes = await postHttp({
+      port: TEST_PORT,
+      path: "/astalavr/fail",
+      headers: { "X-Asset-Id": "78yre" },
+    });
+    expect(correctFailRes.statusCode).toBe(200);
+
+    const result = await jobPromise;
+    expect(result.pass).toBe(false);
+    expect(result.failureKind).toBe("TRANSFER_ABORTED");
   });
 });

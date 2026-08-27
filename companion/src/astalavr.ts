@@ -1843,6 +1843,7 @@ export async function transfer720pProxyStream(
     }
 
     const reader = pageResponse.body.getReader();
+    const rangeBuffer = new Uint8Array(expectedChunkLength);
     let rangeBytesRead = 0;
 
     try {
@@ -1851,36 +1852,17 @@ export async function transfer720pProxyStream(
         if (done) break;
         if (value && value.byteLength > 0) {
           const remainingForChunk = expectedChunkLength - rangeBytesRead;
-          let chunkToWrite: Uint8Array;
 
           if (value.byteLength >= remainingForChunk) {
-            chunkToWrite = value.byteLength === remainingForChunk ? value : value.subarray(0, remainingForChunk);
+            rangeBuffer.set(value.subarray(0, remainingForChunk), rangeBytesRead);
             rangeBytesRead += remainingForChunk;
             try {
               await reader.cancel();
             } catch {}
-          } else {
-            chunkToWrite = value;
-            rangeBytesRead += value.byteLength;
-          }
-
-          try {
-            await sink.writeChunk(chunkToWrite, bytesWritten + (rangeBytesRead - chunkToWrite.byteLength), TOTAL);
-          } catch {
-            try {
-              await reader.cancel();
-            } catch {}
-            await sink.abort("FILE_WRITE_ERROR");
-            return {
-              pass: false,
-              bytesWritten,
-              totalBytes: TOTAL,
-              failureKind: "FILE_WRITE_ERROR",
-            };
-          }
-
-          if (value.byteLength >= remainingForChunk) {
             break;
+          } else {
+            rangeBuffer.set(value, rangeBytesRead);
+            rangeBytesRead += value.byteLength;
           }
         }
       }
@@ -1908,6 +1890,19 @@ export async function transfer720pProxyStream(
         bytesWritten,
         totalBytes: TOTAL,
         failureKind: "PAGE_BODY_LENGTH_MISMATCH",
+      };
+    }
+
+    // Call sink.writeChunk EXACTLY ONCE per assembled 1 MiB Range
+    try {
+      await sink.writeChunk(rangeBuffer, rangeStart, TOTAL);
+    } catch {
+      await sink.abort("FILE_WRITE_ERROR");
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "FILE_WRITE_ERROR",
       };
     }
 

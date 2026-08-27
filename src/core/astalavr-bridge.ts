@@ -144,11 +144,6 @@ export class AstalaVrBridgeServer {
   }
 
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    // CORS headers for loopback / Tampermonkey compatibility
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Asset-Id, X-Offset, X-Total-Bytes");
-
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
@@ -265,7 +260,6 @@ export class AstalaVrBridgeServer {
         try {
           if (this.currentJob.fileHandle) {
             await this.currentJob.fileHandle.write(body);
-            await this.currentJob.fileHandle.sync();
           }
 
           this.currentJob.bytesWritten += body.length;
@@ -328,6 +322,7 @@ export class AstalaVrBridgeServer {
       (async () => {
         try {
           if (job.fileHandle) {
+            await job.fileHandle.sync();
             await job.fileHandle.close();
             job.fileHandle = null;
           }
@@ -401,6 +396,13 @@ export class AstalaVrBridgeServer {
       if (!this.currentJob || this.currentJob.failed) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "ALREADY_INACTIVE" }));
+        return;
+      }
+
+      const reqAssetId = req.headers["x-asset-id"] as string;
+      if (reqAssetId && reqAssetId !== this.currentJob.assetId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "ASSET_ID_MISMATCH" }));
         return;
       }
 
