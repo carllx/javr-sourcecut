@@ -419,7 +419,7 @@ export function inspectPlaybackResources(
         } catch {}
       }
 
-      const isCdn = host === "cdn3.astalavr.com" || host.endsWith(".astalavr.com");
+      const isCdn = host === "cdn3.astalavr.com";
       const isRenditionMatch = matchedRendition !== "NONE";
 
       if (isCdn || isRenditionMatch) {

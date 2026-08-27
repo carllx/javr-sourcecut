@@ -575,7 +575,44 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.resources).toHaveLength(0);
   });
 
-  it("18. inspectPlaybackResources returns RESOURCE_MATCH_COUNT=0 when no resources match", () => {
+  it("18. inspectPlaybackResources excludes other *.astalavr.com subdomains and non-rendition paths (exact cdn3 only)", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    const mockPerf: any = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://astalavr.com/assets/app.js",
+              initiatorType: "script",
+              duration: 15,
+            },
+            {
+              name: "https://static.astalavr.com/image.jpg",
+              initiatorType: "img",
+              duration: 25,
+            },
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=secret",
+              initiatorType: "media",
+              duration: 100,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const res = inspectPlaybackResources(doc as any, [], mockPerf);
+    expect(res.resourceMatchCount).toBe(1);
+    expect(res.resources).toHaveLength(1);
+    expect(res.resources[0].host).toBe("cdn3.astalavr.com");
+    expect(res.resources[0].path).toBe("/qDAVn/720P.mp4");
+    expect(res.resources[0].hasToken).toBe(true);
+  });
+
+  it("19. inspectPlaybackResources returns RESOURCE_MATCH_COUNT=0 when no resources match", () => {
     const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
     const doc = window.document;
 
@@ -590,7 +627,7 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.resources).toHaveLength(0);
   });
 
-  it("19. clicking Inspect playback resources stops polling and renders safe output without leaking token", () => {
+  it("20. clicking Inspect playback resources stops polling and renders safe output without leaking token", () => {
     const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
     const originalWindow = (globalThis as any).window;
     const originalDocument = (globalThis as any).document;
