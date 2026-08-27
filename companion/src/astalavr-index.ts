@@ -1,4 +1,4 @@
-import { detectAstalaVrPage, parseAstalaVrDomRenditions } from "./astalavr.js";
+import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p, type AstalaVrRenditionSummary } from "./astalavr.js";
 
 export class AstalaVrProbeApp {
   private panelElement: HTMLElement | null = null;
@@ -6,13 +6,20 @@ export class AstalaVrProbeApp {
   private contentElement: HTMLElement | null = null;
   private pollInterval?: ReturnType<typeof setInterval>;
 
+  // Page-local in-memory rendition cache
+  private cachedAssetId: string | null = null;
+  private cachedRenditions: AstalaVrRenditionSummary[] = [];
+  private isTestingBrowserMedia = false;
+
   init(): void {
     this.createPanel();
     this.checkAndRender();
 
     // Periodic check handles Cloudflare settlement, dl8-video hydration, and source element updates
     this.pollInterval = setInterval(() => {
-      this.checkAndRender();
+      if (!this.isTestingBrowserMedia) {
+        this.checkAndRender();
+      }
     }, 1000);
   }
 
@@ -76,10 +83,17 @@ export class AstalaVrProbeApp {
     this.contentElement = contentEl;
   }
 
-  private checkAndRender(): void {
+  public checkAndRender(): void {
     if (!this.statusElement || !this.contentElement) return;
 
     const detection = detectAstalaVrPage(document);
+    const assetId = detection.videoId || "unknown";
+
+    // Invalidate memory cache immediately if assetId changes
+    if (this.cachedAssetId && this.cachedAssetId !== assetId) {
+      this.cachedAssetId = null;
+      this.cachedRenditions = [];
+    }
 
     if (detection.status === "WAITING_FOR_REAL_PAGE") {
       this.statusElement.textContent = "STATUS: WAITING_FOR_REAL_PAGE";
@@ -97,23 +111,38 @@ export class AstalaVrProbeApp {
       return;
     }
 
-    const renditions = parseAstalaVrDomRenditions(document);
-    const assetId = detection.videoId || "unknown";
+    const liveRenditions = parseAstalaVrDomRenditions(document);
+    let effectiveRenditions: AstalaVrRenditionSummary[] = [];
+    let renditionSource: "LIVE_DOM" | "MEMORY_CACHE" = "LIVE_DOM";
+
+    if (liveRenditions.length > 0) {
+      effectiveRenditions = liveRenditions;
+      this.cachedAssetId = assetId;
+      this.cachedRenditions = liveRenditions;
+      renditionSource = "LIVE_DOM";
+    } else if (this.cachedAssetId === assetId && this.cachedRenditions.length > 0) {
+      effectiveRenditions = this.cachedRenditions;
+      renditionSource = "MEMORY_CACHE";
+    } else {
+      effectiveRenditions = [];
+      renditionSource = "LIVE_DOM";
+    }
 
     this.statusElement.textContent = "STATUS: REAL_PAGE_ACTIVE";
     this.statusElement.style.backgroundColor = "#065f46";
     this.statusElement.style.color = "#d1fae5";
 
     let html = `
-      <div style="margin-bottom: 6px;"><strong>ASSET_ID:</strong> ${assetId}</div>
-      <div style="margin-bottom: 8px;"><strong>RENDITION_COUNT:</strong> ${renditions.length}</div>
+      <div style="margin-bottom: 4px;"><strong>ASSET_ID:</strong> ${assetId}</div>
+      <div style="margin-bottom: 4px;"><strong>RENDITION_COUNT:</strong> ${effectiveRenditions.length}</div>
+      <div style="margin-bottom: 8px;"><strong>RENDITION_SOURCE:</strong> ${renditionSource}</div>
     `;
 
-    if (renditions.length === 0) {
+    if (effectiveRenditions.length === 0) {
       html += `<div style="color: #f87171;">&lt;dl8-video&gt; found, but no &lt;source&gt; tags rendered yet.</div>`;
     } else {
       html += `<div style="border-top: 1px solid #374151; padding-top: 6px; margin-bottom: 8px;">`;
-      for (const r of renditions) {
+      for (const r of effectiveRenditions) {
         html += `
           <div style="margin-bottom: 4px; padding: 4px; background: rgba(255,255,255,0.05); border-radius: 4px;">
             <div><span style="color: #34d399; font-weight: bold;">[${r.resolution}]</span> ${r.vcodec} (${r.mimeType})</div>
@@ -126,8 +155,8 @@ export class AstalaVrProbeApp {
 
     this.contentElement.innerHTML = html;
 
-    // Add action buttons if renditions exist
-    if (renditions.length > 0) {
+    // Add action buttons if effective renditions exist
+    if (effectiveRenditions.length > 0) {
       const btnContainer = document.createElement("div");
       btnContainer.style.display = "flex";
       btnContainer.style.flexDirection = "column";
@@ -149,7 +178,7 @@ export class AstalaVrProbeApp {
         const payload = JSON.stringify(
           {
             assetId,
-            renditions: renditions.map((r) => ({
+            renditions: effectiveRenditions.map((r) => ({
               formatId: r.formatId,
               resolution: r.resolution,
               vcodec: r.vcodec,
@@ -175,7 +204,7 @@ export class AstalaVrProbeApp {
         );
       };
 
-      const rendition720p = renditions.find((r) => r.resolution === "720p" || r.height === 720);
+      const rendition720p = effectiveRenditions.find((r) => r.resolution === "720p" || r.height === 720);
       if (rendition720p) {
         const test720Btn = document.createElement("button");
         test720Btn.id = "astalavr-test-720p-btn";
@@ -197,27 +226,32 @@ export class AstalaVrProbeApp {
         resultEl.style.display = "none";
 
         test720Btn.onclick = () => {
+          // Freeze scheduled polling immediately so DOM result UI is not destroyed
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = undefined;
+          }
+
           test720Btn.disabled = true;
           test720Btn.textContent = "⏳ Testing 720p metadata in browser...";
           resultEl.style.display = "none";
 
-          import("./astalavr.js").then(({ testBrowserMedia720p }) => {
-            testBrowserMedia720p(rendition720p.fullDirectUrl).then((res) => {
-              test720Btn.disabled = false;
-              test720Btn.textContent = "▶ Test 720p in browser";
-              resultEl.style.display = "block";
+          testBrowserMedia720p(rendition720p.fullDirectUrl).then((res) => {
+            test720Btn.disabled = false;
+            test720Btn.textContent = "▶ Test 720p in browser";
+            resultEl.style.display = "block";
 
-              if (res.pass) {
-                resultEl.style.backgroundColor = "#065f46";
-                resultEl.style.color = "#d1fae5";
-                const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
-                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
-              } else {
-                resultEl.style.backgroundColor = "#7f1d1d";
-                resultEl.style.color = "#fee2e2";
-                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
-              }
-            });
+            if (res.pass) {
+              resultEl.style.backgroundColor = "#065f46";
+              resultEl.style.color = "#d1fae5";
+              const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+              resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
+            } else {
+              resultEl.style.backgroundColor = "#7f1d1d";
+              resultEl.style.color = "#fee2e2";
+              resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
+            }
           });
         };
 

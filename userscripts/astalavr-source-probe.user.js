@@ -14,30 +14,13 @@
 "use strict";
 (() => {
   var __defProp = Object.defineProperty;
-  var __getOwnPropNames = Object.getOwnPropertyNames;
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-  var __esm = (fn, res, err) => function __init() {
-    if (err) throw err[0];
-    try {
-      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-    } catch (e) {
-      throw err = [e], e;
-    }
-  };
-  var __export = (target, all) => {
-    for (var name in all)
-      __defProp(target, name, { get: all[name], enumerable: true });
-  };
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
   // companion/src/astalavr.ts
-  var astalavr_exports = {};
-  __export(astalavr_exports, {
-    detectAstalaVrPage: () => detectAstalaVrPage,
-    extractAstalaVrVideoId: () => extractAstalaVrVideoId,
-    parseAstalaVrDomRenditions: () => parseAstalaVrDomRenditions,
-    testBrowserMedia720p: () => testBrowserMedia720p
-  });
+  var ASTALAVR_URL_PATTERNS = [
+    /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)?astalavr\.com\/(?:[a-z]{2}\/)?videos\/([a-zA-Z0-9]+)/i
+  ];
   function extractAstalaVrVideoId(url) {
     for (const pattern of ASTALAVR_URL_PATTERNS) {
       const match = url.match(pattern);
@@ -198,30 +181,26 @@
       }
     });
   }
-  var ASTALAVR_URL_PATTERNS;
-  var init_astalavr = __esm({
-    "companion/src/astalavr.ts"() {
-      "use strict";
-      ASTALAVR_URL_PATTERNS = [
-        /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)?astalavr\.com\/(?:[a-z]{2}\/)?videos\/([a-zA-Z0-9]+)/i
-      ];
-    }
-  });
 
   // companion/src/astalavr-index.ts
-  init_astalavr();
   var AstalaVrProbeApp = class {
     constructor() {
       __publicField(this, "panelElement", null);
       __publicField(this, "statusElement", null);
       __publicField(this, "contentElement", null);
       __publicField(this, "pollInterval");
+      // Page-local in-memory rendition cache
+      __publicField(this, "cachedAssetId", null);
+      __publicField(this, "cachedRenditions", []);
+      __publicField(this, "isTestingBrowserMedia", false);
     }
     init() {
       this.createPanel();
       this.checkAndRender();
       this.pollInterval = setInterval(() => {
-        this.checkAndRender();
+        if (!this.isTestingBrowserMedia) {
+          this.checkAndRender();
+        }
       }, 1e3);
     }
     createPanel() {
@@ -279,6 +258,11 @@
     checkAndRender() {
       if (!this.statusElement || !this.contentElement) return;
       const detection = detectAstalaVrPage(document);
+      const assetId = detection.videoId || "unknown";
+      if (this.cachedAssetId && this.cachedAssetId !== assetId) {
+        this.cachedAssetId = null;
+        this.cachedRenditions = [];
+      }
       if (detection.status === "WAITING_FOR_REAL_PAGE") {
         this.statusElement.textContent = "STATUS: WAITING_FOR_REAL_PAGE";
         this.statusElement.style.backgroundColor = "#b45309";
@@ -293,20 +277,34 @@
         this.contentElement.innerHTML = `<div style="color: #9ca3af;">Page loaded, waiting for &lt;dl8-video&gt; element...</div>`;
         return;
       }
-      const renditions = parseAstalaVrDomRenditions(document);
-      const assetId = detection.videoId || "unknown";
+      const liveRenditions = parseAstalaVrDomRenditions(document);
+      let effectiveRenditions = [];
+      let renditionSource = "LIVE_DOM";
+      if (liveRenditions.length > 0) {
+        effectiveRenditions = liveRenditions;
+        this.cachedAssetId = assetId;
+        this.cachedRenditions = liveRenditions;
+        renditionSource = "LIVE_DOM";
+      } else if (this.cachedAssetId === assetId && this.cachedRenditions.length > 0) {
+        effectiveRenditions = this.cachedRenditions;
+        renditionSource = "MEMORY_CACHE";
+      } else {
+        effectiveRenditions = [];
+        renditionSource = "LIVE_DOM";
+      }
       this.statusElement.textContent = "STATUS: REAL_PAGE_ACTIVE";
       this.statusElement.style.backgroundColor = "#065f46";
       this.statusElement.style.color = "#d1fae5";
       let html = `
-      <div style="margin-bottom: 6px;"><strong>ASSET_ID:</strong> ${assetId}</div>
-      <div style="margin-bottom: 8px;"><strong>RENDITION_COUNT:</strong> ${renditions.length}</div>
+      <div style="margin-bottom: 4px;"><strong>ASSET_ID:</strong> ${assetId}</div>
+      <div style="margin-bottom: 4px;"><strong>RENDITION_COUNT:</strong> ${effectiveRenditions.length}</div>
+      <div style="margin-bottom: 8px;"><strong>RENDITION_SOURCE:</strong> ${renditionSource}</div>
     `;
-      if (renditions.length === 0) {
+      if (effectiveRenditions.length === 0) {
         html += `<div style="color: #f87171;">&lt;dl8-video&gt; found, but no &lt;source&gt; tags rendered yet.</div>`;
       } else {
         html += `<div style="border-top: 1px solid #374151; padding-top: 6px; margin-bottom: 8px;">`;
-        for (const r of renditions) {
+        for (const r of effectiveRenditions) {
           html += `
           <div style="margin-bottom: 4px; padding: 4px; background: rgba(255,255,255,0.05); border-radius: 4px;">
             <div><span style="color: #34d399; font-weight: bold;">[${r.resolution}]</span> ${r.vcodec} (${r.mimeType})</div>
@@ -317,7 +315,7 @@
         html += `</div>`;
       }
       this.contentElement.innerHTML = html;
-      if (renditions.length > 0) {
+      if (effectiveRenditions.length > 0) {
         const btnContainer = document.createElement("div");
         btnContainer.style.display = "flex";
         btnContainer.style.flexDirection = "column";
@@ -337,7 +335,7 @@
           const payload = JSON.stringify(
             {
               assetId,
-              renditions: renditions.map((r) => ({
+              renditions: effectiveRenditions.map((r) => ({
                 formatId: r.formatId,
                 resolution: r.resolution,
                 vcodec: r.vcodec,
@@ -362,7 +360,7 @@
             }
           );
         };
-        const rendition720p = renditions.find((r) => r.resolution === "720p" || r.height === 720);
+        const rendition720p = effectiveRenditions.find((r) => r.resolution === "720p" || r.height === 720);
         if (rendition720p) {
           const test720Btn = document.createElement("button");
           test720Btn.id = "astalavr-test-720p-btn";
@@ -382,25 +380,28 @@
           resultEl.style.borderRadius = "4px";
           resultEl.style.display = "none";
           test720Btn.onclick = () => {
+            this.isTestingBrowserMedia = true;
+            if (this.pollInterval) {
+              clearInterval(this.pollInterval);
+              this.pollInterval = void 0;
+            }
             test720Btn.disabled = true;
             test720Btn.textContent = "\u23F3 Testing 720p metadata in browser...";
             resultEl.style.display = "none";
-            Promise.resolve().then(() => (init_astalavr(), astalavr_exports)).then(({ testBrowserMedia720p: testBrowserMedia720p2 }) => {
-              testBrowserMedia720p2(rendition720p.fullDirectUrl).then((res) => {
-                test720Btn.disabled = false;
-                test720Btn.textContent = "\u25B6 Test 720p in browser";
-                resultEl.style.display = "block";
-                if (res.pass) {
-                  resultEl.style.backgroundColor = "#065f46";
-                  resultEl.style.color = "#d1fae5";
-                  const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
-                  resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
-                } else {
-                  resultEl.style.backgroundColor = "#7f1d1d";
-                  resultEl.style.color = "#fee2e2";
-                  resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
-                }
-              });
+            testBrowserMedia720p(rendition720p.fullDirectUrl).then((res) => {
+              test720Btn.disabled = false;
+              test720Btn.textContent = "\u25B6 Test 720p in browser";
+              resultEl.style.display = "block";
+              if (res.pass) {
+                resultEl.style.backgroundColor = "#065f46";
+                resultEl.style.color = "#d1fae5";
+                const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
+              } else {
+                resultEl.style.backgroundColor = "#7f1d1d";
+                resultEl.style.color = "#fee2e2";
+                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
+              }
             });
           };
           btnContainer.appendChild(test720Btn);

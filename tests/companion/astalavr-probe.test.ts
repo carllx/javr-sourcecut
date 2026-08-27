@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Window } from "happy-dom";
 import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p } from "../../companion/src/astalavr.js";
+import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
 describe("AstalaVR Companion Probe", () => {
   it("1. Cloudflare challenge page -> status is WAITING_FOR_REAL_PAGE and not real", () => {
@@ -184,5 +185,147 @@ describe("AstalaVR Companion Probe", () => {
     expect(mockVideo.src).toBe("");
 
     spy.mockRestore();
+  });
+
+  it("8. live renditions initially = 3, subsequent DOM parse = 0 uses MEMORY_CACHE (effective 3)", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+        <source quality="1440p" src="https://cdn3.astalavr.com/qDAVn/1440P.mp4?token=token2" />
+        <source quality="2048p" src="https://cdn3.astalavr.com/qDAVn/2048P.mp4?token=token3" />
+      </dl8-video>
+    `;
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const contentEl = window.document.getElementById("astalavr-probe-content")!;
+    expect(contentEl.innerHTML).toContain("ASSET_ID:</strong> qDAVn");
+    expect(contentEl.innerHTML).toContain("RENDITION_COUNT:</strong> 3");
+    expect(contentEl.innerHTML).toContain("RENDITION_SOURCE:</strong> LIVE_DOM");
+
+    // Simulate AstalaVR player consuming/removing <source> elements after user presses play
+    window.document.querySelector("dl8-video")!.innerHTML = "";
+    expect(window.document.querySelectorAll("dl8-video source").length).toBe(0);
+
+    // Run checkAndRender cycle
+    app.checkAndRender();
+
+    // Verify MEMORY_CACHE preserves rendition count and switches source label
+    expect(contentEl.innerHTML).toContain("ASSET_ID:</strong> qDAVn");
+    expect(contentEl.innerHTML).toContain("RENDITION_COUNT:</strong> 3");
+    expect(contentEl.innerHTML).toContain("RENDITION_SOURCE:</strong> MEMORY_CACHE");
+    expect(contentEl.innerHTML).toContain("[720p]");
+    expect(contentEl.innerHTML).toContain("[1440p]");
+    expect(contentEl.innerHTML).toContain("[2048p]");
+
+    app.destroy();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
+  });
+
+  it("9. assetId changes -> old memory cache is immediately invalidated and not reused", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+      </dl8-video>
+    `;
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const contentEl = window.document.getElementById("astalavr-probe-content")!;
+    expect(contentEl.innerHTML).toContain("ASSET_ID:</strong> qDAVn");
+    expect(contentEl.innerHTML).toContain("RENDITION_COUNT:</strong> 1");
+
+    // Change location to a new video asset without any rendered sources
+    (window as any).location.href = "https://astalavr.com/videos/OTHER123/new-title";
+    window.document.body.innerHTML = `<dl8-video title="Other Video"></dl8-video>`;
+
+    app.checkAndRender();
+
+    expect(contentEl.innerHTML).toContain("ASSET_ID:</strong> OTHER123");
+    expect(contentEl.innerHTML).toContain("RENDITION_COUNT:</strong> 0");
+    expect(contentEl.innerHTML).toContain("no &lt;source&gt; tags rendered yet");
+
+    app.destroy();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
+  });
+
+  it("10. clicking Test 720p in browser stops scheduled polling so result UI is preserved", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+      </dl8-video>
+    `;
+
+    const mockVideo: any = {
+      preload: "",
+      src: "",
+      duration: 543.21,
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onloadedmetadata) {
+            mockVideo.onloadedmetadata();
+          }
+        }, 50);
+      },
+      removeAttribute: () => {},
+      remove: () => {},
+    };
+
+    const origCreateElement = window.document.createElement.bind(window.document);
+    const spy = vi.spyOn(window.document, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") return mockVideo as any;
+      return origCreateElement(tag);
+    });
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const testBtn = window.document.getElementById("astalavr-test-720p-btn") as HTMLButtonElement;
+    expect(testBtn).not.toBeNull();
+
+    // Click test button
+    testBtn.click();
+
+    // Wait for async test completion
+    await new Promise((r) => setTimeout(r, 100));
+
+    const resultEl = window.document.getElementById("astalavr-test-720p-result")!;
+    expect(resultEl.style.display).toBe("block");
+    expect(resultEl.innerHTML).toContain("720P_BROWSER_MEDIA_TEST=PASS");
+    expect(resultEl.innerHTML).toContain("DURATION=543.21s");
+
+    // In a regular cycle, mutating DOM shouldn't re-render and overwrite test result because polling stopped
+    window.document.querySelector("dl8-video")!.innerHTML = "";
+    // Wait an extra interval
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(window.document.getElementById("astalavr-test-720p-result")!.innerHTML).toContain("720P_BROWSER_MEDIA_TEST=PASS");
+
+    app.destroy();
+    spy.mockRestore();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
   });
 });
