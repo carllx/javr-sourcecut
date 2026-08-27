@@ -460,6 +460,342 @@
       pairFailureKind: pageBytesMatch ? void 0 : "PAGE_BYTES_MISMATCH"
     };
   }
+  async function download720pProxyFile(cachedRenditions, perfObj, fileHandle, onProgress, customGmFn, customFetchFn) {
+    const RANGE_SIZE = 1048576;
+    const targetRendition = cachedRenditions.find(
+      (r) => r.resolution === "720p" || r.height === 720
+    );
+    if (!targetRendition) {
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "NO_PLAYBACK_RESOURCE"
+      };
+    }
+    let latestPlaybackUrl = "";
+    try {
+      const cachedParsed = new URL(targetRendition.fullDirectUrl);
+      const cachedPath = cachedParsed.pathname.toLowerCase();
+      const entries = perfObj && typeof perfObj.getEntriesByType === "function" ? perfObj.getEntriesByType("resource") : [];
+      let latestTime = -1;
+      for (const entry of entries) {
+        const rawUrl = entry.name;
+        if (!rawUrl || typeof rawUrl !== "string") continue;
+        const initiator = (entry.initiatorType || "").toLowerCase();
+        if (initiator !== "video" && initiator !== "media") continue;
+        let p;
+        try {
+          p = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        } catch {
+          continue;
+        }
+        if (p.hostname === "cdn3.astalavr.com" && p.pathname.toLowerCase() === cachedPath) {
+          const entryTime = entry.responseEnd || entry.startTime || 0;
+          if (entryTime >= latestTime) {
+            latestTime = entryTime;
+            latestPlaybackUrl = rawUrl;
+          }
+        }
+      }
+    } catch {
+    }
+    if (!latestPlaybackUrl) {
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "NO_PLAYBACK_RESOURCE"
+      };
+    }
+    let writable;
+    try {
+      writable = await fileHandle.createWritable();
+    } catch {
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "FILE_WRITE_ERROR"
+      };
+    }
+    const safeAbortWritable = async () => {
+      try {
+        if (writable && typeof writable.abort === "function") {
+          await writable.abort();
+        }
+      } catch {
+      }
+    };
+    const gmFn = customGmFn || (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : void 0);
+    if (!gmFn) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "GM_METADATA_FAILED"
+      };
+    }
+    const gmMeta = await new Promise((resolve) => {
+      let settled = false;
+      let handle = null;
+      const finish = (res) => {
+        if (!settled) {
+          settled = true;
+          resolve(res);
+        }
+      };
+      const safeAbort = () => {
+        try {
+          if (handle && typeof handle.abort === "function") {
+            handle.abort();
+          }
+        } catch {
+        }
+      };
+      const validateGmHeaders = (status, responseHeaders) => {
+        safeAbort();
+        if (status !== 206) {
+          finish({ pass: false });
+          return;
+        }
+        const rawCr = parseHeaderValue(responseHeaders, "content-range");
+        if (!rawCr) {
+          finish({ pass: false });
+          return;
+        }
+        const m = rawCr.trim().match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+        if (!m) {
+          finish({ pass: false });
+          return;
+        }
+        const start = parseInt(m[1], 10);
+        const end = parseInt(m[2], 10);
+        const total = parseInt(m[3], 10);
+        if (start === 0 && end === 0 && total > 0) {
+          finish({ pass: true, totalBytes: total });
+        } else {
+          finish({ pass: false });
+        }
+      };
+      try {
+        handle = gmFn({
+          method: "GET",
+          url: latestPlaybackUrl,
+          headers: {
+            Range: "bytes=0-0"
+          },
+          responseType: "arraybuffer",
+          timeout: 1e4,
+          onreadystatechange: (res) => {
+            if (res.readyState >= 2 && !settled) {
+              if (res.status && res.status > 0) {
+                validateGmHeaders(res.status, res.responseHeaders || "");
+              }
+            }
+          },
+          onload: (res) => {
+            if (!settled) {
+              validateGmHeaders(res.status, res.responseHeaders || "");
+            }
+          },
+          onerror: () => {
+            if (!settled) {
+              safeAbort();
+              finish({ pass: false });
+            }
+          },
+          ontimeout: () => {
+            if (!settled) {
+              safeAbort();
+              finish({ pass: false });
+            }
+          },
+          onabort: () => {
+            if (!settled) {
+              finish({ pass: false });
+            }
+          }
+        });
+      } catch {
+        safeAbort();
+        finish({ pass: false });
+      }
+    });
+    if (!gmMeta.pass || !gmMeta.totalBytes || gmMeta.totalBytes <= 0) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "GM_METADATA_FAILED"
+      };
+    }
+    const TOTAL = gmMeta.totalBytes;
+    const pageFetchFn = customFetchFn || (typeof fetch !== "undefined" ? fetch : void 0);
+    if (!pageFetchFn) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten: 0,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_FETCH_ERROR"
+      };
+    }
+    let bytesWritten = 0;
+    while (bytesWritten < TOTAL) {
+      const rangeStart = bytesWritten;
+      const rangeEnd = Math.min(rangeStart + RANGE_SIZE - 1, TOTAL - 1);
+      const expectedChunkLength = rangeEnd - rangeStart + 1;
+      let pageResponse;
+      try {
+        pageResponse = await pageFetchFn(latestPlaybackUrl, {
+          headers: {
+            Range: `bytes=${rangeStart}-${rangeEnd}`
+          }
+        });
+      } catch {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_FETCH_ERROR"
+        };
+      }
+      if (pageResponse.status !== 206) {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_STATUS_NOT_206"
+        };
+      }
+      const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
+      if (!clRaw) {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_CONTENT_LENGTH_MISSING"
+        };
+      }
+      const parsedCl = parseInt(clRaw.trim(), 10);
+      if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_CONTENT_LENGTH_MISMATCH"
+        };
+      }
+      if (!pageResponse.body || typeof pageResponse.body.getReader !== "function") {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_STREAM_UNAVAILABLE"
+        };
+      }
+      const reader = pageResponse.body.getReader();
+      let rangeBytesRead = 0;
+      try {
+        while (rangeBytesRead < expectedChunkLength) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            const remainingForChunk = expectedChunkLength - rangeBytesRead;
+            let chunkToWrite;
+            if (value.byteLength > remainingForChunk) {
+              chunkToWrite = value.subarray(0, remainingForChunk);
+              rangeBytesRead += remainingForChunk;
+              try {
+                await reader.cancel();
+              } catch {
+              }
+            } else {
+              chunkToWrite = value;
+              rangeBytesRead += value.byteLength;
+            }
+            try {
+              await writable.write(chunkToWrite);
+            } catch {
+              try {
+                await reader.cancel();
+              } catch {
+              }
+              await safeAbortWritable();
+              return {
+                pass: false,
+                bytesWritten,
+                totalBytes: TOTAL,
+                failureKind: "FILE_WRITE_ERROR"
+              };
+            }
+          }
+        }
+      } catch {
+        try {
+          await reader.cancel();
+        } catch {
+        }
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_FETCH_ERROR"
+        };
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+        }
+      }
+      if (rangeBytesRead !== expectedChunkLength) {
+        await safeAbortWritable();
+        return {
+          pass: false,
+          bytesWritten,
+          totalBytes: TOTAL,
+          failureKind: "PAGE_BODY_LENGTH_MISMATCH"
+        };
+      }
+      bytesWritten += rangeBytesRead;
+      if (onProgress) {
+        onProgress({
+          bytesWritten,
+          totalBytes: TOTAL,
+          percent: Math.min(100, bytesWritten / TOTAL * 100)
+        });
+      }
+    }
+    if (bytesWritten !== TOTAL) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_BODY_LENGTH_MISMATCH"
+      };
+    }
+    try {
+      await writable.close();
+    } catch {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "FILE_WRITE_ERROR"
+      };
+    }
+    return {
+      pass: true,
+      bytesWritten,
+      totalBytes: TOTAL
+    };
+  }
 
   // companion/src/astalavr-index.ts
   var AstalaVrProbeApp = class {
@@ -629,6 +965,127 @@
       `;
       }
       this.contentElement.innerHTML = html;
+      if (effectiveRenditions.length > 0) {
+        const downloadContainer = document.createElement("div");
+        downloadContainer.id = "astalavr-download-action-container";
+        downloadContainer.style.marginTop = "8px";
+        downloadContainer.style.borderTop = "1px solid #374151";
+        downloadContainer.style.paddingTop = "8px";
+        const downloadBtn = document.createElement("button");
+        downloadBtn.id = "astalavr-download-720p-btn";
+        downloadBtn.textContent = "\u2B07 Download 720p proxy";
+        downloadBtn.style.width = "100%";
+        downloadBtn.style.padding = "8px 12px";
+        downloadBtn.style.backgroundColor = "#2563eb";
+        downloadBtn.style.color = "#ffffff";
+        downloadBtn.style.border = "none";
+        downloadBtn.style.borderRadius = "4px";
+        downloadBtn.style.cursor = "pointer";
+        downloadBtn.style.fontWeight = "bold";
+        downloadBtn.style.fontSize = "12px";
+        const downloadResultEl = document.createElement("div");
+        downloadResultEl.id = "astalavr-download-720p-result";
+        downloadResultEl.style.fontSize = "11px";
+        downloadResultEl.style.marginTop = "6px";
+        downloadResultEl.style.padding = "6px 8px";
+        downloadResultEl.style.borderRadius = "4px";
+        downloadResultEl.style.display = "none";
+        downloadResultEl.style.lineHeight = "1.4";
+        downloadBtn.onclick = async () => {
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = void 0;
+          }
+          downloadBtn.disabled = true;
+          downloadResultEl.style.display = "block";
+          downloadResultEl.style.backgroundColor = "#1e293b";
+          downloadResultEl.style.color = "#93c5fd";
+          downloadResultEl.innerHTML = `<div>Preparing download picker...</div>`;
+          if (typeof window.showSaveFilePicker !== "function") {
+            downloadBtn.disabled = false;
+            downloadResultEl.style.backgroundColor = "#7f1d1d";
+            downloadResultEl.style.color = "#fee2e2";
+            downloadResultEl.innerHTML = `
+            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
+            <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
+            <div style="font-size: 10px; color: #fca5a5; margin-top: 2px;">(showSaveFilePicker API is not supported in this browser environment)</div>
+          `;
+            return;
+          }
+          let fileHandle;
+          try {
+            const suggestedName = assetId ? `${assetId}-720p.mp4` : "astalavr-720p.mp4";
+            fileHandle = await window.showSaveFilePicker({
+              suggestedName,
+              types: [
+                {
+                  description: "MP4 Video",
+                  accept: { "video/mp4": [".mp4"] }
+                }
+              ]
+            });
+          } catch (err) {
+            downloadBtn.disabled = false;
+            if (err && err.name === "AbortError") {
+              downloadResultEl.style.backgroundColor = "#1e293b";
+              downloadResultEl.style.color = "#f1f5f9";
+              downloadResultEl.innerHTML = `
+              <div><strong>PROXY_DOWNLOAD=</strong>CANCELLED</div>
+              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_CANCELLED</div>
+            `;
+            } else {
+              downloadResultEl.style.backgroundColor = "#7f1d1d";
+              downloadResultEl.style.color = "#fee2e2";
+              downloadResultEl.innerHTML = `
+              <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
+              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
+            `;
+            }
+            return;
+          }
+          downloadResultEl.style.backgroundColor = "#1e293b";
+          downloadResultEl.style.color = "#60a5fa";
+          downloadResultEl.innerHTML = `<div>Starting sequential 1 MiB stream...</div>`;
+          const res = await download720pProxyFile(
+            effectiveRenditions,
+            typeof performance !== "undefined" ? performance : {},
+            fileHandle,
+            (progress) => {
+              downloadResultEl.innerHTML = `
+              <div style="font-weight: bold;">Downloading 720p proxy: ${progress.percent.toFixed(1)}%</div>
+              <div style="color: #9ca3af;">${progress.bytesWritten} / ${progress.totalBytes} bytes</div>
+            `;
+            }
+          );
+          downloadBtn.disabled = false;
+          if (res.pass) {
+            downloadResultEl.style.backgroundColor = "#065f46";
+            downloadResultEl.style.color = "#d1fae5";
+            downloadResultEl.innerHTML = `
+            <div><strong>PROXY_DOWNLOAD=</strong>PASS</div>
+            <div><strong>RENDITION=</strong>720p</div>
+            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
+            <div><strong>TOTAL_BYTES=</strong>${res.totalBytes ?? res.bytesWritten}</div>
+          `;
+          } else {
+            downloadResultEl.style.backgroundColor = "#7f1d1d";
+            downloadResultEl.style.color = "#fee2e2";
+            let failHtml = `
+            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
+            <div><strong>FAILURE_KIND=</strong>${res.failureKind || "PAGE_FETCH_ERROR"}</div>
+            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
+          `;
+            if (res.totalBytes) {
+              failHtml += `<div><strong>TOTAL_BYTES=</strong>${res.totalBytes}</div>`;
+            }
+            downloadResultEl.innerHTML = failHtml;
+          }
+        };
+        downloadContainer.appendChild(downloadBtn);
+        downloadContainer.appendChild(downloadResultEl);
+        this.contentElement.appendChild(downloadContainer);
+      }
       if (effectiveRenditions.length > 0) {
         const devDetails = document.createElement("details");
         devDetails.id = "astalavr-dev-diagnostics";

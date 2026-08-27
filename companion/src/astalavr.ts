@@ -1527,4 +1527,421 @@ export async function testActualPlaybackPaired1MiB(
   };
 }
 
+export interface AstalaVrProxyDownloadProgress {
+  bytesWritten: number;
+  totalBytes: number;
+  percent: number;
+}
+
+export type AstalaVrProxyDownloadFailureKind =
+  | "NO_PLAYBACK_RESOURCE"
+  | "FILE_PICKER_UNAVAILABLE"
+  | "FILE_PICKER_CANCELLED"
+  | "GM_METADATA_FAILED"
+  | "PAGE_FETCH_ERROR"
+  | "PAGE_STATUS_NOT_206"
+  | "PAGE_CONTENT_LENGTH_MISSING"
+  | "PAGE_CONTENT_LENGTH_MISMATCH"
+  | "PAGE_STREAM_UNAVAILABLE"
+  | "PAGE_BODY_LENGTH_MISMATCH"
+  | "FILE_WRITE_ERROR";
+
+export interface AstalaVrProxyDownloadResult {
+  pass: boolean;
+  bytesWritten: number;
+  totalBytes?: number;
+  failureKind?: AstalaVrProxyDownloadFailureKind;
+}
+
+export async function download720pProxyFile(
+  cachedRenditions: AstalaVrRenditionSummary[],
+  perfObj: Performance,
+  fileHandle: any,
+  onProgress?: (p: AstalaVrProxyDownloadProgress) => void,
+  customGmFn?: typeof GM_xmlhttpRequest,
+  customFetchFn?: typeof fetch
+): Promise<AstalaVrProxyDownloadResult> {
+  const RANGE_SIZE = 1048576; // 1 MiB proven range size
+
+  const targetRendition = cachedRenditions.find(
+    (r) => r.resolution === "720p" || r.height === 720
+  );
+
+  if (!targetRendition) {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "NO_PLAYBACK_RESOURCE",
+    };
+  }
+
+  // Find latest actual playback URL matching 720p path
+  let latestPlaybackUrl = "";
+  try {
+    const cachedParsed = new URL(targetRendition.fullDirectUrl);
+    const cachedPath = cachedParsed.pathname.toLowerCase();
+
+    const entries =
+      perfObj && typeof perfObj.getEntriesByType === "function"
+        ? (perfObj.getEntriesByType("resource") as PerformanceResourceTiming[])
+        : [];
+
+    let latestTime = -1;
+    for (const entry of entries) {
+      const rawUrl = entry.name;
+      if (!rawUrl || typeof rawUrl !== "string") continue;
+      const initiator = (entry.initiatorType || "").toLowerCase();
+      if (initiator !== "video" && initiator !== "media") continue;
+
+      let p: URL;
+      try {
+        p = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+      } catch {
+        continue;
+      }
+
+      if (p.hostname === "cdn3.astalavr.com" && p.pathname.toLowerCase() === cachedPath) {
+        const entryTime = entry.responseEnd || entry.startTime || 0;
+        if (entryTime >= latestTime) {
+          latestTime = entryTime;
+          latestPlaybackUrl = rawUrl;
+        }
+      }
+    }
+  } catch {}
+
+  if (!latestPlaybackUrl) {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "NO_PLAYBACK_RESOURCE",
+    };
+  }
+
+  let writable: any;
+  try {
+    writable = await fileHandle.createWritable();
+  } catch {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "FILE_WRITE_ERROR",
+    };
+  }
+
+  const safeAbortWritable = async () => {
+    try {
+      if (writable && typeof writable.abort === "function") {
+        await writable.abort();
+      }
+    } catch {}
+  };
+
+  // ==========================================
+  // PHASE 1: GM Metadata Plane (bytes=0-0) -> TOTAL
+  // ==========================================
+  const gmFn =
+    customGmFn ||
+    (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : undefined);
+
+  if (!gmFn) {
+    await safeAbortWritable();
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "GM_METADATA_FAILED",
+    };
+  }
+
+  interface GmMetaResult {
+    pass: boolean;
+    totalBytes?: number;
+  }
+
+  const gmMeta: GmMetaResult = await new Promise<GmMetaResult>((resolve) => {
+    let settled = false;
+    let handle: any = null;
+
+    const finish = (res: GmMetaResult) => {
+      if (!settled) {
+        settled = true;
+        resolve(res);
+      }
+    };
+
+    const safeAbort = () => {
+      try {
+        if (handle && typeof handle.abort === "function") {
+          handle.abort();
+        }
+      } catch {}
+    };
+
+    const validateGmHeaders = (status: number, responseHeaders: string) => {
+      safeAbort();
+      if (status !== 206) {
+        finish({ pass: false });
+        return;
+      }
+      const rawCr = parseHeaderValue(responseHeaders, "content-range");
+      if (!rawCr) {
+        finish({ pass: false });
+        return;
+      }
+      const m = rawCr.trim().match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+      if (!m) {
+        finish({ pass: false });
+        return;
+      }
+      const start = parseInt(m[1], 10);
+      const end = parseInt(m[2], 10);
+      const total = parseInt(m[3], 10);
+      if (start === 0 && end === 0 && total > 0) {
+        finish({ pass: true, totalBytes: total });
+      } else {
+        finish({ pass: false });
+      }
+    };
+
+    try {
+      handle = gmFn({
+        method: "GET",
+        url: latestPlaybackUrl,
+        headers: {
+          Range: "bytes=0-0",
+        },
+        responseType: "arraybuffer",
+        timeout: 10000,
+        onreadystatechange: (res: any) => {
+          if (res.readyState >= 2 && !settled) {
+            if (res.status && res.status > 0) {
+              validateGmHeaders(res.status, res.responseHeaders || "");
+            }
+          }
+        },
+        onload: (res: any) => {
+          if (!settled) {
+            validateGmHeaders(res.status, res.responseHeaders || "");
+          }
+        },
+        onerror: () => {
+          if (!settled) {
+            safeAbort();
+            finish({ pass: false });
+          }
+        },
+        ontimeout: () => {
+          if (!settled) {
+            safeAbort();
+            finish({ pass: false });
+          }
+        },
+        onabort: () => {
+          if (!settled) {
+            finish({ pass: false });
+          }
+        },
+      });
+    } catch {
+      safeAbort();
+      finish({ pass: false });
+    }
+  });
+
+  if (!gmMeta.pass || !gmMeta.totalBytes || gmMeta.totalBytes <= 0) {
+    await safeAbortWritable();
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "GM_METADATA_FAILED",
+    };
+  }
+
+  const TOTAL = gmMeta.totalBytes;
+  const pageFetchFn =
+    customFetchFn || (typeof fetch !== "undefined" ? fetch : undefined);
+
+  if (!pageFetchFn) {
+    await safeAbortWritable();
+    return {
+      pass: false,
+      bytesWritten: 0,
+      totalBytes: TOTAL,
+      failureKind: "PAGE_FETCH_ERROR",
+    };
+  }
+
+  // ==========================================
+  // PHASE 2: Sequential Page Fetch Range Stream
+  // ==========================================
+  let bytesWritten = 0;
+
+  while (bytesWritten < TOTAL) {
+    const rangeStart = bytesWritten;
+    const rangeEnd = Math.min(rangeStart + RANGE_SIZE - 1, TOTAL - 1);
+    const expectedChunkLength = rangeEnd - rangeStart + 1;
+
+    let pageResponse: Response;
+    try {
+      pageResponse = await pageFetchFn(latestPlaybackUrl, {
+        headers: {
+          Range: `bytes=${rangeStart}-${rangeEnd}`,
+        },
+      });
+    } catch {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_FETCH_ERROR",
+      };
+    }
+
+    if (pageResponse.status !== 206) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_STATUS_NOT_206",
+      };
+    }
+
+    const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
+    if (!clRaw) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_CONTENT_LENGTH_MISSING",
+      };
+    }
+
+    const parsedCl = parseInt(clRaw.trim(), 10);
+    if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_CONTENT_LENGTH_MISMATCH",
+      };
+    }
+
+    if (!pageResponse.body || typeof pageResponse.body.getReader !== "function") {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_STREAM_UNAVAILABLE",
+      };
+    }
+
+    const reader = pageResponse.body.getReader();
+    let rangeBytesRead = 0;
+
+    try {
+      while (rangeBytesRead < expectedChunkLength) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          const remainingForChunk = expectedChunkLength - rangeBytesRead;
+          let chunkToWrite: Uint8Array;
+
+          if (value.byteLength > remainingForChunk) {
+            chunkToWrite = value.subarray(0, remainingForChunk);
+            rangeBytesRead += remainingForChunk;
+            try {
+              await reader.cancel();
+            } catch {}
+          } else {
+            chunkToWrite = value;
+            rangeBytesRead += value.byteLength;
+          }
+
+          try {
+            await writable.write(chunkToWrite);
+          } catch {
+            try {
+              await reader.cancel();
+            } catch {}
+            await safeAbortWritable();
+            return {
+              pass: false,
+              bytesWritten,
+              totalBytes: TOTAL,
+              failureKind: "FILE_WRITE_ERROR",
+            };
+          }
+        }
+      }
+    } catch {
+      try {
+        await reader.cancel();
+      } catch {}
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_FETCH_ERROR",
+      };
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
+
+    if (rangeBytesRead !== expectedChunkLength) {
+      await safeAbortWritable();
+      return {
+        pass: false,
+        bytesWritten,
+        totalBytes: TOTAL,
+        failureKind: "PAGE_BODY_LENGTH_MISMATCH",
+      };
+    }
+
+    bytesWritten += rangeBytesRead;
+    if (onProgress) {
+      onProgress({
+        bytesWritten,
+        totalBytes: TOTAL,
+        percent: Math.min(100, (bytesWritten / TOTAL) * 100),
+      });
+    }
+  }
+
+  if (bytesWritten !== TOTAL) {
+    await safeAbortWritable();
+    return {
+      pass: false,
+      bytesWritten,
+      totalBytes: TOTAL,
+      failureKind: "PAGE_BODY_LENGTH_MISMATCH",
+    };
+  }
+
+  try {
+    await writable.close();
+  } catch {
+    await safeAbortWritable();
+    return {
+      pass: false,
+      bytesWritten,
+      totalBytes: TOTAL,
+      failureKind: "FILE_WRITE_ERROR",
+    };
+  }
+
+  return {
+    pass: true,
+    bytesWritten,
+    totalBytes: TOTAL,
+  };
+}
+
 

@@ -10,6 +10,7 @@ import {
   testActualPlayback720pRange,
   testActualPlaybackGmRange,
   testActualPlaybackPaired1MiB,
+  download720pProxyFile,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -2579,6 +2580,597 @@ describe("AstalaVR Companion Probe", () => {
       (globalThis as any).performance = originalPerformance;
       (globalThis as any).GM_xmlhttpRequest = originalGm;
       (globalThis as any).fetch = originalFetch;
+    });
+  });
+
+  describe("Download 720p Proxy (Browser Native File System Streaming)", () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=active_playback_token_777",
+              initiatorType: "video",
+              duration: 50,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    it("1. two+ sequential ranges produce exact concatenated file bytes and close writable", async () => {
+      const TOTAL = 2500000; // 2.5 MiB -> ranges: 0-1048575 (1 MiB), 1048576-2097151 (1 MiB), 2097152-2499999 (402848 B)
+      const writtenChunks: Uint8Array[] = [];
+      let writableClosed = false;
+      let writableAborted = false;
+
+      const mockWritable = {
+        write: vi.fn(async (chunk: Uint8Array) => {
+          writtenChunks.push(chunk);
+        }),
+        close: vi.fn(async () => {
+          writableClosed = true;
+        }),
+        abort: vi.fn(async () => {
+          writableAborted = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      // GM metadata returns 206 bytes 0-0/2500000
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Type: video/mp4\r\nContent-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const requestedRanges: string[] = [];
+
+      const mockPageFetch = vi.fn(async (_url: string, opts: any) => {
+        const range = opts.headers?.Range;
+        requestedRanges.push(range);
+        const m = range.match(/bytes=(\d+)-(\d+)/);
+        const start = parseInt(m[1], 10);
+        const end = parseInt(m[2], 10);
+        const len = end - start + 1;
+        const chunkData = new Uint8Array(len);
+        chunkData.fill(start % 255);
+
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", String(len)]]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    return { done: false, value: chunkData };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const progressEvents: any[] = [];
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        (p) => progressEvents.push(p),
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(res.bytesWritten).toBe(TOTAL);
+      expect(res.totalBytes).toBe(TOTAL);
+      expect(writableClosed).toBe(true);
+      expect(writableAborted).toBe(false);
+
+      // Verify exact ranges requested
+      expect(requestedRanges).toEqual([
+        "bytes=0-1048575",
+        "bytes=1048576-2097151",
+        "bytes=2097152-2499999",
+      ]);
+
+      // Verify total written bytes
+      const totalWritten = writtenChunks.reduce((acc, c) => acc + c.byteLength, 0);
+      expect(totalWritten).toBe(TOTAL);
+      expect(progressEvents.length).toBe(3);
+      expect(progressEvents[progressEvents.length - 1].percent).toBe(100);
+    });
+
+    it("2. handles short final range correctly with exact byte boundary slice", async () => {
+      const TOTAL = 1048577; // 1 MiB + 1 byte
+      const writtenChunks: Uint8Array[] = [];
+
+      const mockWritable = {
+        write: vi.fn(async (chunk: Uint8Array) => {
+          writtenChunks.push(chunk);
+        }),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async (_url: string, opts: any) => {
+        const range = opts.headers?.Range;
+        const m = range.match(/bytes=(\d+)-(\d+)/);
+        const start = parseInt(m[1], 10);
+        const end = parseInt(m[2], 10);
+        const len = end - start + 1;
+
+        // Simulate delivery of 10 bytes more than requested in second chunk
+        const overDelivered = new Uint8Array(len + 10);
+
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", String(len)]]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    return { done: false, value: overDelivered };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(res.bytesWritten).toBe(TOTAL);
+      const totalWritten = writtenChunks.reduce((acc, c) => acc + c.byteLength, 0);
+      expect(totalWritten).toBe(TOTAL);
+    });
+
+    it("3. HTTP 200 response fails closed, aborts writable, and stops future ranges", async () => {
+      const TOTAL = 2000000;
+      let abortCalled = false;
+
+      const mockWritable = {
+        write: vi.fn(),
+        close: vi.fn(),
+        abort: vi.fn(async () => {
+          abortCalled = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      let pageFetchCount = 0;
+      const mockPageFetch = vi.fn(async () => {
+        pageFetchCount++;
+        return {
+          status: 200, // Invalid: must be 206
+          headers: new Map([["Content-Length", "2000000"]]),
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("PAGE_STATUS_NOT_206");
+      expect(res.bytesWritten).toBe(0);
+      expect(abortCalled).toBe(true);
+      expect(pageFetchCount).toBe(1);
+    });
+
+    it("4. incorrect Content-Length stops transfer and aborts writable", async () => {
+      const TOTAL = 2000000;
+      let abortCalled = false;
+
+      const mockWritable = {
+        write: vi.fn(),
+        close: vi.fn(),
+        abort: vi.fn(async () => {
+          abortCalled = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "500"]]), // Mismatches 1048576
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("PAGE_CONTENT_LENGTH_MISMATCH");
+      expect(abortCalled).toBe(true);
+    });
+
+    it("5. short stream body stops transfer with PAGE_BODY_LENGTH_MISMATCH", async () => {
+      const TOTAL = 1048576;
+      let abortCalled = false;
+
+      const mockWritable = {
+        write: vi.fn(),
+        close: vi.fn(),
+        abort: vi.fn(async () => {
+          abortCalled = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    // Deliver only 500 bytes instead of 1048576
+                    return { done: false, value: new Uint8Array(500) };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("PAGE_BODY_LENGTH_MISMATCH");
+      expect(abortCalled).toBe(true);
+    });
+
+    it("6. write failure aborts writable and cancels active reader", async () => {
+      const TOTAL = 1048576;
+      let abortCalled = false;
+      let readerCancelCalled = false;
+
+      const mockWritable = {
+        write: vi.fn(async () => {
+          throw new Error("Disk full");
+        }),
+        close: vi.fn(),
+        abort: vi.fn(async () => {
+          abortCalled = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              return {
+                read: async () => ({ done: false, value: new Uint8Array(1000) }),
+                cancel: async () => {
+                  readerCancelCalled = true;
+                },
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("FILE_WRITE_ERROR");
+      expect(abortCalled).toBe(true);
+      expect(readerCancelCalled).toBe(true);
+    });
+
+    it("7. no request is made before explicit button click, and button click streams proxy to saveFilePicker", async () => {
+      const window = new Window({ url: "https://astalavr.com/videos/78yre/sample" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+      const originalPerformance = (globalThis as any).performance;
+      const originalGm = (globalThis as any).GM_xmlhttpRequest;
+      const originalFetch = (globalThis as any).fetch;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      (globalThis as any).performance = {
+        now: () => Date.now(),
+        getEntriesByType: (type: string) => {
+          if (type === "resource") {
+            return [
+              {
+                name: "https://cdn3.astalavr.com/78yre/720P.mp4?token=SUPER_SECRET_URL_789",
+                initiatorType: "video",
+                duration: 50,
+              },
+            ];
+          }
+          return [];
+        },
+      };
+
+      const mockWritable = {
+        write: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+
+      (window as any).showSaveFilePicker = vi.fn(async () => ({
+        createWritable: async () => mockWritable,
+      }));
+
+      let gmCallCount = 0;
+      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+        gmCallCount++;
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Range: bytes 0-0/1048576\r\n",
+            });
+          }
+        }, 10);
+        return { abort: () => {} };
+      };
+
+      let fetchCallCount = 0;
+      (globalThis as any).fetch = vi.fn(async () => {
+        fetchCallCount++;
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              let sent = false;
+              return {
+                read: async () => {
+                  if (!sent) {
+                    sent = true;
+                    return { done: false, value: new Uint8Array(1048576) };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      window.document.body.innerHTML = `
+        <dl8-video title="Sample">
+          <source quality="720p" src="https://cdn3.astalavr.com/78yre/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      // Ensure 0 requests before click
+      expect(gmCallCount).toBe(0);
+      expect(fetchCallCount).toBe(0);
+
+      const downloadBtn = window.document.getElementById("astalavr-download-720p-btn") as HTMLButtonElement;
+      expect(downloadBtn).not.toBeNull();
+
+      downloadBtn.click();
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const resultEl = window.document.getElementById("astalavr-download-720p-result")!;
+      expect(resultEl.style.display).toBe("block");
+      expect(resultEl.innerHTML).toContain("PROXY_DOWNLOAD=</strong>PASS");
+      expect(resultEl.innerHTML).toContain("RENDITION=</strong>720p");
+      expect(resultEl.innerHTML).toContain("BYTES_WRITTEN=</strong>1048576");
+      expect(resultEl.innerHTML).toContain("TOTAL_BYTES=</strong>1048576");
+
+      // Verify token confidentiality
+      expect(resultEl.innerHTML).not.toContain("SUPER_SECRET_URL_789");
+      expect(resultEl.innerHTML).not.toContain("token=");
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+      (globalThis as any).performance = originalPerformance;
+      (globalThis as any).GM_xmlhttpRequest = originalGm;
+      (globalThis as any).fetch = originalFetch;
+    });
+
+    it("8. showSaveFilePicker unavailable displays FILE_PICKER_UNAVAILABLE visibly without crashing", async () => {
+      const window = new Window({ url: "https://astalavr.com/videos/78yre/sample" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      // showSaveFilePicker is undefined
+      delete (window as any).showSaveFilePicker;
+
+      window.document.body.innerHTML = `
+        <dl8-video title="Sample">
+          <source quality="720p" src="https://cdn3.astalavr.com/78yre/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      const downloadBtn = window.document.getElementById("astalavr-download-720p-btn") as HTMLButtonElement;
+      downloadBtn.click();
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const resultEl = window.document.getElementById("astalavr-download-720p-result")!;
+      expect(resultEl.innerHTML).toContain("PROXY_DOWNLOAD=</strong>FAIL");
+      expect(resultEl.innerHTML).toContain("FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE");
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
     });
   });
 });
