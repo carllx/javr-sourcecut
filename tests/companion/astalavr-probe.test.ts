@@ -1088,6 +1088,8 @@ describe("AstalaVR Companion Probe", () => {
     let requestedUrl = "";
     let requestedHeaders: any = {};
     const oneMiBChunk = new Uint8Array(1048576);
+    const cancelSpy = vi.fn().mockResolvedValue(undefined);
+    let readCallCount = 0;
 
     const mockFetch = vi.fn().mockImplementation(async (url: string, init: any) => {
       requestedUrl = url;
@@ -1101,16 +1103,15 @@ describe("AstalaVR Companion Probe", () => {
         ]),
         body: {
           getReader: () => {
-            let delivered = false;
             return {
               read: async () => {
-                if (!delivered) {
-                  delivered = true;
+                readCallCount++;
+                if (readCallCount === 1) {
                   return { done: false, value: oneMiBChunk };
                 }
                 return { done: true, value: undefined };
               },
-              cancel: async () => {},
+              cancel: cancelSpy,
               releaseLock: () => {},
             };
           },
@@ -1129,6 +1130,8 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.bodyRead).toBe("YES");
     expect(requestedUrl).toBe("https://cdn3.astalavr.com/qDAVn/720P.mp4?token=active_playback_token_123");
     expect(requestedHeaders?.Range).toBe("bytes=0-1048575");
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+    expect(readCallCount).toBe(1);
   });
 
   it("29. testActualPlayback720pRange fails on HTTP 200 with BODY_READ=NO and cancels stream", async () => {

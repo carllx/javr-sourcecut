@@ -524,7 +524,7 @@
         if (done) break;
         if (value) {
           const remaining = MAX_BYTES_READ - bytesRead;
-          if (value.byteLength > remaining) {
+          if (value.byteLength >= remaining) {
             bytesRead += remaining;
             try {
               await reader.cancel();
