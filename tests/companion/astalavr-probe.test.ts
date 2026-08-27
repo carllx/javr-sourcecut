@@ -8,6 +8,7 @@ import {
   inspectPlaybackResources,
   testActualPlayback720p,
   testActualPlayback720pRange,
+  testActualPlaybackGmRange,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -1608,4 +1609,343 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.contentRangePresent).toBe(true);
     expect(res.contentRangeValid).toBe(false);
   });
+
+  describe("GM_xmlhttpRequest Privileged 0-0 Range Probe", () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=cached_token_123",
+      },
+    ];
+
+    const mockPerf = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=actual_token_456",
+              initiatorType: "video",
+              duration: 25,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    it("A. 206 + valid Content-Range bytes 0-0/<total> + 1 byte => PASS", async () => {
+      let requestedHeaders: Record<string, string> | undefined;
+      const oneByteBuffer = new Uint8Array([0x00]).buffer;
+
+      const mockGm = vi.fn((details: any) => {
+        requestedHeaders = details.headers;
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600\r\nContent-Length: 1",
+            });
+          }
+          if (details.onload) {
+            details.onload({
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600\r\nContent-Length: 1",
+              response: oneByteBuffer,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(mockGm).toHaveBeenCalledTimes(1);
+      expect(requestedHeaders).toEqual({ Range: "bytes=0-0" });
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(true);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangePresent).toBe(true);
+      expect(res.contentRangeValid).toBe(true);
+      expect(res.totalFileSizeParsed).toBe(true);
+      expect(res.bodyBytes).toBe(1);
+      expect(res.requestAborted).toBe(false);
+    });
+
+    it("B. HTTP 200 observed at header state => abort exactly once, body not processed, STATUS_NOT_206", async () => {
+      const abortFn = vi.fn();
+      let onloadCalled = false;
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 200,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 104857600",
+            });
+          }
+          // If not aborted or if onload fires
+          if (details.onload) {
+            onloadCalled = true;
+            details.onload({
+              status: 200,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 104857600",
+              response: new ArrayBuffer(104857600),
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(mockGm).toHaveBeenCalledTimes(1);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(false);
+      expect(res.httpStatus).toBe(200);
+      expect(res.requestAborted).toBe(true);
+      expect(res.failureKind).toBe("STATUS_NOT_206");
+    });
+
+    it("C. HTTP 403 => abort exactly once, STATUS_NOT_206", async () => {
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 403,
+              responseHeaders: "Content-Type: text/html",
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(false);
+      expect(res.httpStatus).toBe(403);
+      expect(res.requestAborted).toBe(true);
+      expect(res.failureKind).toBe("STATUS_NOT_206");
+    });
+
+    it("D. 206 but Content-Range missing => abort immediately, CONTENT_RANGE_MISSING", async () => {
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 1",
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(false);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangePresent).toBe(false);
+      expect(res.requestAborted).toBe(true);
+      expect(res.failureKind).toBe("CONTENT_RANGE_MISSING");
+    });
+
+    it("E. 206 but malformed/wrong range (e.g. bytes 1-1/1000) => abort immediately, CONTENT_RANGE_INVALID", async () => {
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 1-1/104857600",
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(false);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangePresent).toBe(true);
+      expect(res.contentRangeValid).toBe(false);
+      expect(res.totalFileSizeParsed).toBe(false);
+      expect(res.requestAborted).toBe(true);
+      expect(res.failureKind).toBe("CONTENT_RANGE_INVALID");
+    });
+
+    it("F. valid headers but body length != 1 => FAIL (BODY_LENGTH_MISMATCH)", async () => {
+      const fiveByteBuffer = new Uint8Array([1, 2, 3, 4, 5]).buffer;
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onload) {
+            details.onload({
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600",
+              response: fiveByteBuffer,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(false);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangePresent).toBe(true);
+      expect(res.contentRangeValid).toBe(true);
+      expect(res.totalFileSizeParsed).toBe(true);
+      expect(res.bodyBytes).toBe(5);
+      expect(res.failureKind).toBe("BODY_LENGTH_MISMATCH");
+    });
+
+    it("G. timeout/error => safe failure enum without leaking URL or token", async () => {
+      const mockGmError = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onerror) {
+            details.onerror(new Error("Network Error: https://cdn3.astalavr.com/secret_url?token=leaked"));
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const resError = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGmError as any);
+      expect(resError.actualPlaybackUrlFound).toBe(true);
+      expect(resError.pass).toBe(false);
+      expect(resError.failureKind).toBe("GM_REQUEST_ERROR");
+      expect(JSON.stringify(resError)).not.toContain("secret_url");
+      expect(JSON.stringify(resError)).not.toContain("token=");
+
+      const mockGmTimeout = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.ontimeout) {
+            details.ontimeout();
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const resTimeout = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGmTimeout as any);
+      expect(resTimeout.actualPlaybackUrlFound).toBe(true);
+      expect(resTimeout.pass).toBe(false);
+      expect(resTimeout.failureKind).toBe("GM_REQUEST_TIMEOUT");
+      expect(resTimeout.requestAborted).toBe(true);
+    });
+
+    it("H. clicking Test actual 0-0 Range (GM) in UI stops polling and renders safe output without leaking URL/token", async () => {
+      const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+      const originalPerformance = (globalThis as any).performance;
+      const originalGm = (globalThis as any).GM_xmlhttpRequest;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      (globalThis as any).performance = {
+        now: () => Date.now(),
+        getEntriesByType: (type: string) => {
+          if (type === "resource") {
+            return [
+              {
+                name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=ULTRA_SECRET_TOKEN_GM",
+                initiatorType: "video",
+                duration: 50,
+              },
+            ];
+          }
+          return [];
+        },
+      };
+
+      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/524288000\r\nContent-Length: 1",
+            });
+          }
+          if (details.onload) {
+            details.onload({
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/524288000\r\nContent-Length: 1",
+              response: new Uint8Array([0x01]).buffer,
+            });
+          }
+        }, 20);
+        return { abort: () => {} };
+      };
+
+      window.document.body.innerHTML = `
+        <dl8-video title="TMAVR285">
+          <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      const testGmBtn = window.document.getElementById("astalavr-test-gm-range-btn") as HTMLButtonElement;
+      expect(testGmBtn).not.toBeNull();
+
+      testGmBtn.click();
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      const resultEl = window.document.getElementById("astalavr-test-gm-range-result")!;
+      expect(resultEl.style.display).toBe("block");
+      expect(resultEl.innerHTML).toContain("GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
+      expect(resultEl.innerHTML).toContain("GM_RANGE_TEST=</strong>PASS");
+      expect(resultEl.innerHTML).toContain("GM_HTTP_STATUS=</strong>206");
+      expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_PRESENT=</strong>YES");
+      expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_VALID=</strong>YES");
+      expect(resultEl.innerHTML).toContain("GM_TOTAL_FILE_SIZE_PARSED=</strong>YES");
+      expect(resultEl.innerHTML).toContain("GM_BODY_BYTES=</strong>1");
+      expect(resultEl.innerHTML).toContain("GM_REQUEST_ABORTED=</strong>NO");
+
+      // Verify strict token & raw header confidentiality in UI output
+      expect(resultEl.innerHTML).not.toContain("ULTRA_SECRET_TOKEN_GM");
+      expect(resultEl.innerHTML).not.toContain("token=");
+      expect(resultEl.innerHTML).not.toContain("524288000"); // Total file size not displayed
+      expect(resultEl.innerHTML).not.toContain("bytes 0-0"); // Raw header not displayed
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+      (globalThis as any).performance = originalPerformance;
+      (globalThis as any).GM_xmlhttpRequest = originalGm;
+    });
+
+    it("I. userscript build header metadata has @grant GM_xmlhttpRequest and exact @connect cdn3.astalavr.com only", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const buildScriptContent = fs.readFileSync(path.resolve("companion/build.mjs"), "utf-8");
+
+      expect(buildScriptContent).toContain("@grant        GM_xmlhttpRequest");
+      expect(buildScriptContent).toContain("@connect      cdn3.astalavr.com");
+      expect(buildScriptContent).not.toContain("@connect      *");
+    });
+  });
 });
+

@@ -46,7 +46,8 @@ const ASTALAVR_HEADER = `// ==UserScript==
 // @author       carllx
 // @match        https://astalavr.com/videos/*
 // @icon         https://astalavr.com/favicon.ico
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      cdn3.astalavr.com
 // @run-at       document-end
 // ==/UserScript==
 

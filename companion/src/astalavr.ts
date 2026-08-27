@@ -810,3 +810,350 @@ export async function testActualPlayback720pRange(
     failureKind,
   };
 }
+
+export interface GmActualPlaybackRangeTestResult {
+  actualPlaybackUrlFound: boolean;
+  pass?: boolean;
+  httpStatus?: number;
+  contentRangePresent?: boolean;
+  contentRangeValid?: boolean;
+  totalFileSizeParsed?: boolean;
+  bodyBytes?: number;
+  requestAborted?: boolean;
+  failureKind?:
+    | "NO_PLAYBACK_RESOURCE"
+    | "GM_REQUEST_ERROR"
+    | "GM_REQUEST_TIMEOUT"
+    | "STATUS_NOT_206"
+    | "CONTENT_RANGE_MISSING"
+    | "CONTENT_RANGE_INVALID"
+    | "BODY_LENGTH_MISMATCH";
+}
+
+export type GmXmlHttpRequestFn = (details: {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  responseType?: string;
+  timeout?: number;
+  onreadystatechange?: (res: {
+    readyState: number;
+    status: number;
+    statusText?: string;
+    responseHeaders?: string;
+  }) => void;
+  onload?: (res: {
+    status: number;
+    statusText?: string;
+    responseHeaders?: string;
+    response?: any;
+    responseText?: string;
+  }) => void;
+  onerror?: (err: any) => void;
+  ontimeout?: () => void;
+  onabort?: () => void;
+}) => { abort: () => void } | void;
+
+export function parseHeaderValue(rawHeaders: string | undefined, headerName: string): string | null {
+  if (!rawHeaders) return null;
+  const target = headerName.toLowerCase();
+  const lines = rawHeaders.split(/[\r\n]+/);
+  for (const line of lines) {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0) {
+      const k = line.slice(0, colonIdx).trim().toLowerCase();
+      if (k === target) {
+        return line.slice(colonIdx + 1).trim();
+      }
+    }
+  }
+  return null;
+}
+
+export function testActualPlaybackGmRange(
+  cachedRenditions: AstalaVrRenditionSummary[] = [],
+  perf: Performance = typeof performance !== "undefined" ? performance : ({} as any),
+  gmFetchFn?: GmXmlHttpRequestFn,
+  timeoutMs: number = 10000
+): Promise<GmActualPlaybackRangeTestResult> {
+  return new Promise((resolve) => {
+    const fn: GmXmlHttpRequestFn | undefined =
+      gmFetchFn ||
+      (typeof (globalThis as any).GM_xmlhttpRequest === "function"
+        ? (globalThis as any).GM_xmlhttpRequest
+        : typeof (globalThis as any).GM?.xmlHttpRequest === "function"
+        ? (globalThis as any).GM.xmlHttpRequest
+        : undefined);
+
+    if (!fn) {
+      resolve({
+        actualPlaybackUrlFound: false,
+        pass: false,
+        failureKind: "NO_PLAYBACK_RESOURCE",
+      });
+      return;
+    }
+
+    const entries =
+      perf && typeof perf.getEntriesByType === "function"
+        ? (perf.getEntriesByType("resource") as PerformanceResourceTiming[])
+        : [];
+
+    const rendition720p = cachedRenditions.find((r) => r.resolution === "720p" || r.height === 720);
+    let cached720pPath = "";
+    if (rendition720p) {
+      try {
+        const cParsed = new URL(rendition720p.fullDirectUrl);
+        cached720pPath = cParsed.pathname.toLowerCase();
+      } catch {}
+    }
+
+    const matchingUrls: string[] = [];
+    for (const entry of entries) {
+      const rawUrl = entry.name;
+      if (!rawUrl || typeof rawUrl !== "string") continue;
+
+      try {
+        const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        const host = parsed.hostname;
+        const path = parsed.pathname.toLowerCase();
+        const initiator = (entry.initiatorType || "").toLowerCase();
+
+        if (
+          (initiator === "video" || initiator === "media") &&
+          host === "cdn3.astalavr.com" &&
+          cached720pPath &&
+          path === cached720pPath
+        ) {
+          matchingUrls.push(parsed.href);
+        }
+      } catch {}
+    }
+
+    if (matchingUrls.length === 0) {
+      resolve({
+        actualPlaybackUrlFound: false,
+        failureKind: "NO_PLAYBACK_RESOURCE",
+      });
+      return;
+    }
+
+    const latestPlaybackUrl = matchingUrls[matchingUrls.length - 1];
+
+    let settled = false;
+    let requestHandle: { abort: () => void } | void;
+    let requestAborted = false;
+
+    const safeAbort = () => {
+      if (!requestAborted) {
+        requestAborted = true;
+        try {
+          if (requestHandle && typeof requestHandle.abort === "function") {
+            requestHandle.abort();
+          }
+        } catch {}
+      }
+    };
+
+    const finish = (res: GmActualPlaybackRangeTestResult) => {
+      if (!settled) {
+        settled = true;
+        resolve(res);
+      }
+    };
+
+    let observedStatus: number | undefined;
+    let observedContentRangePresent: boolean | undefined;
+    let observedContentRangeValid: boolean | undefined;
+    let observedTotalFileSizeParsed: boolean | undefined;
+
+    const validateHeadersAndEarlyFail = (status: number, rawHeaders?: string): boolean => {
+      observedStatus = status;
+
+      if (status !== 206) {
+        safeAbort();
+        finish({
+          actualPlaybackUrlFound: true,
+          pass: false,
+          httpStatus: status,
+          requestAborted: true,
+          failureKind: "STATUS_NOT_206",
+        });
+        return false;
+      }
+
+      const cr = parseHeaderValue(rawHeaders, "content-range");
+      const crPresent = Boolean(cr);
+      observedContentRangePresent = crPresent;
+
+      if (!crPresent) {
+        safeAbort();
+        finish({
+          actualPlaybackUrlFound: true,
+          pass: false,
+          httpStatus: status,
+          contentRangePresent: false,
+          requestAborted: true,
+          failureKind: "CONTENT_RANGE_MISSING",
+        });
+        return false;
+      }
+
+      // Validate exact bytes 0-0/<positive total>
+      const match = cr!.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+      if (!match) {
+        safeAbort();
+        finish({
+          actualPlaybackUrlFound: true,
+          pass: false,
+          httpStatus: status,
+          contentRangePresent: true,
+          contentRangeValid: false,
+          totalFileSizeParsed: false,
+          requestAborted: true,
+          failureKind: "CONTENT_RANGE_INVALID",
+        });
+        return false;
+      }
+
+      const start = parseInt(match[1], 10);
+      const end = parseInt(match[2], 10);
+      const total = parseInt(match[3], 10);
+
+      const isValid = start === 0 && end === 0 && !isNaN(total) && total > 1;
+      observedContentRangeValid = isValid;
+      observedTotalFileSizeParsed = isValid;
+
+      if (!isValid) {
+        safeAbort();
+        finish({
+          actualPlaybackUrlFound: true,
+          pass: false,
+          httpStatus: status,
+          contentRangePresent: true,
+          contentRangeValid: false,
+          totalFileSizeParsed: false,
+          requestAborted: true,
+          failureKind: "CONTENT_RANGE_INVALID",
+        });
+        return false;
+      }
+
+      return true;
+    };
+
+    try {
+      requestHandle = fn({
+        method: "GET",
+        url: latestPlaybackUrl,
+        headers: {
+          Range: "bytes=0-0",
+        },
+        responseType: "arraybuffer",
+        timeout: timeoutMs,
+        onreadystatechange: (res) => {
+          if (res.readyState >= 2 && !settled) {
+            if (res.status && res.status > 0) {
+              const ok = validateHeadersAndEarlyFail(res.status, res.responseHeaders);
+              if (!ok) return;
+            }
+          }
+        },
+        onload: (res) => {
+          if (settled) return;
+
+          const ok = validateHeadersAndEarlyFail(res.status, res.responseHeaders);
+          if (!ok) return;
+
+          let bodyLength = 0;
+          if (res.response) {
+            if (res.response instanceof ArrayBuffer) {
+              bodyLength = res.response.byteLength;
+            } else if (ArrayBuffer.isView(res.response)) {
+              bodyLength = res.response.byteLength;
+            } else if (typeof res.response === "string") {
+              bodyLength = res.response.length;
+            }
+          } else if (typeof res.responseText === "string") {
+            bodyLength = res.responseText.length;
+          }
+
+          if (bodyLength === 1) {
+            finish({
+              actualPlaybackUrlFound: true,
+              pass: true,
+              httpStatus: res.status,
+              contentRangePresent: true,
+              contentRangeValid: true,
+              totalFileSizeParsed: true,
+              bodyBytes: 1,
+              requestAborted: false,
+            });
+          } else {
+            finish({
+              actualPlaybackUrlFound: true,
+              pass: false,
+              httpStatus: res.status,
+              contentRangePresent: true,
+              contentRangeValid: true,
+              totalFileSizeParsed: true,
+              bodyBytes: bodyLength,
+              requestAborted: false,
+              failureKind: "BODY_LENGTH_MISMATCH",
+            });
+          }
+        },
+        onerror: () => {
+          if (!settled) {
+            finish({
+              actualPlaybackUrlFound: true,
+              pass: false,
+              httpStatus: observedStatus,
+              contentRangePresent: observedContentRangePresent,
+              contentRangeValid: observedContentRangeValid,
+              totalFileSizeParsed: observedTotalFileSizeParsed,
+              requestAborted,
+              failureKind: "GM_REQUEST_ERROR",
+            });
+          }
+        },
+        ontimeout: () => {
+          if (!settled) {
+            finish({
+              actualPlaybackUrlFound: true,
+              pass: false,
+              httpStatus: observedStatus,
+              contentRangePresent: observedContentRangePresent,
+              contentRangeValid: observedContentRangeValid,
+              totalFileSizeParsed: observedTotalFileSizeParsed,
+              requestAborted: true,
+              failureKind: "GM_REQUEST_TIMEOUT",
+            });
+          }
+        },
+        onabort: () => {
+          if (!settled) {
+            finish({
+              actualPlaybackUrlFound: true,
+              pass: false,
+              httpStatus: observedStatus,
+              contentRangePresent: observedContentRangePresent,
+              contentRangeValid: observedContentRangeValid,
+              totalFileSizeParsed: observedTotalFileSizeParsed,
+              requestAborted: true,
+              failureKind: "GM_REQUEST_ERROR",
+            });
+          }
+        },
+      });
+    } catch {
+      finish({
+        actualPlaybackUrlFound: true,
+        pass: false,
+        requestAborted: true,
+        failureKind: "GM_REQUEST_ERROR",
+      });
+    }
+  });
+}
+

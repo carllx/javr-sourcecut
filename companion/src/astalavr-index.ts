@@ -6,6 +6,7 @@ import {
   inspectPlaybackResources,
   testActualPlayback720p,
   testActualPlayback720pRange,
+  testActualPlaybackGmRange,
   type AstalaVrRenditionSummary,
 } from "./astalavr.js";
 
@@ -579,6 +580,99 @@ export class AstalaVrProbeApp {
 
       btnContainer.appendChild(testRangeBtn);
       btnContainer.appendChild(testRangeResultEl);
+
+      // Add Test actual 0-0 Range via GM_xmlhttpRequest button
+      const testGmBtn = document.createElement("button");
+      testGmBtn.id = "astalavr-test-gm-range-btn";
+      testGmBtn.textContent = "▶ Test actual 0-0 Range (GM)";
+      testGmBtn.style.width = "100%";
+      testGmBtn.style.padding = "6px 12px";
+      testGmBtn.style.backgroundColor = "#059669";
+      testGmBtn.style.color = "#ffffff";
+      testGmBtn.style.border = "none";
+      testGmBtn.style.borderRadius = "4px";
+      testGmBtn.style.cursor = "pointer";
+      testGmBtn.style.fontWeight = "bold";
+
+      const testGmResultEl = document.createElement("div");
+      testGmResultEl.id = "astalavr-test-gm-range-result";
+      testGmResultEl.style.fontSize = "11px";
+      testGmResultEl.style.padding = "6px 8px";
+      testGmResultEl.style.borderRadius = "4px";
+      testGmResultEl.style.display = "none";
+      testGmResultEl.style.lineHeight = "1.4";
+
+      testGmBtn.onclick = () => {
+        // Freeze scheduled polling immediately
+        this.isTestingBrowserMedia = true;
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = undefined;
+        }
+
+        testGmBtn.disabled = true;
+        testGmBtn.textContent = "⏳ Requesting 0-0 Range via GM...";
+        testGmResultEl.style.display = "none";
+
+        testActualPlaybackGmRange(
+          effectiveRenditions,
+          typeof performance !== "undefined" ? performance : ({} as any)
+        ).then((res) => {
+          testGmBtn.disabled = false;
+          testGmBtn.textContent = "▶ Test actual 0-0 Range (GM)";
+          testGmResultEl.style.display = "block";
+
+          if (!res.actualPlaybackUrlFound) {
+            testGmResultEl.style.backgroundColor = "#1e293b";
+            testGmResultEl.style.color = "#f1f5f9";
+            testGmResultEl.innerHTML = `<div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
+            return;
+          }
+
+          if (res.pass) {
+            testGmResultEl.style.backgroundColor = "#065f46";
+            testGmResultEl.style.color = "#d1fae5";
+            testGmResultEl.innerHTML = `
+              <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>GM_RANGE_TEST=</strong>PASS</div>
+              <div><strong>GM_HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
+              <div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
+              <div><strong>GM_CONTENT_RANGE_VALID=</strong>${res.contentRangeValid ? "YES" : "NO"}</div>
+              <div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>
+              <div><strong>GM_BODY_BYTES=</strong>${res.bodyBytes ?? 0}</div>
+              <div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>
+            `;
+          } else {
+            testGmResultEl.style.backgroundColor = "#7f1d1d";
+            testGmResultEl.style.color = "#fee2e2";
+            let failDetails = `
+              <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>GM_RANGE_TEST=</strong>FAIL</div>
+              <div><strong>GM_FAILURE_KIND=</strong>${res.failureKind || "UNKNOWN"}</div>
+            `;
+            if (res.httpStatus !== undefined) {
+              failDetails += `<div><strong>GM_HTTP_STATUS=</strong>${res.httpStatus}</div>`;
+            }
+            if (res.contentRangePresent !== undefined) {
+              failDetails += `<div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>`;
+            }
+            if (res.contentRangeValid !== undefined) {
+              failDetails += `<div><strong>GM_CONTENT_RANGE_VALID=</strong>${res.contentRangeValid ? "YES" : "NO"}</div>`;
+            }
+            if (res.totalFileSizeParsed !== undefined) {
+              failDetails += `<div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>`;
+            }
+            if (res.bodyBytes !== undefined) {
+              failDetails += `<div><strong>GM_BODY_BYTES=</strong>${res.bodyBytes}</div>`;
+            }
+            failDetails += `<div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>`;
+            testGmResultEl.innerHTML = failDetails;
+          }
+        });
+      };
+
+      btnContainer.appendChild(testGmBtn);
+      btnContainer.appendChild(testGmResultEl);
 
       btnContainer.appendChild(copyBtn);
       this.contentElement.appendChild(btnContainer);
