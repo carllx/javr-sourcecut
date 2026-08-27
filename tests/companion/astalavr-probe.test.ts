@@ -2390,6 +2390,196 @@ describe("AstalaVR Companion Probe", () => {
       expect(gmRange).toBe("bytes=0-1048575");
       expect(pageRange).toBe("bytes=0-1048575");
     });
+
+    it("9. actual playback detected initially renders UNTESTED for control metadata & range data, paired PASS updates to VERIFIED", async () => {
+      const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+      const originalPerformance = (globalThis as any).performance;
+      const originalGm = (globalThis as any).GM_xmlhttpRequest;
+      const originalFetch = (globalThis as any).fetch;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      (globalThis as any).performance = {
+        now: () => Date.now(),
+        getEntriesByType: (type: string) => {
+          if (type === "resource") {
+            return [
+              {
+                name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=active_token_123",
+                initiatorType: "video",
+                duration: 50,
+              },
+            ];
+          }
+          return [];
+        },
+      };
+
+      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800\r\nContent-Length: 1048576",
+            });
+          }
+        }, 10);
+        return { abort: () => {} };
+      };
+
+      (globalThis as any).fetch = vi.fn().mockImplementation(async () => ({
+        status: 206,
+        headers: new Map([["Content-Length", "1048576"]]),
+        body: {
+          getReader: () => {
+            let sent = false;
+            return {
+              read: async () => {
+                if (!sent) {
+                  sent = true;
+                  return { done: false, value: oneMiBChunk };
+                }
+                return { done: true, value: undefined };
+              },
+              cancel: async () => {},
+              releaseLock: () => {},
+            };
+          },
+        },
+      }));
+
+      window.document.body.innerHTML = `
+        <dl8-video title="TMAVR285">
+          <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      // 1. Initially actual playback is DETECTED, but metadata and range are UNTESTED
+      const actualStatusEl = window.document.getElementById("astalavr-transport-actual-status")!;
+      const ctrlStatusEl = window.document.getElementById("astalavr-transport-control-status")!;
+      const rangeStatusEl = window.document.getElementById("astalavr-transport-range-status")!;
+
+      expect(actualStatusEl.innerHTML).toContain("Actual playback: <strong>DETECTED</strong>");
+      expect(ctrlStatusEl.innerHTML).toContain("Control metadata: <strong>UNTESTED</strong>");
+      expect(rangeStatusEl.innerHTML).toContain("Range data: <strong>UNTESTED</strong>");
+
+      // 2. Open Developer diagnostics - must not make network calls and must keep UNTESTED
+      const devDetails = window.document.getElementById("astalavr-dev-diagnostics") as HTMLDetailsElement;
+      devDetails.open = true;
+      devDetails.dispatchEvent(new window.Event("toggle"));
+
+      expect(ctrlStatusEl.innerHTML).toContain("Control metadata: <strong>UNTESTED</strong>");
+      expect(rangeStatusEl.innerHTML).toContain("Range data: <strong>UNTESTED</strong>");
+
+      // 3. Click Test paired 1MiB Range
+      const testPairBtn = window.document.getElementById("astalavr-test-pair-range-btn") as HTMLButtonElement;
+      testPairBtn.click();
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      // 4. On PASS, status updates to VERIFIED
+      expect(ctrlStatusEl.innerHTML).toContain("Control metadata: <strong>VERIFIED</strong>");
+      expect(rangeStatusEl.innerHTML).toContain("Range data: <strong>VERIFIED</strong>");
+
+      app.destroy();
+
+      // 5. New instance (simulating navigation/refresh) resets state to UNTESTED
+      const newApp = new AstalaVrProbeApp();
+      newApp.init();
+
+      const newCtrlStatusEl = window.document.getElementById("astalavr-transport-control-status")!;
+      const newRangeStatusEl = window.document.getElementById("astalavr-transport-range-status")!;
+      expect(newCtrlStatusEl.innerHTML).toContain("Control metadata: <strong>UNTESTED</strong>");
+      expect(newRangeStatusEl.innerHTML).toContain("Range data: <strong>UNTESTED</strong>");
+
+      newApp.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+      (globalThis as any).performance = originalPerformance;
+      (globalThis as any).GM_xmlhttpRequest = originalGm;
+      (globalThis as any).fetch = originalFetch;
+    });
+
+    it("10. paired FAIL updates transport status to FAILED", async () => {
+      const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+      const originalPerformance = (globalThis as any).performance;
+      const originalGm = (globalThis as any).GM_xmlhttpRequest;
+      const originalFetch = (globalThis as any).fetch;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      (globalThis as any).performance = {
+        now: () => Date.now(),
+        getEntriesByType: (type: string) => {
+          if (type === "resource") {
+            return [
+              {
+                name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=active_token_123",
+                initiatorType: "video",
+                duration: 50,
+              },
+            ];
+          }
+          return [];
+        },
+      };
+
+      // GM returns status 403 (FAIL)
+      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 403,
+              responseHeaders: "Content-Type: text/html",
+            });
+          }
+        }, 10);
+        return { abort: () => {} };
+      };
+
+      (globalThis as any).fetch = vi.fn();
+
+      window.document.body.innerHTML = `
+        <dl8-video title="TMAVR285">
+          <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      const ctrlStatusEl = window.document.getElementById("astalavr-transport-control-status")!;
+      const rangeStatusEl = window.document.getElementById("astalavr-transport-range-status")!;
+
+      expect(ctrlStatusEl.innerHTML).toContain("Control metadata: <strong>UNTESTED</strong>");
+      expect(rangeStatusEl.innerHTML).toContain("Range data: <strong>UNTESTED</strong>");
+
+      const testPairBtn = window.document.getElementById("astalavr-test-pair-range-btn") as HTMLButtonElement;
+      testPairBtn.click();
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      expect(ctrlStatusEl.innerHTML).toContain("Control metadata: <strong>FAILED</strong>");
+      expect(rangeStatusEl.innerHTML).toContain("Range data: <strong>FAILED</strong>");
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+      (globalThis as any).performance = originalPerformance;
+      (globalThis as any).GM_xmlhttpRequest = originalGm;
+      (globalThis as any).fetch = originalFetch;
+    });
   });
 });
 

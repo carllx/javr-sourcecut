@@ -472,6 +472,8 @@
       __publicField(this, "cachedAssetId", null);
       __publicField(this, "cachedRenditions", []);
       __publicField(this, "isTestingBrowserMedia", false);
+      // Ephemeral in-memory transport verification state for current page session
+      __publicField(this, "transportVerificationState", "UNTESTED");
     }
     init() {
       this.createPanel();
@@ -613,13 +615,15 @@
         `;
         }
         html += `</div>`;
+        const controlMetaStatus = this.transportVerificationState;
+        const rangeDataStatus = this.transportVerificationState;
         html += `
         <div id="astalavr-transport-status-section" style="border-top: 1px solid #374151; padding-top: 6px; margin-bottom: 8px;">
           <div style="font-weight: bold; color: #60a5fa; margin-bottom: 4px;">Browser transport</div>
           <div style="font-size: 11px; line-height: 1.6;">
-            <div>Actual playback: <strong>${actualPlaybackDetected ? "DETECTED" : "WAITING"}</strong></div>
-            <div>Control metadata: <strong>${actualPlaybackDetected ? "VERIFIED" : "NOT VERIFIED"}</strong></div>
-            <div>Range data: <strong>${actualPlaybackDetected ? "VERIFIED" : "NOT VERIFIED"}</strong></div>
+            <div id="astalavr-transport-actual-status">Actual playback: <strong>${actualPlaybackDetected ? "DETECTED" : "WAITING"}</strong></div>
+            <div id="astalavr-transport-control-status">Control metadata: <strong>${controlMetaStatus}</strong></div>
+            <div id="astalavr-transport-range-status">Range data: <strong>${rangeDataStatus}</strong></div>
           </div>
         </div>
       `;
@@ -665,6 +669,12 @@
         testPairResultEl.style.borderRadius = "4px";
         testPairResultEl.style.display = "none";
         testPairResultEl.style.lineHeight = "1.4";
+        const updateTransportStatusLabels = () => {
+          const ctrlEl = document.getElementById("astalavr-transport-control-status");
+          if (ctrlEl) ctrlEl.innerHTML = `Control metadata: <strong>${this.transportVerificationState}</strong>`;
+          const rangeEl = document.getElementById("astalavr-transport-range-status");
+          if (rangeEl) rangeEl.innerHTML = `Range data: <strong>${this.transportVerificationState}</strong>`;
+        };
         testPairBtn.onclick = () => {
           this.isTestingBrowserMedia = true;
           if (this.pollInterval) {
@@ -682,12 +692,16 @@
             testPairBtn.textContent = "\u25B6 Test paired 1MiB Range";
             testPairResultEl.style.display = "block";
             if (!res.actualPlaybackUrlFound) {
+              this.transportVerificationState = "FAILED";
+              updateTransportStatusLabels();
               testPairResultEl.style.backgroundColor = "#1e293b";
               testPairResultEl.style.color = "#f1f5f9";
               testPairResultEl.innerHTML = `<div><strong>PAIR_ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
               return;
             }
             if (res.pass) {
+              this.transportVerificationState = "VERIFIED";
+              updateTransportStatusLabels();
               testPairResultEl.style.backgroundColor = "#065f46";
               testPairResultEl.style.color = "#d1fae5";
               testPairResultEl.innerHTML = `
@@ -705,6 +719,8 @@
               <div><strong>PAGE_MAX_BYTES_READ=</strong>${res.pageMaxBytesRead}</div>
             `;
             } else {
+              this.transportVerificationState = "FAILED";
+              updateTransportStatusLabels();
               testPairResultEl.style.backgroundColor = "#7f1d1d";
               testPairResultEl.style.color = "#fee2e2";
               let failDetails = `
