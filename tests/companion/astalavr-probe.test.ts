@@ -1362,4 +1362,41 @@ describe("AstalaVR Companion Probe", () => {
     (globalThis as any).performance = originalPerformance;
     (globalThis as any).fetch = originalFetch;
   });
+
+  it("34. testActualPlayback720pRange fails closed with STREAM_UNAVAILABLE without calling arrayBuffer when response.body is null", async () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf: any = {
+      getEntriesByType: () => [{ name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1", initiatorType: "video" }],
+    };
+
+    const arrayBufferSpy = vi.fn().mockResolvedValue(new ArrayBuffer(1048576));
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      status: 206,
+      headers: new Map([
+        ["Content-Range", "bytes 0-1048575/99999999"],
+      ]),
+      body: null,
+      arrayBuffer: arrayBufferSpy,
+    }));
+
+    const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(false);
+    expect(res.httpStatus).toBe(206);
+    expect(res.failureKind).toBe("STREAM_UNAVAILABLE");
+    expect(res.bodyRead).toBe("NO");
+    expect(res.bytesRead).toBe(0);
+    expect(arrayBufferSpy).toHaveBeenCalledTimes(0);
+  });
 });

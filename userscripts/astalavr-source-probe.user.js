@@ -501,40 +501,46 @@
         maxBytesRead: MAX_BYTES_READ
       };
     }
-    let bytesRead = 0;
     if (!response.body) {
-      try {
-        const buf = await response.arrayBuffer();
-        bytesRead = Math.min(buf.byteLength, MAX_BYTES_READ);
-      } catch {
-        bytesRead = 0;
-      }
-    } else {
-      const reader = response.body.getReader();
-      try {
-        while (bytesRead < MAX_BYTES_READ) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            const remaining = MAX_BYTES_READ - bytesRead;
-            if (value.byteLength > remaining) {
-              bytesRead += remaining;
-              try {
-                await reader.cancel();
-              } catch {
-              }
-              break;
-            } else {
-              bytesRead += value.byteLength;
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        httpStatus,
+        contentRangePresent,
+        contentRangeValid,
+        contentLength,
+        contentType,
+        bodyRead: "NO",
+        bytesRead: 0,
+        failureKind: "STREAM_UNAVAILABLE",
+        maxBytesRead: MAX_BYTES_READ
+      };
+    }
+    let bytesRead = 0;
+    const reader = response.body.getReader();
+    try {
+      while (bytesRead < MAX_BYTES_READ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          const remaining = MAX_BYTES_READ - bytesRead;
+          if (value.byteLength > remaining) {
+            bytesRead += remaining;
+            try {
+              await reader.cancel();
+            } catch {
             }
+            break;
+          } else {
+            bytesRead += value.byteLength;
           }
         }
+      }
+    } catch {
+    } finally {
+      try {
+        reader.releaseLock();
       } catch {
-      } finally {
-        try {
-          reader.releaseLock();
-        } catch {
-        }
       }
     }
     const pass = httpStatus === 206 && contentRangeValid && bytesRead === MAX_BYTES_READ;

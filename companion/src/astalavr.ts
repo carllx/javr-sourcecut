@@ -597,7 +597,7 @@ export interface ActualPlaybackRangeTestResult {
   bytesRead?: number;
   maxBytesRead: number;
   bodyRead?: "YES" | "NO";
-  failureKind?: "FETCH_ERROR" | "STATUS_NOT_206" | "INVALID_CONTENT_RANGE" | "INCOMPLETE_READ" | "UNKNOWN";
+  failureKind?: "FETCH_ERROR" | "STATUS_NOT_206" | "INVALID_CONTENT_RANGE" | "INCOMPLETE_READ" | "STREAM_UNAVAILABLE" | "UNKNOWN";
   errorName?: string;
 }
 
@@ -703,42 +703,48 @@ export async function testActualPlayback720pRange(
     };
   }
 
+  if (!response.body) {
+    return {
+      actualPlaybackUrlFound: true,
+      pass: false,
+      httpStatus,
+      contentRangePresent,
+      contentRangeValid,
+      contentLength,
+      contentType,
+      bodyRead: "NO",
+      bytesRead: 0,
+      failureKind: "STREAM_UNAVAILABLE",
+      maxBytesRead: MAX_BYTES_READ,
+    };
+  }
+
   // Read response stream enforcing 1 MiB cap
   let bytesRead = 0;
-  if (!response.body) {
-    // Fallback if reader not available (e.g. arrayBuffer in non-streaming environment)
-    try {
-      const buf = await response.arrayBuffer();
-      bytesRead = Math.min(buf.byteLength, MAX_BYTES_READ);
-    } catch {
-      bytesRead = 0;
-    }
-  } else {
-    const reader = response.body.getReader();
-    try {
-      while (bytesRead < MAX_BYTES_READ) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          const remaining = MAX_BYTES_READ - bytesRead;
-          if (value.byteLength > remaining) {
-            bytesRead += remaining;
-            try {
-              await reader.cancel();
-            } catch {}
-            break;
-          } else {
-            bytesRead += value.byteLength;
-          }
+  const reader = response.body.getReader();
+  try {
+    while (bytesRead < MAX_BYTES_READ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const remaining = MAX_BYTES_READ - bytesRead;
+        if (value.byteLength > remaining) {
+          bytesRead += remaining;
+          try {
+            await reader.cancel();
+          } catch {}
+          break;
+        } else {
+          bytesRead += value.byteLength;
         }
       }
-    } catch {
-      // Reader error
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {}
     }
+  } catch {
+    // Reader error
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {}
   }
 
   const pass = httpStatus === 206 && contentRangeValid && bytesRead === MAX_BYTES_READ;
