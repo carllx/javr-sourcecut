@@ -2787,9 +2787,79 @@ describe("AstalaVR Companion Probe", () => {
       expect(totalWritten).toBe(TOTAL);
     });
 
-    it("3. HTTP 200 response fails closed, aborts writable, and stops future ranges", async () => {
+    it("2b. exact-boundary 1 MiB chunk cancels reader immediately and stops reading this Range", async () => {
+      const TOTAL = 1048576; // Exact 1 MiB
+      let readCallCount = 0;
+      let cancelCallCount = 0;
+
+      const mockWritable = {
+        write: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+        abort: vi.fn(async () => {}),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const exact1MiBChunk = new Uint8Array(1048576);
+
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              return {
+                read: async () => {
+                  readCallCount++;
+                  if (readCallCount === 1) {
+                    return { done: false, value: exact1MiBChunk };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: vi.fn(async () => {
+                  cancelCallCount++;
+                }),
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(res.bytesWritten).toBe(1048576);
+      expect(readCallCount).toBe(1);
+      expect(cancelCallCount).toBe(1);
+    });
+
+    it("3. HTTP 200 response fails closed, cancels response body, aborts writable, and stops future ranges", async () => {
       const TOTAL = 2000000;
       let abortCalled = false;
+      let bodyCancelCalled = false;
 
       const mockWritable = {
         write: vi.fn(),
@@ -2822,6 +2892,11 @@ describe("AstalaVR Companion Probe", () => {
         return {
           status: 200, // Invalid: must be 206
           headers: new Map([["Content-Length", "2000000"]]),
+          body: {
+            cancel: vi.fn(async () => {
+              bodyCancelCalled = true;
+            }),
+          },
         };
       });
 
@@ -2838,12 +2913,14 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.failureKind).toBe("PAGE_STATUS_NOT_206");
       expect(res.bytesWritten).toBe(0);
       expect(abortCalled).toBe(true);
+      expect(bodyCancelCalled).toBe(true);
       expect(pageFetchCount).toBe(1);
     });
 
-    it("4. incorrect Content-Length stops transfer and aborts writable", async () => {
+    it("4. incorrect Content-Length stops transfer, cancels response body, and aborts writable", async () => {
       const TOTAL = 2000000;
       let abortCalled = false;
+      let bodyCancelCalled = false;
 
       const mockWritable = {
         write: vi.fn(),
@@ -2874,6 +2951,11 @@ describe("AstalaVR Companion Probe", () => {
         return {
           status: 206,
           headers: new Map([["Content-Length", "500"]]), // Mismatches 1048576
+          body: {
+            cancel: vi.fn(async () => {
+              bodyCancelCalled = true;
+            }),
+          },
         };
       });
 
@@ -2889,6 +2971,64 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.pass).toBe(false);
       expect(res.failureKind).toBe("PAGE_CONTENT_LENGTH_MISMATCH");
       expect(abortCalled).toBe(true);
+      expect(bodyCancelCalled).toBe(true);
+    });
+
+    it("4b. missing Content-Length stops transfer, cancels response body, and aborts writable", async () => {
+      const TOTAL = 2000000;
+      let abortCalled = false;
+      let bodyCancelCalled = false;
+
+      const mockWritable = {
+        write: vi.fn(),
+        close: vi.fn(),
+        abort: vi.fn(async () => {
+          abortCalled = true;
+        }),
+      };
+
+      const mockFileHandle = {
+        createWritable: vi.fn(async () => mockWritable),
+      };
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: `Content-Range: bytes 0-0/${TOTAL}\r\n`,
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map(), // No Content-Length
+          body: {
+            cancel: vi.fn(async () => {
+              bodyCancelCalled = true;
+            }),
+          },
+        };
+      });
+
+      const res = await download720pProxyFile(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockFileHandle,
+        undefined,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("PAGE_CONTENT_LENGTH_MISSING");
+      expect(abortCalled).toBe(true);
+      expect(bodyCancelCalled).toBe(true);
     });
 
     it("5. short stream body stops transfer with PAGE_BODY_LENGTH_MISMATCH", async () => {

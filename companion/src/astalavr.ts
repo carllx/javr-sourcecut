@@ -1798,7 +1798,16 @@ export async function download720pProxyFile(
       };
     }
 
+    const safeCancelResponseBody = async () => {
+      try {
+        if (pageResponse && pageResponse.body && typeof pageResponse.body.cancel === "function") {
+          await pageResponse.body.cancel();
+        }
+      } catch {}
+    };
+
     if (pageResponse.status !== 206) {
+      await safeCancelResponseBody();
       await safeAbortWritable();
       return {
         pass: false,
@@ -1810,6 +1819,7 @@ export async function download720pProxyFile(
 
     const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
     if (!clRaw) {
+      await safeCancelResponseBody();
       await safeAbortWritable();
       return {
         pass: false,
@@ -1821,6 +1831,7 @@ export async function download720pProxyFile(
 
     const parsedCl = parseInt(clRaw.trim(), 10);
     if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
+      await safeCancelResponseBody();
       await safeAbortWritable();
       return {
         pass: false,
@@ -1851,8 +1862,8 @@ export async function download720pProxyFile(
           const remainingForChunk = expectedChunkLength - rangeBytesRead;
           let chunkToWrite: Uint8Array;
 
-          if (value.byteLength > remainingForChunk) {
-            chunkToWrite = value.subarray(0, remainingForChunk);
+          if (value.byteLength >= remainingForChunk) {
+            chunkToWrite = value.byteLength === remainingForChunk ? value : value.subarray(0, remainingForChunk);
             rangeBytesRead += remainingForChunk;
             try {
               await reader.cancel();
@@ -1875,6 +1886,10 @@ export async function download720pProxyFile(
               totalBytes: TOTAL,
               failureKind: "FILE_WRITE_ERROR",
             };
+          }
+
+          if (value.byteLength >= remainingForChunk) {
+            break;
           }
         }
       }

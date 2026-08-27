@@ -659,7 +659,16 @@
           failureKind: "PAGE_FETCH_ERROR"
         };
       }
+      const safeCancelResponseBody = async () => {
+        try {
+          if (pageResponse && pageResponse.body && typeof pageResponse.body.cancel === "function") {
+            await pageResponse.body.cancel();
+          }
+        } catch {
+        }
+      };
       if (pageResponse.status !== 206) {
+        await safeCancelResponseBody();
         await safeAbortWritable();
         return {
           pass: false,
@@ -670,6 +679,7 @@
       }
       const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
       if (!clRaw) {
+        await safeCancelResponseBody();
         await safeAbortWritable();
         return {
           pass: false,
@@ -680,6 +690,7 @@
       }
       const parsedCl = parseInt(clRaw.trim(), 10);
       if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
+        await safeCancelResponseBody();
         await safeAbortWritable();
         return {
           pass: false,
@@ -706,8 +717,8 @@
           if (value && value.byteLength > 0) {
             const remainingForChunk = expectedChunkLength - rangeBytesRead;
             let chunkToWrite;
-            if (value.byteLength > remainingForChunk) {
-              chunkToWrite = value.subarray(0, remainingForChunk);
+            if (value.byteLength >= remainingForChunk) {
+              chunkToWrite = value.byteLength === remainingForChunk ? value : value.subarray(0, remainingForChunk);
               rangeBytesRead += remainingForChunk;
               try {
                 await reader.cancel();
@@ -731,6 +742,9 @@
                 totalBytes: TOTAL,
                 failureKind: "FILE_WRITE_ERROR"
               };
+            }
+            if (value.byteLength >= remainingForChunk) {
+              break;
             }
           }
         }
