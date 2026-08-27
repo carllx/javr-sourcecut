@@ -1809,33 +1809,38 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.failureKind).toBe("CONTENT_RANGE_INVALID");
     });
 
-    it("G. timeout/error => safe failure enum without leaking URL or token", async () => {
+    it("G. timeout/error => safe failure enum, abort called exactly once, without leaking URL or token", async () => {
+      const abortErrorFn = vi.fn();
       const mockGmError = vi.fn((details: any) => {
         setTimeout(() => {
           if (details.onerror) {
             details.onerror(new Error("Network Error: https://cdn3.astalavr.com/secret_url?token=leaked"));
           }
         }, 10);
-        return { abort: vi.fn() };
+        return { abort: abortErrorFn };
       });
 
       const resError = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGmError as any);
+      expect(abortErrorFn).toHaveBeenCalledTimes(1);
       expect(resError.actualPlaybackUrlFound).toBe(true);
       expect(resError.pass).toBe(false);
       expect(resError.failureKind).toBe("GM_REQUEST_ERROR");
+      expect(resError.requestAborted).toBe(true);
       expect(JSON.stringify(resError)).not.toContain("secret_url");
       expect(JSON.stringify(resError)).not.toContain("token=");
 
+      const abortTimeoutFn = vi.fn();
       const mockGmTimeout = vi.fn((details: any) => {
         setTimeout(() => {
           if (details.ontimeout) {
             details.ontimeout();
           }
         }, 10);
-        return { abort: vi.fn() };
+        return { abort: abortTimeoutFn };
       });
 
       const resTimeout = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGmTimeout as any);
+      expect(abortTimeoutFn).toHaveBeenCalledTimes(1);
       expect(resTimeout.actualPlaybackUrlFound).toBe(true);
       expect(resTimeout.pass).toBe(false);
       expect(resTimeout.failureKind).toBe("GM_REQUEST_TIMEOUT");
@@ -2066,6 +2071,60 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.pass).toBe(false);
       expect(res.pairFailureKind).toBe("GM_METADATA_FAILED");
       expect(res.gmMetadataStatus).toBe(200);
+      expect(res.gmAbortedAtHeaders).toBe(true);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(mockPageFetch).toHaveBeenCalledTimes(0);
+    });
+
+    it("2b. paired GM error => abort called exactly once, pairFailureKind=GM_METADATA_FAILED, page fetch call count 0", async () => {
+      const mockPageFetch = vi.fn();
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onerror) {
+            details.onerror(new Error("Network Error"));
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("GM_METADATA_FAILED");
+      expect(res.gmAbortedAtHeaders).toBe(true);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(mockPageFetch).toHaveBeenCalledTimes(0);
+    });
+
+    it("2c. paired GM timeout => abort called exactly once, pairFailureKind=GM_METADATA_FAILED, page fetch call count 0", async () => {
+      const mockPageFetch = vi.fn();
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.ontimeout) {
+            details.ontimeout();
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("GM_METADATA_FAILED");
       expect(res.gmAbortedAtHeaders).toBe(true);
       expect(abortFn).toHaveBeenCalledTimes(1);
       expect(mockPageFetch).toHaveBeenCalledTimes(0);

@@ -772,6 +772,7 @@
           },
           onerror: () => {
             if (!settled) {
+              safeAbort();
               finish({
                 actualPlaybackUrlFound: true,
                 pass: false,
@@ -779,13 +780,14 @@
                 contentRangePresent: observedContentRangePresent,
                 contentRangeValid: observedContentRangeValid,
                 totalFileSizeParsed: observedTotalFileSizeParsed,
-                requestAborted,
+                requestAborted: true,
                 failureKind: "GM_REQUEST_ERROR"
               });
             }
           },
           ontimeout: () => {
             if (!settled) {
+              safeAbort();
               finish({
                 actualPlaybackUrlFound: true,
                 pass: false,
@@ -814,6 +816,7 @@
           }
         });
       } catch {
+        safeAbort();
         finish({
           actualPlaybackUrlFound: true,
           pass: false,
@@ -973,11 +976,13 @@
           },
           onerror: () => {
             if (!settled) {
-              finish({ pass: false, abortedAtHeaders: aborted });
+              safeAbort();
+              finish({ pass: false, abortedAtHeaders: true });
             }
           },
           ontimeout: () => {
             if (!settled) {
+              safeAbort();
               finish({ pass: false, abortedAtHeaders: true });
             }
           },
@@ -988,6 +993,7 @@
           }
         });
       } catch {
+        safeAbort();
         finish({ pass: false, abortedAtHeaders: true });
       }
     });

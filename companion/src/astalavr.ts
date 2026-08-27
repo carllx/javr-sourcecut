@@ -1072,6 +1072,7 @@ export function testActualPlaybackGmRange(
         },
         onerror: () => {
           if (!settled) {
+            safeAbort();
             finish({
               actualPlaybackUrlFound: true,
               pass: false,
@@ -1079,13 +1080,14 @@ export function testActualPlaybackGmRange(
               contentRangePresent: observedContentRangePresent,
               contentRangeValid: observedContentRangeValid,
               totalFileSizeParsed: observedTotalFileSizeParsed,
-              requestAborted,
+              requestAborted: true,
               failureKind: "GM_REQUEST_ERROR",
             });
           }
         },
         ontimeout: () => {
           if (!settled) {
+            safeAbort();
             finish({
               actualPlaybackUrlFound: true,
               pass: false,
@@ -1114,6 +1116,7 @@ export function testActualPlaybackGmRange(
         },
       });
     } catch {
+      safeAbort();
       finish({
         actualPlaybackUrlFound: true,
         pass: false,
@@ -1346,11 +1349,13 @@ export async function testActualPlaybackPaired1MiB(
         },
         onerror: () => {
           if (!settled) {
-            finish({ pass: false, abortedAtHeaders: aborted });
+            safeAbort();
+            finish({ pass: false, abortedAtHeaders: true });
           }
         },
         ontimeout: () => {
           if (!settled) {
+            safeAbort();
             finish({ pass: false, abortedAtHeaders: true });
           }
         },
@@ -1361,6 +1366,7 @@ export async function testActualPlaybackPaired1MiB(
         },
       });
     } catch {
+      safeAbort();
       finish({ pass: false, abortedAtHeaders: true });
     }
   });
