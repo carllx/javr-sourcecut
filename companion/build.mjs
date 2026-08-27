@@ -38,13 +38,28 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 
 `;
 
+const ASTALAVR_HEADER = `// ==UserScript==
+// @name         AstalaVR Source Probe (javr-sourcecut)
+// @namespace    https://github.com/carllx/javr-sourcecut
+// @version      0.1.0
+// @description  Minimal in-browser DOM rendition reader and diagnostic probe for AstalaVR
+// @author       carllx
+// @match        https://astalavr.com/videos/*
+// @icon         https://astalavr.com/favicon.ico
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+`;
+
 async function build() {
   console.log("🔨 Building Eporner Companion Userscript...");
 
   const outUserJs = path.join(userscriptsDir, "eporner-companion.user.js");
+  const outAstalaVrUserJs = path.join(userscriptsDir, "astalavr-source-probe.user.js");
   const outDevUserJs = path.join(distDir, "eporner-companion.dev.user.js");
 
-  // 1. Bundle TypeScript to IIFE
+  // 1. Bundle Eporner TypeScript to IIFE
   await esbuild.build({
     entryPoints: [path.join(__dirname, "src", "index.ts")],
     bundle: true,
@@ -60,8 +75,24 @@ async function build() {
 
   console.log(`✅ Production userscript generated: ${outUserJs}`);
 
-  // 2. Generate local development wrapper userscript
-  // Allows testing local changes without reinstalling the script in Tampermonkey
+  // 2. Bundle AstalaVR Probe Userscript
+  console.log("🔨 Building AstalaVR Source Probe Userscript...");
+  await esbuild.build({
+    entryPoints: [path.join(__dirname, "src", "astalavr-index.ts")],
+    bundle: true,
+    format: "iife",
+    target: "es2020",
+    banner: {
+      js: ASTALAVR_HEADER,
+    },
+    outfile: outAstalaVrUserJs,
+    minify: false,
+    sourcemap: false,
+  });
+
+  console.log(`✅ Production userscript generated: ${outAstalaVrUserJs}`);
+
+  // 3. Generate local development wrapper userscript for Eporner
   const normalizedOutPath = outUserJs.replace(/\\/g, "/");
   const DEV_HEADER = `// ==UserScript==
 // @name         Eporner Companion [DEV LIVE] (javr-sourcecut)
