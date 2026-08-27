@@ -9,6 +9,7 @@ import {
   testActualPlayback720p,
   testActualPlayback720pRange,
   testActualPlaybackGmRange,
+  testActualPlaybackPaired1MiB,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -1638,9 +1639,9 @@ describe("AstalaVR Companion Probe", () => {
       },
     };
 
-    it("A. 206 + valid Content-Range bytes 0-0/<total> + 1 byte => PASS", async () => {
+    it("A. 206 + valid Content-Range bytes 0-0/<total> => PASS immediately at readyState 2, abort called exactly once, onload not required", async () => {
       let requestedHeaders: Record<string, string> | undefined;
-      const oneByteBuffer = new Uint8Array([0x00]).buffer;
+      const abortFn = vi.fn();
 
       const mockGm = vi.fn((details: any) => {
         requestedHeaders = details.headers;
@@ -1652,33 +1653,59 @@ describe("AstalaVR Companion Probe", () => {
               responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600\r\nContent-Length: 1",
             });
           }
-          if (details.onload) {
-            details.onload({
-              status: 206,
-              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600\r\nContent-Length: 1",
-              response: oneByteBuffer,
-            });
-          }
         }, 10);
-        return { abort: vi.fn() };
+        return { abort: abortFn };
       });
 
       const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
       expect(mockGm).toHaveBeenCalledTimes(1);
       expect(requestedHeaders).toEqual({ Range: "bytes=0-0" });
+      expect(abortFn).toHaveBeenCalledTimes(1);
       expect(res.actualPlaybackUrlFound).toBe(true);
       expect(res.pass).toBe(true);
       expect(res.httpStatus).toBe(206);
       expect(res.contentRangePresent).toBe(true);
       expect(res.contentRangeValid).toBe(true);
       expect(res.totalFileSizeParsed).toBe(true);
-      expect(res.bodyBytes).toBe(1);
-      expect(res.requestAborted).toBe(false);
+      expect(res.requestAborted).toBe(true);
     });
 
-    it("B. HTTP 200 observed at header state => abort exactly once, body not processed, STATUS_NOT_206", async () => {
+    it("B. even if a mock later attempts to call onload with a huge body, result stays PASS from header validation and body is never inspected", async () => {
       const abortFn = vi.fn();
-      let onloadCalled = false;
+      let onloadRan = false;
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600\r\nContent-Length: 1",
+            });
+          }
+          if (details.onload) {
+            onloadRan = true;
+            details.onload({
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600",
+              response: new ArrayBuffer(5242880), // 5 MiB unexpected body
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(res.pass).toBe(true);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangeValid).toBe(true);
+      expect(res.totalFileSizeParsed).toBe(true);
+      expect(res.requestAborted).toBe(true);
+    });
+
+    it("C. HTTP 200 observed at header state => abort exactly once, STATUS_NOT_206", async () => {
+      const abortFn = vi.fn();
 
       const mockGm = vi.fn((details: any) => {
         setTimeout(() => {
@@ -1687,15 +1714,6 @@ describe("AstalaVR Companion Probe", () => {
               readyState: 2,
               status: 200,
               responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 104857600",
-            });
-          }
-          // If not aborted or if onload fires
-          if (details.onload) {
-            onloadCalled = true;
-            details.onload({
-              status: 200,
-              responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 104857600",
-              response: new ArrayBuffer(104857600),
             });
           }
         }, 10);
@@ -1712,7 +1730,7 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.failureKind).toBe("STATUS_NOT_206");
     });
 
-    it("C. HTTP 403 => abort exactly once, STATUS_NOT_206", async () => {
+    it("D. HTTP 403 => abort exactly once, STATUS_NOT_206", async () => {
       const abortFn = vi.fn();
 
       const mockGm = vi.fn((details: any) => {
@@ -1737,7 +1755,7 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.failureKind).toBe("STATUS_NOT_206");
     });
 
-    it("D. 206 but Content-Range missing => abort immediately, CONTENT_RANGE_MISSING", async () => {
+    it("E. 206 but Content-Range missing => abort immediately, CONTENT_RANGE_MISSING", async () => {
       const abortFn = vi.fn();
 
       const mockGm = vi.fn((details: any) => {
@@ -1763,7 +1781,7 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.failureKind).toBe("CONTENT_RANGE_MISSING");
     });
 
-    it("E. 206 but malformed/wrong range (e.g. bytes 1-1/1000) => abort immediately, CONTENT_RANGE_INVALID", async () => {
+    it("F. 206 but malformed/wrong range (e.g. bytes 1-1/1000) => abort immediately, CONTENT_RANGE_INVALID", async () => {
       const abortFn = vi.fn();
 
       const mockGm = vi.fn((details: any) => {
@@ -1789,33 +1807,6 @@ describe("AstalaVR Companion Probe", () => {
       expect(res.totalFileSizeParsed).toBe(false);
       expect(res.requestAborted).toBe(true);
       expect(res.failureKind).toBe("CONTENT_RANGE_INVALID");
-    });
-
-    it("F. valid headers but body length != 1 => FAIL (BODY_LENGTH_MISMATCH)", async () => {
-      const fiveByteBuffer = new Uint8Array([1, 2, 3, 4, 5]).buffer;
-
-      const mockGm = vi.fn((details: any) => {
-        setTimeout(() => {
-          if (details.onload) {
-            details.onload({
-              status: 206,
-              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/104857600",
-              response: fiveByteBuffer,
-            });
-          }
-        }, 10);
-        return { abort: vi.fn() };
-      });
-
-      const res = await testActualPlaybackGmRange(cachedRenditions as any, mockPerf as any, mockGm as any);
-      expect(res.actualPlaybackUrlFound).toBe(true);
-      expect(res.pass).toBe(false);
-      expect(res.httpStatus).toBe(206);
-      expect(res.contentRangePresent).toBe(true);
-      expect(res.contentRangeValid).toBe(true);
-      expect(res.totalFileSizeParsed).toBe(true);
-      expect(res.bodyBytes).toBe(5);
-      expect(res.failureKind).toBe("BODY_LENGTH_MISMATCH");
     });
 
     it("G. timeout/error => safe failure enum without leaking URL or token", async () => {
@@ -1886,13 +1877,6 @@ describe("AstalaVR Companion Probe", () => {
               responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/524288000\r\nContent-Length: 1",
             });
           }
-          if (details.onload) {
-            details.onload({
-              status: 206,
-              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-0/524288000\r\nContent-Length: 1",
-              response: new Uint8Array([0x01]).buffer,
-            });
-          }
         }, 20);
         return { abort: () => {} };
       };
@@ -1916,13 +1900,12 @@ describe("AstalaVR Companion Probe", () => {
       const resultEl = window.document.getElementById("astalavr-test-gm-range-result")!;
       expect(resultEl.style.display).toBe("block");
       expect(resultEl.innerHTML).toContain("GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_RANGE_TEST=</strong>PASS");
+      expect(resultEl.innerHTML).toContain("GM_METADATA_TEST=</strong>PASS");
       expect(resultEl.innerHTML).toContain("GM_HTTP_STATUS=</strong>206");
       expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_PRESENT=</strong>YES");
       expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_VALID=</strong>YES");
       expect(resultEl.innerHTML).toContain("GM_TOTAL_FILE_SIZE_PARSED=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_BODY_BYTES=</strong>1");
-      expect(resultEl.innerHTML).toContain("GM_REQUEST_ABORTED=</strong>NO");
+      expect(resultEl.innerHTML).toContain("GM_REQUEST_ABORTED=</strong>YES");
 
       // Verify strict token & raw header confidentiality in UI output
       expect(resultEl.innerHTML).not.toContain("ULTRA_SECRET_TOKEN_GM");
@@ -1947,5 +1930,462 @@ describe("AstalaVR Companion Probe", () => {
       expect(buildScriptContent).not.toContain("@connect      *");
     });
   });
+
+  describe("Paired 1MiB Range Test (GM Metadata Plane + Page Data Plane)", () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=cached_token_123",
+      },
+    ];
+
+    const actualPlaybackUrl = "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=actual_token_456";
+
+    const mockPerf = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: actualPlaybackUrl,
+              initiatorType: "video",
+              duration: 25,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const oneMiBChunk = new Uint8Array(1048576);
+
+    it("1. GM metadata PASS then page 1MiB PASS => PAIR PASS", async () => {
+      let gmUrl = "";
+      let gmHeaders: any;
+      let pageUrl = "";
+      let pageHeaders: any;
+
+      const mockGm = vi.fn((details: any) => {
+        gmUrl = details.url;
+        gmHeaders = details.headers;
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800\r\nContent-Length: 1048576",
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async (url: string, opts: any) => {
+        pageUrl = url;
+        pageHeaders = opts.headers;
+        return {
+          status: 206,
+          headers: new Map([
+            ["Content-Length", "1048576"],
+            ["Content-Type", "video/mp4"],
+          ]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    return { done: false, value: oneMiBChunk };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(true);
+      expect(res.gmMetadataStatus).toBe(206);
+      expect(res.gmContentRangePresent).toBe(true);
+      expect(res.gmContentRangeMatch).toBe(true);
+      expect(res.gmTotalFileSizeParsed).toBe(true);
+      expect(res.gmAbortedAtHeaders).toBe(true);
+      expect(res.pageDataStatus).toBe(206);
+      expect(res.pageContentLengthPresent).toBe(true);
+      expect(res.pageContentLengthMatch).toBe(true);
+      expect(res.pageBytesRead).toBe(1048576);
+      expect(res.pageMaxBytesRead).toBe(1048576);
+
+      // Invariant: exact same URL and range
+      expect(gmUrl).toBe(actualPlaybackUrl);
+      expect(pageUrl).toBe(actualPlaybackUrl);
+      expect(gmHeaders).toEqual({ Range: "bytes=0-1048575" });
+      expect(pageHeaders).toEqual({ Range: "bytes=0-1048575" });
+    });
+
+    it("2. GM status 200 => GM abort, page fetch call count 0", async () => {
+      const mockPageFetch = vi.fn();
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 200,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Length: 52428800",
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("GM_METADATA_FAILED");
+      expect(res.gmMetadataStatus).toBe(200);
+      expect(res.gmAbortedAtHeaders).toBe(true);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(mockPageFetch).toHaveBeenCalledTimes(0);
+    });
+
+    it("3. GM Content-Range mismatch => abort, page fetch call count 0", async () => {
+      const mockPageFetch = vi.fn();
+      const abortFn = vi.fn();
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-500/52428800", // Wrong range
+            });
+          }
+        }, 10);
+        return { abort: abortFn };
+      });
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("GM_METADATA_FAILED");
+      expect(res.gmContentRangeMatch).toBe(false);
+      expect(abortFn).toHaveBeenCalledTimes(1);
+      expect(mockPageFetch).toHaveBeenCalledTimes(0);
+    });
+
+    it("4. page status 200 => fail closed and cancel body", async () => {
+      const cancelFn = vi.fn();
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800",
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => ({
+        status: 200,
+        headers: new Map([["Content-Length", "52428800"]]),
+        body: {
+          cancel: cancelFn,
+        },
+      }));
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("PAGE_STATUS_NOT_206");
+      expect(res.pageDataStatus).toBe(200);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("5. page Content-Length missing/wrong => fail", async () => {
+      const cancelFn = vi.fn();
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800",
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => ({
+        status: 206,
+        headers: new Map([["Content-Length", "500000"]]), // Wrong length
+        body: {
+          cancel: cancelFn,
+        },
+      }));
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(false);
+      expect(res.pairFailureKind).toBe("PAGE_CONTENT_LENGTH_MISMATCH");
+      expect(res.pageContentLengthMatch).toBe(false);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("6. page exact 1MiB body => cancel exactly at boundary", async () => {
+      const cancelFn = vi.fn();
+      const twoMiBChunk = new Uint8Array(2097152); // larger chunk to test hard cancel
+
+      const mockGm = vi.fn((details: any) => {
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800",
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async () => ({
+        status: 206,
+        headers: new Map([["Content-Length", "1048576"]]),
+        body: {
+          getReader: () => {
+            let delivered = false;
+            return {
+              read: async () => {
+                if (!delivered) {
+                  delivered = true;
+                  return { done: false, value: twoMiBChunk };
+                }
+                return { done: true, value: undefined };
+              },
+              cancel: cancelFn,
+              releaseLock: () => {},
+            };
+          },
+        },
+      }));
+
+      const res = await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(res.pass).toBe(true);
+      expect(res.pageBytesRead).toBe(1048576);
+      expect(cancelFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("7. URL passed to GM and page fetch is internally the exact same string, but result/UI never exposes it", async () => {
+      const sensitiveToken = "SUPER_SECRET_TOKEN_PAIRED_12345";
+      const sensitiveUrl = `https://cdn3.astalavr.com/qDAVn/720P.mp4?token=${sensitiveToken}`;
+
+      const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+      const originalWindow = (globalThis as any).window;
+      const originalDocument = (globalThis as any).document;
+      const originalPerformance = (globalThis as any).performance;
+      const originalGm = (globalThis as any).GM_xmlhttpRequest;
+      const originalFetch = (globalThis as any).fetch;
+
+      (globalThis as any).window = window;
+      (globalThis as any).document = window.document;
+
+      (globalThis as any).performance = {
+        now: () => Date.now(),
+        getEntriesByType: (type: string) => {
+          if (type === "resource") {
+            return [
+              {
+                name: sensitiveUrl,
+                initiatorType: "video",
+                duration: 50,
+              },
+            ];
+          }
+          return [];
+        },
+      };
+
+      let observedGmUrl = "";
+      let observedPageUrl = "";
+
+      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+        observedGmUrl = details.url;
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800\r\nContent-Length: 1048576",
+            });
+          }
+        }, 10);
+        return { abort: () => {} };
+      };
+
+      (globalThis as any).fetch = async (url: string) => {
+        observedPageUrl = url;
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    return { done: false, value: oneMiBChunk };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      };
+
+      window.document.body.innerHTML = `
+        <dl8-video title="TMAVR285">
+          <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
+
+      const app = new AstalaVrProbeApp();
+      app.init();
+
+      const testPairBtn = window.document.getElementById("astalavr-test-pair-range-btn") as HTMLButtonElement;
+      expect(testPairBtn).not.toBeNull();
+
+      testPairBtn.click();
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      const resultEl = window.document.getElementById("astalavr-test-pair-range-result")!;
+      expect(resultEl.style.display).toBe("block");
+      expect(resultEl.innerHTML).toContain("PAIR_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
+      expect(resultEl.innerHTML).toContain("PAIR_RANGE_TEST=</strong>PASS");
+
+      // Verify internally same URL used
+      expect(observedGmUrl).toBe(sensitiveUrl);
+      expect(observedPageUrl).toBe(sensitiveUrl);
+
+      // Verify strict confidentiality in output
+      expect(resultEl.innerHTML).not.toContain(sensitiveToken);
+      expect(resultEl.innerHTML).not.toContain("token=");
+      expect(resultEl.innerHTML).not.toContain("52428800"); // Total file size not printed
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+      (globalThis as any).performance = originalPerformance;
+      (globalThis as any).GM_xmlhttpRequest = originalGm;
+      (globalThis as any).fetch = originalFetch;
+    });
+
+    it("8. both requests use exactly Range: bytes=0-1048575", async () => {
+      let gmRange = "";
+      let pageRange = "";
+
+      const mockGm = vi.fn((details: any) => {
+        gmRange = details.headers?.Range;
+        setTimeout(() => {
+          if (details.onreadystatechange) {
+            details.onreadystatechange({
+              readyState: 2,
+              status: 206,
+              responseHeaders: "Content-Type: video/mp4\r\nContent-Range: bytes 0-1048575/52428800",
+            });
+          }
+        }, 10);
+        return { abort: vi.fn() };
+      });
+
+      const mockPageFetch = vi.fn(async (_url: string, opts: any) => {
+        pageRange = opts.headers?.Range;
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              let delivered = false;
+              return {
+                read: async () => {
+                  if (!delivered) {
+                    delivered = true;
+                    return { done: false, value: oneMiBChunk };
+                  }
+                  return { done: true, value: undefined };
+                },
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
+
+      await testActualPlaybackPaired1MiB(
+        cachedRenditions as any,
+        mockPerf as any,
+        mockGm as any,
+        mockPageFetch as any
+      );
+
+      expect(gmRange).toBe("bytes=0-1048575");
+      expect(pageRange).toBe("bytes=0-1048575");
+    });
+  });
 });
+
 

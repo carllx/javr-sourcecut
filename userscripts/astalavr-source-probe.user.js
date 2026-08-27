@@ -676,7 +676,7 @@
       let observedContentRangePresent;
       let observedContentRangeValid;
       let observedTotalFileSizeParsed;
-      const validateHeadersAndEarlyFail = (status, rawHeaders) => {
+      const validateHeadersAndProcess = (status, rawHeaders) => {
         observedStatus = status;
         if (status !== 206) {
           safeAbort();
@@ -687,7 +687,7 @@
             requestAborted: true,
             failureKind: "STATUS_NOT_206"
           });
-          return false;
+          return;
         }
         const cr = parseHeaderValue(rawHeaders, "content-range");
         const crPresent = Boolean(cr);
@@ -702,7 +702,7 @@
             requestAborted: true,
             failureKind: "CONTENT_RANGE_MISSING"
           });
-          return false;
+          return;
         }
         const match = cr.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
         if (!match) {
@@ -717,7 +717,7 @@
             requestAborted: true,
             failureKind: "CONTENT_RANGE_INVALID"
           });
-          return false;
+          return;
         }
         const start = parseInt(match[1], 10);
         const end = parseInt(match[2], 10);
@@ -737,9 +737,18 @@
             requestAborted: true,
             failureKind: "CONTENT_RANGE_INVALID"
           });
-          return false;
+          return;
         }
-        return true;
+        safeAbort();
+        finish({
+          actualPlaybackUrlFound: true,
+          pass: true,
+          httpStatus: 206,
+          contentRangePresent: true,
+          contentRangeValid: true,
+          totalFileSizeParsed: true,
+          requestAborted: true
+        });
       };
       try {
         requestHandle = fn({
@@ -753,51 +762,13 @@
           onreadystatechange: (res) => {
             if (res.readyState >= 2 && !settled) {
               if (res.status && res.status > 0) {
-                const ok = validateHeadersAndEarlyFail(res.status, res.responseHeaders);
-                if (!ok) return;
+                validateHeadersAndProcess(res.status, res.responseHeaders);
               }
             }
           },
           onload: (res) => {
             if (settled) return;
-            const ok = validateHeadersAndEarlyFail(res.status, res.responseHeaders);
-            if (!ok) return;
-            let bodyLength = 0;
-            if (res.response) {
-              if (res.response instanceof ArrayBuffer) {
-                bodyLength = res.response.byteLength;
-              } else if (ArrayBuffer.isView(res.response)) {
-                bodyLength = res.response.byteLength;
-              } else if (typeof res.response === "string") {
-                bodyLength = res.response.length;
-              }
-            } else if (typeof res.responseText === "string") {
-              bodyLength = res.responseText.length;
-            }
-            if (bodyLength === 1) {
-              finish({
-                actualPlaybackUrlFound: true,
-                pass: true,
-                httpStatus: res.status,
-                contentRangePresent: true,
-                contentRangeValid: true,
-                totalFileSizeParsed: true,
-                bodyBytes: 1,
-                requestAborted: false
-              });
-            } else {
-              finish({
-                actualPlaybackUrlFound: true,
-                pass: false,
-                httpStatus: res.status,
-                contentRangePresent: true,
-                contentRangeValid: true,
-                totalFileSizeParsed: true,
-                bodyBytes: bodyLength,
-                requestAborted: false,
-                failureKind: "BODY_LENGTH_MISMATCH"
-              });
-            }
+            validateHeadersAndProcess(res.status, res.responseHeaders);
           },
           onerror: () => {
             if (!settled) {
@@ -851,6 +822,319 @@
         });
       }
     });
+  }
+  async function testActualPlaybackPaired1MiB(cachedRenditions = [], perf = typeof performance !== "undefined" ? performance : {}, gmFetchFn, pageFetchFn = typeof fetch !== "undefined" ? fetch.bind(globalThis) : null, timeoutMs = 1e4) {
+    const MAX_BYTES = 1048576;
+    const entries = perf && typeof perf.getEntriesByType === "function" ? perf.getEntriesByType("resource") : [];
+    const rendition720p = cachedRenditions.find((r) => r.resolution === "720p" || r.height === 720);
+    let cached720pPath = "";
+    if (rendition720p) {
+      try {
+        const cParsed = new URL(rendition720p.fullDirectUrl);
+        cached720pPath = cParsed.pathname.toLowerCase();
+      } catch {
+      }
+    }
+    const matchingUrls = [];
+    for (const entry of entries) {
+      const rawUrl = entry.name;
+      if (!rawUrl || typeof rawUrl !== "string") continue;
+      try {
+        const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        const host = parsed.hostname;
+        const path = parsed.pathname.toLowerCase();
+        const initiator = (entry.initiatorType || "").toLowerCase();
+        if ((initiator === "video" || initiator === "media") && host === "cdn3.astalavr.com" && cached720pPath && path === cached720pPath) {
+          matchingUrls.push(parsed.href);
+        }
+      } catch {
+      }
+    }
+    if (matchingUrls.length === 0) {
+      return {
+        actualPlaybackUrlFound: false,
+        pass: false,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "NO_PLAYBACK_RESOURCE"
+      };
+    }
+    const latestPlaybackUrl = matchingUrls[matchingUrls.length - 1];
+    const fn = gmFetchFn || (typeof globalThis.GM_xmlhttpRequest === "function" ? globalThis.GM_xmlhttpRequest : typeof globalThis.GM?.xmlHttpRequest === "function" ? globalThis.GM.xmlHttpRequest : void 0);
+    if (!fn) {
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "GM_METADATA_FAILED"
+      };
+    }
+    const gmPhaseA = await new Promise((resolve) => {
+      let settled = false;
+      let handle;
+      let aborted = false;
+      const safeAbort = () => {
+        if (!aborted) {
+          aborted = true;
+          try {
+            if (handle && typeof handle.abort === "function") {
+              handle.abort();
+            }
+          } catch {
+          }
+        }
+      };
+      const finish = (res) => {
+        if (!settled) {
+          settled = true;
+          resolve(res);
+        }
+      };
+      const validateGmHeaders = (status, rawHeaders) => {
+        if (status !== 206) {
+          safeAbort();
+          finish({
+            pass: false,
+            status,
+            abortedAtHeaders: true
+          });
+          return;
+        }
+        const cr = parseHeaderValue(rawHeaders, "content-range");
+        const crPresent = Boolean(cr);
+        if (!crPresent) {
+          safeAbort();
+          finish({
+            pass: false,
+            status,
+            contentRangePresent: false,
+            abortedAtHeaders: true
+          });
+          return;
+        }
+        const match = cr.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+        if (!match) {
+          safeAbort();
+          finish({
+            pass: false,
+            status,
+            contentRangePresent: true,
+            contentRangeMatch: false,
+            totalFileSizeParsed: false,
+            abortedAtHeaders: true
+          });
+          return;
+        }
+        const start = parseInt(match[1], 10);
+        const end = parseInt(match[2], 10);
+        const total = parseInt(match[3], 10);
+        const isMatch = start === 0 && end === 1048575 && !isNaN(total) && total > 1048575;
+        if (!isMatch) {
+          safeAbort();
+          finish({
+            pass: false,
+            status,
+            contentRangePresent: true,
+            contentRangeMatch: false,
+            totalFileSizeParsed: !isNaN(total) && total > 0,
+            abortedAtHeaders: true
+          });
+          return;
+        }
+        safeAbort();
+        finish({
+          pass: true,
+          status: 206,
+          contentRangePresent: true,
+          contentRangeMatch: true,
+          totalFileSizeParsed: true,
+          abortedAtHeaders: true
+        });
+      };
+      try {
+        handle = fn({
+          method: "GET",
+          url: latestPlaybackUrl,
+          headers: {
+            Range: "bytes=0-1048575"
+          },
+          responseType: "arraybuffer",
+          timeout: timeoutMs,
+          onreadystatechange: (res) => {
+            if (res.readyState >= 2 && !settled) {
+              if (res.status && res.status > 0) {
+                validateGmHeaders(res.status, res.responseHeaders);
+              }
+            }
+          },
+          onload: (res) => {
+            if (!settled) {
+              validateGmHeaders(res.status, res.responseHeaders);
+            }
+          },
+          onerror: () => {
+            if (!settled) {
+              finish({ pass: false, abortedAtHeaders: aborted });
+            }
+          },
+          ontimeout: () => {
+            if (!settled) {
+              finish({ pass: false, abortedAtHeaders: true });
+            }
+          },
+          onabort: () => {
+            if (!settled) {
+              finish({ pass: false, abortedAtHeaders: true });
+            }
+          }
+        });
+      } catch {
+        finish({ pass: false, abortedAtHeaders: true });
+      }
+    });
+    if (!gmPhaseA.pass) {
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        gmMetadataStatus: gmPhaseA.status,
+        gmContentRangePresent: gmPhaseA.contentRangePresent,
+        gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+        gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+        gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "GM_METADATA_FAILED"
+      };
+    }
+    let pageResponse;
+    try {
+      pageResponse = await pageFetchFn(latestPlaybackUrl, {
+        headers: {
+          Range: "bytes=0-1048575"
+        }
+      });
+    } catch {
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        gmMetadataStatus: gmPhaseA.status,
+        gmContentRangePresent: gmPhaseA.contentRangePresent,
+        gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+        gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+        gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "PAGE_FETCH_ERROR"
+      };
+    }
+    const pageStatus = pageResponse.status;
+    const rawContentLength = pageResponse.headers ? pageResponse.headers.get("Content-Length") : null;
+    const pageContentLengthPresent = Boolean(rawContentLength !== null && rawContentLength !== void 0);
+    const parsedContentLength = rawContentLength !== null ? parseInt(rawContentLength, 10) : NaN;
+    const pageContentLengthMatch = pageContentLengthPresent && parsedContentLength === MAX_BYTES;
+    if (pageStatus !== 206) {
+      try {
+        if (pageResponse.body && typeof pageResponse.body.cancel === "function") {
+          await pageResponse.body.cancel();
+        }
+      } catch {
+      }
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        gmMetadataStatus: gmPhaseA.status,
+        gmContentRangePresent: gmPhaseA.contentRangePresent,
+        gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+        gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+        gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+        pageDataStatus: pageStatus,
+        pageContentLengthPresent,
+        pageContentLengthMatch,
+        pageBytesRead: 0,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "PAGE_STATUS_NOT_206"
+      };
+    }
+    if (!pageContentLengthMatch) {
+      try {
+        if (pageResponse.body && typeof pageResponse.body.cancel === "function") {
+          await pageResponse.body.cancel();
+        }
+      } catch {
+      }
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        gmMetadataStatus: gmPhaseA.status,
+        gmContentRangePresent: gmPhaseA.contentRangePresent,
+        gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+        gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+        gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+        pageDataStatus: pageStatus,
+        pageContentLengthPresent,
+        pageContentLengthMatch: false,
+        pageBytesRead: 0,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "PAGE_CONTENT_LENGTH_MISMATCH"
+      };
+    }
+    if (!pageResponse.body) {
+      return {
+        actualPlaybackUrlFound: true,
+        pass: false,
+        gmMetadataStatus: gmPhaseA.status,
+        gmContentRangePresent: gmPhaseA.contentRangePresent,
+        gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+        gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+        gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+        pageDataStatus: pageStatus,
+        pageContentLengthPresent,
+        pageContentLengthMatch,
+        pageBytesRead: 0,
+        pageMaxBytesRead: MAX_BYTES,
+        pairFailureKind: "PAGE_STREAM_UNAVAILABLE"
+      };
+    }
+    let bytesRead = 0;
+    const reader = pageResponse.body.getReader();
+    try {
+      while (bytesRead < MAX_BYTES) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          const remaining = MAX_BYTES - bytesRead;
+          if (value.byteLength >= remaining) {
+            bytesRead += remaining;
+            try {
+              await reader.cancel();
+            } catch {
+            }
+            break;
+          } else {
+            bytesRead += value.byteLength;
+          }
+        }
+      }
+    } catch {
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+      }
+    }
+    const pageBytesMatch = bytesRead === MAX_BYTES;
+    return {
+      actualPlaybackUrlFound: true,
+      pass: pageBytesMatch,
+      gmMetadataStatus: gmPhaseA.status,
+      gmContentRangePresent: gmPhaseA.contentRangePresent,
+      gmContentRangeMatch: gmPhaseA.contentRangeMatch,
+      gmTotalFileSizeParsed: gmPhaseA.totalFileSizeParsed,
+      gmAbortedAtHeaders: gmPhaseA.abortedAtHeaders,
+      pageDataStatus: pageStatus,
+      pageContentLengthPresent,
+      pageContentLengthMatch,
+      pageBytesRead: bytesRead,
+      pageMaxBytesRead: MAX_BYTES,
+      pairFailureKind: pageBytesMatch ? void 0 : "PAGE_BYTES_MISMATCH"
+    };
   }
 
   // companion/src/astalavr-index.ts
@@ -1396,12 +1680,11 @@
               testGmResultEl.style.color = "#d1fae5";
               testGmResultEl.innerHTML = `
               <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>GM_RANGE_TEST=</strong>PASS</div>
+              <div><strong>GM_METADATA_TEST=</strong>PASS</div>
               <div><strong>GM_HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
               <div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
               <div><strong>GM_CONTENT_RANGE_VALID=</strong>${res.contentRangeValid ? "YES" : "NO"}</div>
               <div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>
-              <div><strong>GM_BODY_BYTES=</strong>${res.bodyBytes ?? 0}</div>
               <div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>
             `;
             } else {
@@ -1409,7 +1692,7 @@
               testGmResultEl.style.color = "#fee2e2";
               let failDetails = `
               <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>GM_RANGE_TEST=</strong>FAIL</div>
+              <div><strong>GM_METADATA_TEST=</strong>FAIL</div>
               <div><strong>GM_FAILURE_KIND=</strong>${res.failureKind || "UNKNOWN"}</div>
             `;
               if (res.httpStatus !== void 0) {
@@ -1424,9 +1707,6 @@
               if (res.totalFileSizeParsed !== void 0) {
                 failDetails += `<div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>`;
               }
-              if (res.bodyBytes !== void 0) {
-                failDetails += `<div><strong>GM_BODY_BYTES=</strong>${res.bodyBytes}</div>`;
-              }
               failDetails += `<div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>`;
               testGmResultEl.innerHTML = failDetails;
             }
@@ -1434,6 +1714,105 @@
         };
         btnContainer.appendChild(testGmBtn);
         btnContainer.appendChild(testGmResultEl);
+        const testPairBtn = document.createElement("button");
+        testPairBtn.id = "astalavr-test-pair-range-btn";
+        testPairBtn.textContent = "\u25B6 Test paired 1MiB Range";
+        testPairBtn.style.width = "100%";
+        testPairBtn.style.padding = "6px 12px";
+        testPairBtn.style.backgroundColor = "#d97706";
+        testPairBtn.style.color = "#ffffff";
+        testPairBtn.style.border = "none";
+        testPairBtn.style.borderRadius = "4px";
+        testPairBtn.style.cursor = "pointer";
+        testPairBtn.style.fontWeight = "bold";
+        const testPairResultEl = document.createElement("div");
+        testPairResultEl.id = "astalavr-test-pair-range-result";
+        testPairResultEl.style.fontSize = "11px";
+        testPairResultEl.style.padding = "6px 8px";
+        testPairResultEl.style.borderRadius = "4px";
+        testPairResultEl.style.display = "none";
+        testPairResultEl.style.lineHeight = "1.4";
+        testPairBtn.onclick = () => {
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = void 0;
+          }
+          testPairBtn.disabled = true;
+          testPairBtn.textContent = "\u23F3 Testing paired 1MiB (GM metadata + page data)...";
+          testPairResultEl.style.display = "none";
+          testActualPlaybackPaired1MiB(
+            effectiveRenditions,
+            typeof performance !== "undefined" ? performance : {}
+          ).then((res) => {
+            testPairBtn.disabled = false;
+            testPairBtn.textContent = "\u25B6 Test paired 1MiB Range";
+            testPairResultEl.style.display = "block";
+            if (!res.actualPlaybackUrlFound) {
+              testPairResultEl.style.backgroundColor = "#1e293b";
+              testPairResultEl.style.color = "#f1f5f9";
+              testPairResultEl.innerHTML = `<div><strong>PAIR_ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
+              return;
+            }
+            if (res.pass) {
+              testPairResultEl.style.backgroundColor = "#065f46";
+              testPairResultEl.style.color = "#d1fae5";
+              testPairResultEl.innerHTML = `
+              <div><strong>PAIR_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>PAIR_RANGE_TEST=</strong>PASS</div>
+              <div style="margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 2px;"><strong>GM_METADATA_STATUS=</strong>${res.gmMetadataStatus ?? "unknown"}</div>
+              <div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.gmContentRangePresent ? "YES" : "NO"}</div>
+              <div><strong>GM_CONTENT_RANGE_MATCH=</strong>${res.gmContentRangeMatch ? "YES" : "NO"}</div>
+              <div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.gmTotalFileSizeParsed ? "YES" : "NO"}</div>
+              <div><strong>GM_ABORTED_AT_HEADERS=</strong>${res.gmAbortedAtHeaders ? "YES" : "NO"}</div>
+              <div style="margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 2px;"><strong>PAGE_DATA_STATUS=</strong>${res.pageDataStatus ?? "unknown"}</div>
+              <div><strong>PAGE_CONTENT_LENGTH_PRESENT=</strong>${res.pageContentLengthPresent ? "YES" : "NO"}</div>
+              <div><strong>PAGE_CONTENT_LENGTH_MATCH=</strong>${res.pageContentLengthMatch ? "YES" : "NO"}</div>
+              <div><strong>PAGE_BYTES_READ=</strong>${res.pageBytesRead ?? 0}</div>
+              <div><strong>PAGE_MAX_BYTES_READ=</strong>${res.pageMaxBytesRead}</div>
+            `;
+            } else {
+              testPairResultEl.style.backgroundColor = "#7f1d1d";
+              testPairResultEl.style.color = "#fee2e2";
+              let failDetails = `
+              <div><strong>PAIR_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>PAIR_RANGE_TEST=</strong>FAIL</div>
+              <div><strong>PAIR_FAILURE_KIND=</strong>${res.pairFailureKind || "UNKNOWN"}</div>
+            `;
+              if (res.gmMetadataStatus !== void 0) {
+                failDetails += `<div style="margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 2px;"><strong>GM_METADATA_STATUS=</strong>${res.gmMetadataStatus}</div>`;
+              }
+              if (res.gmContentRangePresent !== void 0) {
+                failDetails += `<div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.gmContentRangePresent ? "YES" : "NO"}</div>`;
+              }
+              if (res.gmContentRangeMatch !== void 0) {
+                failDetails += `<div><strong>GM_CONTENT_RANGE_MATCH=</strong>${res.gmContentRangeMatch ? "YES" : "NO"}</div>`;
+              }
+              if (res.gmTotalFileSizeParsed !== void 0) {
+                failDetails += `<div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.gmTotalFileSizeParsed ? "YES" : "NO"}</div>`;
+              }
+              if (res.gmAbortedAtHeaders !== void 0) {
+                failDetails += `<div><strong>GM_ABORTED_AT_HEADERS=</strong>${res.gmAbortedAtHeaders ? "YES" : "NO"}</div>`;
+              }
+              if (res.pageDataStatus !== void 0) {
+                failDetails += `<div style="margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 2px;"><strong>PAGE_DATA_STATUS=</strong>${res.pageDataStatus}</div>`;
+              }
+              if (res.pageContentLengthPresent !== void 0) {
+                failDetails += `<div><strong>PAGE_CONTENT_LENGTH_PRESENT=</strong>${res.pageContentLengthPresent ? "YES" : "NO"}</div>`;
+              }
+              if (res.pageContentLengthMatch !== void 0) {
+                failDetails += `<div><strong>PAGE_CONTENT_LENGTH_MATCH=</strong>${res.pageContentLengthMatch ? "YES" : "NO"}</div>`;
+              }
+              if (res.pageBytesRead !== void 0) {
+                failDetails += `<div><strong>PAGE_BYTES_READ=</strong>${res.pageBytesRead}</div>`;
+              }
+              failDetails += `<div><strong>PAGE_MAX_BYTES_READ=</strong>${res.pageMaxBytesRead}</div>`;
+              testPairResultEl.innerHTML = failDetails;
+            }
+          });
+        };
+        btnContainer.appendChild(testPairBtn);
+        btnContainer.appendChild(testPairResultEl);
         btnContainer.appendChild(copyBtn);
         this.contentElement.appendChild(btnContainer);
       }
