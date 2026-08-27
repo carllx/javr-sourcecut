@@ -14,13 +14,30 @@
 "use strict";
 (() => {
   var __defProp = Object.defineProperty;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
   // companion/src/astalavr.ts
-  var ASTALAVR_URL_PATTERNS = [
-    /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)?astalavr\.com\/(?:[a-z]{2}\/)?videos\/([a-zA-Z0-9]+)/i
-  ];
+  var astalavr_exports = {};
+  __export(astalavr_exports, {
+    detectAstalaVrPage: () => detectAstalaVrPage,
+    extractAstalaVrVideoId: () => extractAstalaVrVideoId,
+    parseAstalaVrDomRenditions: () => parseAstalaVrDomRenditions,
+    testBrowserMedia720p: () => testBrowserMedia720p
+  });
   function extractAstalaVrVideoId(url) {
     for (const pattern of ASTALAVR_URL_PATTERNS) {
       const match = url.match(pattern);
@@ -128,8 +145,71 @@
     renditions.sort((a, b) => a.height - b.height);
     return renditions;
   }
+  function testBrowserMedia720p(directUrl, timeoutMs = 1e4, doc) {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const targetDoc = doc || (typeof document !== "undefined" ? document : null);
+      if (!targetDoc) {
+        resolve({ pass: false, errorCode: "NO_DOCUMENT" });
+        return;
+      }
+      const video = targetDoc.createElement("video");
+      video.preload = "metadata";
+      const cleanup = () => {
+        video.removeAttribute("src");
+        video.load();
+        video.remove();
+      };
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve({ pass: false, errorCode: "TIMEOUT" });
+        }
+      }, timeoutMs);
+      video.onloadedmetadata = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          const duration = video.duration;
+          cleanup();
+          resolve({ pass: true, duration });
+        }
+      };
+      video.onerror = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          const errorCode = video.error ? video.error.code : "UNKNOWN_ERROR";
+          cleanup();
+          resolve({ pass: false, errorCode });
+        }
+      };
+      try {
+        video.src = directUrl;
+        video.load();
+      } catch {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve({ pass: false, errorCode: "LOAD_EXCEPTION" });
+        }
+      }
+    });
+  }
+  var ASTALAVR_URL_PATTERNS;
+  var init_astalavr = __esm({
+    "companion/src/astalavr.ts"() {
+      "use strict";
+      ASTALAVR_URL_PATTERNS = [
+        /(?:https?:\/\/)?(?:[a-zA-Z0-9-]+\.)?astalavr\.com\/(?:[a-z]{2}\/)?videos\/([a-zA-Z0-9]+)/i
+      ];
+    }
+  });
 
   // companion/src/astalavr-index.ts
+  init_astalavr();
   var AstalaVrProbeApp = class {
     constructor() {
       __publicField(this, "panelElement", null);
@@ -238,6 +318,11 @@
       }
       this.contentElement.innerHTML = html;
       if (renditions.length > 0) {
+        const btnContainer = document.createElement("div");
+        btnContainer.style.display = "flex";
+        btnContainer.style.flexDirection = "column";
+        btnContainer.style.gap = "6px";
+        btnContainer.style.marginTop = "6px";
         const copyBtn = document.createElement("button");
         copyBtn.textContent = "\u{1F4CB} Copy renditions";
         copyBtn.style.width = "100%";
@@ -248,7 +333,6 @@
         copyBtn.style.borderRadius = "4px";
         copyBtn.style.cursor = "pointer";
         copyBtn.style.fontWeight = "bold";
-        copyBtn.style.marginTop = "4px";
         copyBtn.onclick = () => {
           const payload = JSON.stringify(
             {
@@ -278,7 +362,52 @@
             }
           );
         };
-        this.contentElement.appendChild(copyBtn);
+        const rendition720p = renditions.find((r) => r.resolution === "720p" || r.height === 720);
+        if (rendition720p) {
+          const test720Btn = document.createElement("button");
+          test720Btn.id = "astalavr-test-720p-btn";
+          test720Btn.textContent = "\u25B6 Test 720p in browser";
+          test720Btn.style.width = "100%";
+          test720Btn.style.padding = "6px 12px";
+          test720Btn.style.backgroundColor = "#4f46e5";
+          test720Btn.style.color = "#ffffff";
+          test720Btn.style.border = "none";
+          test720Btn.style.borderRadius = "4px";
+          test720Btn.style.cursor = "pointer";
+          test720Btn.style.fontWeight = "bold";
+          const resultEl = document.createElement("div");
+          resultEl.id = "astalavr-test-720p-result";
+          resultEl.style.fontSize = "11px";
+          resultEl.style.padding = "4px 8px";
+          resultEl.style.borderRadius = "4px";
+          resultEl.style.display = "none";
+          test720Btn.onclick = () => {
+            test720Btn.disabled = true;
+            test720Btn.textContent = "\u23F3 Testing 720p metadata in browser...";
+            resultEl.style.display = "none";
+            Promise.resolve().then(() => (init_astalavr(), astalavr_exports)).then(({ testBrowserMedia720p: testBrowserMedia720p2 }) => {
+              testBrowserMedia720p2(rendition720p.fullDirectUrl).then((res) => {
+                test720Btn.disabled = false;
+                test720Btn.textContent = "\u25B6 Test 720p in browser";
+                resultEl.style.display = "block";
+                if (res.pass) {
+                  resultEl.style.backgroundColor = "#065f46";
+                  resultEl.style.color = "#d1fae5";
+                  const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+                  resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
+                } else {
+                  resultEl.style.backgroundColor = "#7f1d1d";
+                  resultEl.style.color = "#fee2e2";
+                  resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
+                }
+              });
+            });
+          };
+          btnContainer.appendChild(test720Btn);
+          btnContainer.appendChild(resultEl);
+        }
+        btnContainer.appendChild(copyBtn);
+        this.contentElement.appendChild(btnContainer);
       }
     }
     destroy() {

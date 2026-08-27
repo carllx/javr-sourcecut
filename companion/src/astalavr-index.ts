@@ -126,8 +126,14 @@ export class AstalaVrProbeApp {
 
     this.contentElement.innerHTML = html;
 
-    // Add Copy Renditions button if renditions exist
+    // Add action buttons if renditions exist
     if (renditions.length > 0) {
+      const btnContainer = document.createElement("div");
+      btnContainer.style.display = "flex";
+      btnContainer.style.flexDirection = "column";
+      btnContainer.style.gap = "6px";
+      btnContainer.style.marginTop = "6px";
+
       const copyBtn = document.createElement("button");
       copyBtn.textContent = "📋 Copy renditions";
       copyBtn.style.width = "100%";
@@ -138,7 +144,6 @@ export class AstalaVrProbeApp {
       copyBtn.style.borderRadius = "4px";
       copyBtn.style.cursor = "pointer";
       copyBtn.style.fontWeight = "bold";
-      copyBtn.style.marginTop = "4px";
 
       copyBtn.onclick = () => {
         const payload = JSON.stringify(
@@ -170,7 +175,58 @@ export class AstalaVrProbeApp {
         );
       };
 
-      this.contentElement.appendChild(copyBtn);
+      const rendition720p = renditions.find((r) => r.resolution === "720p" || r.height === 720);
+      if (rendition720p) {
+        const test720Btn = document.createElement("button");
+        test720Btn.id = "astalavr-test-720p-btn";
+        test720Btn.textContent = "▶ Test 720p in browser";
+        test720Btn.style.width = "100%";
+        test720Btn.style.padding = "6px 12px";
+        test720Btn.style.backgroundColor = "#4f46e5";
+        test720Btn.style.color = "#ffffff";
+        test720Btn.style.border = "none";
+        test720Btn.style.borderRadius = "4px";
+        test720Btn.style.cursor = "pointer";
+        test720Btn.style.fontWeight = "bold";
+
+        const resultEl = document.createElement("div");
+        resultEl.id = "astalavr-test-720p-result";
+        resultEl.style.fontSize = "11px";
+        resultEl.style.padding = "4px 8px";
+        resultEl.style.borderRadius = "4px";
+        resultEl.style.display = "none";
+
+        test720Btn.onclick = () => {
+          test720Btn.disabled = true;
+          test720Btn.textContent = "⏳ Testing 720p metadata in browser...";
+          resultEl.style.display = "none";
+
+          import("./astalavr.js").then(({ testBrowserMedia720p }) => {
+            testBrowserMedia720p(rendition720p.fullDirectUrl).then((res) => {
+              test720Btn.disabled = false;
+              test720Btn.textContent = "▶ Test 720p in browser";
+              resultEl.style.display = "block";
+
+              if (res.pass) {
+                resultEl.style.backgroundColor = "#065f46";
+                resultEl.style.color = "#d1fae5";
+                const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
+              } else {
+                resultEl.style.backgroundColor = "#7f1d1d";
+                resultEl.style.color = "#fee2e2";
+                resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
+              }
+            });
+          });
+        };
+
+        btnContainer.appendChild(test720Btn);
+        btnContainer.appendChild(resultEl);
+      }
+
+      btnContainer.appendChild(copyBtn);
+      this.contentElement.appendChild(btnContainer);
     }
   }
 

@@ -161,3 +161,72 @@ export function parseAstalaVrDomRenditions(root: ParentNode = document, baseHref
   renditions.sort((a, b) => a.height - b.height);
   return renditions;
 }
+
+export interface BrowserMediaTestResult {
+  pass: boolean;
+  duration?: number;
+  errorCode?: number | string;
+}
+
+export function testBrowserMedia720p(
+  directUrl: string,
+  timeoutMs: number = 10000,
+  doc?: Document
+): Promise<BrowserMediaTestResult> {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const targetDoc = doc || (typeof document !== "undefined" ? document : null);
+    if (!targetDoc) {
+      resolve({ pass: false, errorCode: "NO_DOCUMENT" });
+      return;
+    }
+    const video = targetDoc.createElement("video");
+    video.preload = "metadata";
+
+    const cleanup = () => {
+      video.removeAttribute("src");
+      video.load();
+      video.remove();
+    };
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve({ pass: false, errorCode: "TIMEOUT" });
+      }
+    }, timeoutMs);
+
+    video.onloadedmetadata = () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        const duration = video.duration;
+        cleanup();
+        resolve({ pass: true, duration });
+      }
+    };
+
+    video.onerror = () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        const errorCode = video.error ? video.error.code : "UNKNOWN_ERROR";
+        cleanup();
+        resolve({ pass: false, errorCode });
+      }
+    };
+
+    try {
+      video.src = directUrl;
+      video.load();
+    } catch {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve({ pass: false, errorCode: "LOAD_EXCEPTION" });
+      }
+    }
+  });
+}

@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Window } from "happy-dom";
-import { detectAstalaVrPage, parseAstalaVrDomRenditions } from "../../companion/src/astalavr.js";
+import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p } from "../../companion/src/astalavr.js";
 
 describe("AstalaVR Companion Probe", () => {
   it("1. Cloudflare challenge page -> status is WAITING_FOR_REAL_PAGE and not real", () => {
@@ -105,5 +105,84 @@ describe("AstalaVR Companion Probe", () => {
     expect(renditions).toHaveLength(1);
     expect(renditions[0].resolution).toBe("1440p");
     expect(renditions[0].mediaHostname).toBe("cdn3.astalavr.com");
+  });
+
+  it("6. testBrowserMedia720p resolves PASS on loadedmetadata and cleans up element", async () => {
+    const window = new Window();
+    const doc = window.document;
+    let cleanedUp = false;
+
+    // Mock HTMLVideoElement behavior in test environment
+    const mockVideo: any = {
+      preload: "",
+      src: "",
+      duration: 123.45,
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onloadedmetadata) {
+            mockVideo.onloadedmetadata();
+          }
+        }, 10);
+      },
+      removeAttribute: (attr: string) => {
+        if (attr === "src") {
+          mockVideo.src = "";
+          cleanedUp = true;
+        }
+      },
+      remove: () => {},
+    };
+
+    const spy = vi.spyOn(doc, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") return mockVideo as any;
+      return (Window.prototype as any).document.createElement(tag);
+    });
+
+    const result = await testBrowserMedia720p("https://cdn3.astalavr.com/qDAVn/720P.mp4?token=fake", 1000, doc as any);
+    expect(result.pass).toBe(true);
+    expect(result.duration).toBe(123.45);
+    expect(cleanedUp).toBe(true);
+    expect(mockVideo.src).toBe("");
+
+    spy.mockRestore();
+  });
+
+  it("7. testBrowserMedia720p resolves FAIL on error and cleans up element without leaking token", async () => {
+    const window = new Window();
+    const doc = window.document;
+    let cleanedUp = false;
+
+    const mockVideo: any = {
+      preload: "",
+      src: "",
+      error: { code: 4 }, // MEDIA_ERR_SRC_NOT_SUPPORTED
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onerror) {
+            mockVideo.onerror();
+          }
+        }, 10);
+      },
+      removeAttribute: (attr: string) => {
+        if (attr === "src") {
+          mockVideo.src = "";
+          cleanedUp = true;
+        }
+      },
+      remove: () => {},
+    };
+
+    const spy = vi.spyOn(doc, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") return mockVideo as any;
+      return (Window.prototype as any).document.createElement(tag);
+    });
+
+    const result = await testBrowserMedia720p("https://cdn3.astalavr.com/qDAVn/720P.mp4?token=sensitive", 1000, doc as any);
+    expect(result.pass).toBe(false);
+    expect(result.errorCode).toBe(4);
+    expect(cleanedUp).toBe(true);
+    expect(mockVideo.src).toBe("");
+
+    spy.mockRestore();
   });
 });
