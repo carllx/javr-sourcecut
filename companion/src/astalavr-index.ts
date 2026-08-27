@@ -379,6 +379,10 @@ export class AstalaVrProbeApp {
                 <div><strong>RESOURCE_${n}_PATH=</strong>${r.path}</div>
                 <div><strong>RESOURCE_${n}_HAS_TOKEN=</strong>${r.hasToken ? "YES" : "NO"}</div>
                 <div style="color: #38bdf8;"><strong>RESOURCE_${n}_MATCHED_RENDITION=</strong>${r.matchedRendition}</div>
+                <div><strong>RESOURCE_${n}_EXACT_CACHED_URL_MATCH=</strong>${r.exactCachedUrlMatch}</div>
+                <div><strong>RESOURCE_${n}_QUERY_MATCH=</strong>${r.queryMatch}</div>
+                <div><strong>RESOURCE_${n}_TOKEN_MATCH=</strong>${r.tokenMatch}</div>
+                <div><strong>RESOURCE_${n}_SAME_FULL_URL_AS_PREVIOUS_MATCH=</strong>${r.sameFullUrlAsPreviousMatch}</div>
                 <div><strong>RESOURCE_${n}_DURATION_MS=</strong>${r.durationMs}</div>
                 ${r.transferSize !== undefined ? `<div><strong>RESOURCE_${n}_TRANSFER_SIZE=</strong>${r.transferSize}</div>` : ""}
                 ${r.encodedBodySize !== undefined ? `<div><strong>RESOURCE_${n}_ENCODED_BODY_SIZE=</strong>${r.encodedBodySize}</div>` : ""}

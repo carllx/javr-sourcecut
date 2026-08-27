@@ -274,6 +274,7 @@
     const dl8ShadowRoot = dl8VideoEl && dl8VideoEl.shadowRoot ? "OPEN" : "UNAVAILABLE";
     const entries = perf && typeof perf.getEntriesByType === "function" ? perf.getEntriesByType("resource") : [];
     const matchedResources = [];
+    const rawMatchedUrls = [];
     for (const entry of entries) {
       const rawUrl = entry.name;
       if (!rawUrl || typeof rawUrl !== "string") continue;
@@ -281,14 +282,17 @@
         const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
         const host = parsed.hostname;
         const path = parsed.pathname;
+        const entryToken = parsed.searchParams.get("token");
         const hasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
         let matchedRendition = "NONE";
+        let matchedCachedRenditionObj = null;
         const entryOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
         for (const r of cachedRenditions) {
           try {
             const rParsed = new URL(r.fullDirectUrl);
             const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
             if (entryOriginPath === rOriginPath) {
+              matchedCachedRenditionObj = r;
               if (r.resolution === "720p" || r.height === 720) {
                 matchedRendition = "720p";
               } else if (r.resolution === "1440p" || r.height === 1440) {
@@ -304,12 +308,39 @@
         const isCdn = host === "cdn3.astalavr.com";
         const isRenditionMatch = matchedRendition !== "NONE";
         if (isCdn || isRenditionMatch) {
+          let exactCachedUrlMatch = "NO";
+          let queryMatch = "NO";
+          let tokenMatch = "UNAVAILABLE";
+          if (matchedCachedRenditionObj) {
+            try {
+              const cachedParsed = new URL(matchedCachedRenditionObj.fullDirectUrl);
+              const cachedToken = cachedParsed.searchParams.get("token");
+              exactCachedUrlMatch = parsed.href === cachedParsed.href ? "YES" : "NO";
+              queryMatch = parsed.search === cachedParsed.search ? "YES" : "NO";
+              if (entryToken !== null && cachedToken !== null) {
+                tokenMatch = entryToken === cachedToken ? "YES" : "NO";
+              } else {
+                tokenMatch = "UNAVAILABLE";
+              }
+            } catch {
+            }
+          }
+          let sameFullUrlAsPreviousMatch = "N/A";
+          if (rawMatchedUrls.length > 0) {
+            const previousUrl = rawMatchedUrls[rawMatchedUrls.length - 1];
+            sameFullUrlAsPreviousMatch = parsed.href === previousUrl ? "YES" : "NO";
+          }
+          rawMatchedUrls.push(parsed.href);
           matchedResources.push({
             initiatorType: entry.initiatorType || "unknown",
             host,
             path,
             hasToken,
             matchedRendition,
+            exactCachedUrlMatch,
+            queryMatch,
+            tokenMatch,
+            sameFullUrlAsPreviousMatch,
             durationMs: Math.round(entry.duration || 0),
             transferSize: typeof entry.transferSize === "number" ? entry.transferSize : void 0,
             encodedBodySize: typeof entry.encodedBodySize === "number" ? entry.encodedBodySize : void 0
@@ -648,6 +679,10 @@
                 <div><strong>RESOURCE_${n}_PATH=</strong>${r.path}</div>
                 <div><strong>RESOURCE_${n}_HAS_TOKEN=</strong>${r.hasToken ? "YES" : "NO"}</div>
                 <div style="color: #38bdf8;"><strong>RESOURCE_${n}_MATCHED_RENDITION=</strong>${r.matchedRendition}</div>
+                <div><strong>RESOURCE_${n}_EXACT_CACHED_URL_MATCH=</strong>${r.exactCachedUrlMatch}</div>
+                <div><strong>RESOURCE_${n}_QUERY_MATCH=</strong>${r.queryMatch}</div>
+                <div><strong>RESOURCE_${n}_TOKEN_MATCH=</strong>${r.tokenMatch}</div>
+                <div><strong>RESOURCE_${n}_SAME_FULL_URL_AS_PREVIOUS_MATCH=</strong>${r.sameFullUrlAsPreviousMatch}</div>
                 <div><strong>RESOURCE_${n}_DURATION_MS=</strong>${r.durationMs}</div>
                 ${r.transferSize !== void 0 ? `<div><strong>RESOURCE_${n}_TRANSFER_SIZE=</strong>${r.transferSize}</div>` : ""}
                 ${r.encodedBodySize !== void 0 ? `<div><strong>RESOURCE_${n}_ENCODED_BODY_SIZE=</strong>${r.encodedBodySize}</div>` : ""}

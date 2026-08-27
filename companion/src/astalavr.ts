@@ -360,6 +360,10 @@ export interface PlaybackResourceItem {
   path: string;
   hasToken: boolean;
   matchedRendition: "720p" | "1440p" | "2048p" | "NONE";
+  exactCachedUrlMatch: "YES" | "NO";
+  queryMatch: "YES" | "NO";
+  tokenMatch: "YES" | "NO" | "UNAVAILABLE";
+  sameFullUrlAsPreviousMatch: "YES" | "NO" | "N/A";
   durationMs: number;
   transferSize?: number;
   encodedBodySize?: number;
@@ -388,6 +392,7 @@ export function inspectPlaybackResources(
       : [];
 
   const matchedResources: PlaybackResourceItem[] = [];
+  const rawMatchedUrls: string[] = [];
 
   for (const entry of entries) {
     const rawUrl = entry.name;
@@ -397,9 +402,11 @@ export function inspectPlaybackResources(
       const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
       const host = parsed.hostname;
       const path = parsed.pathname;
+      const entryToken = parsed.searchParams.get("token");
       const hasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
 
       let matchedRendition: "720p" | "1440p" | "2048p" | "NONE" = "NONE";
+      let matchedCachedRenditionObj: AstalaVrRenditionSummary | null = null;
       const entryOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
 
       for (const r of cachedRenditions) {
@@ -407,6 +414,7 @@ export function inspectPlaybackResources(
           const rParsed = new URL(r.fullDirectUrl);
           const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
           if (entryOriginPath === rOriginPath) {
+            matchedCachedRenditionObj = r;
             if (r.resolution === "720p" || r.height === 720) {
               matchedRendition = "720p";
             } else if (r.resolution === "1440p" || r.height === 1440) {
@@ -423,12 +431,48 @@ export function inspectPlaybackResources(
       const isRenditionMatch = matchedRendition !== "NONE";
 
       if (isCdn || isRenditionMatch) {
+        let exactCachedUrlMatch: "YES" | "NO" = "NO";
+        let queryMatch: "YES" | "NO" = "NO";
+        let tokenMatch: "YES" | "NO" | "UNAVAILABLE" = "UNAVAILABLE";
+
+        if (matchedCachedRenditionObj) {
+          try {
+            const cachedParsed = new URL(matchedCachedRenditionObj.fullDirectUrl);
+            const cachedToken = cachedParsed.searchParams.get("token");
+
+            // A. exact full URL equality
+            exactCachedUrlMatch = parsed.href === cachedParsed.href ? "YES" : "NO";
+
+            // B. query-string equality
+            queryMatch = parsed.search === cachedParsed.search ? "YES" : "NO";
+
+            // C. token parameter equality
+            if (entryToken !== null && cachedToken !== null) {
+              tokenMatch = entryToken === cachedToken ? "YES" : "NO";
+            } else {
+              tokenMatch = "UNAVAILABLE";
+            }
+          } catch {}
+        }
+
+        // Same full URL as previous match
+        let sameFullUrlAsPreviousMatch: "YES" | "NO" | "N/A" = "N/A";
+        if (rawMatchedUrls.length > 0) {
+          const previousUrl = rawMatchedUrls[rawMatchedUrls.length - 1];
+          sameFullUrlAsPreviousMatch = parsed.href === previousUrl ? "YES" : "NO";
+        }
+        rawMatchedUrls.push(parsed.href);
+
         matchedResources.push({
           initiatorType: entry.initiatorType || "unknown",
           host,
           path,
           hasToken,
           matchedRendition,
+          exactCachedUrlMatch,
+          queryMatch,
+          tokenMatch,
+          sameFullUrlAsPreviousMatch,
           durationMs: Math.round(entry.duration || 0),
           transferSize: typeof entry.transferSize === "number" ? entry.transferSize : undefined,
           encodedBodySize: typeof entry.encodedBodySize === "number" ? entry.encodedBodySize : undefined,
