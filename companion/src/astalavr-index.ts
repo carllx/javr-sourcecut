@@ -4,25 +4,13 @@ export class AstalaVrProbeApp {
   private panelElement: HTMLElement | null = null;
   private statusElement: HTMLElement | null = null;
   private contentElement: HTMLElement | null = null;
-  private mutationObserver?: MutationObserver;
   private pollInterval?: ReturnType<typeof setInterval>;
 
   init(): void {
     this.createPanel();
     this.checkAndRender();
 
-    // Observe DOM updates for dynamic rendering or challenge resolution
-    if (typeof MutationObserver !== "undefined") {
-      this.mutationObserver = new MutationObserver(() => {
-        this.checkAndRender();
-      });
-      this.mutationObserver.observe(document.body || document.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    }
-
-    // Periodic check in case of video tag hydration
+    // Periodic check handles Cloudflare settlement, dl8-video hydration, and source element updates
     this.pollInterval = setInterval(() => {
       this.checkAndRender();
     }, 1000);
@@ -188,7 +176,6 @@ export class AstalaVrProbeApp {
 
   destroy(): void {
     if (this.pollInterval) clearInterval(this.pollInterval);
-    this.mutationObserver?.disconnect();
     this.panelElement?.remove();
   }
 }

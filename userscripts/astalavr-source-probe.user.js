@@ -135,21 +135,11 @@
       __publicField(this, "panelElement", null);
       __publicField(this, "statusElement", null);
       __publicField(this, "contentElement", null);
-      __publicField(this, "mutationObserver");
       __publicField(this, "pollInterval");
     }
     init() {
       this.createPanel();
       this.checkAndRender();
-      if (typeof MutationObserver !== "undefined") {
-        this.mutationObserver = new MutationObserver(() => {
-          this.checkAndRender();
-        });
-        this.mutationObserver.observe(document.body || document.documentElement, {
-          childList: true,
-          subtree: true
-        });
-      }
       this.pollInterval = setInterval(() => {
         this.checkAndRender();
       }, 1e3);
@@ -293,7 +283,6 @@
     }
     destroy() {
       if (this.pollInterval) clearInterval(this.pollInterval);
-      this.mutationObserver?.disconnect();
       this.panelElement?.remove();
     }
   };
