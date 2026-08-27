@@ -50,22 +50,25 @@ describe("AstalaVR Companion Probe", () => {
     const renditions = parseAstalaVrDomRenditions(document as any, "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao");
     expect(renditions).toHaveLength(3);
 
-    // 720p (no type attribute -> unknown codec)
+    // 720p (no type attribute -> unknown codec & unknown mimeType)
     expect(renditions[0].resolution).toBe("720p");
     expect(renditions[0].height).toBe(720);
     expect(renditions[0].vcodec).toBe("unknown");
+    expect(renditions[0].mimeType).toBe("unknown");
     expect(renditions[0].mediaHostname).toBe("cdn3.astalavr.com");
 
     // 1440p (codecs="avc1.640028" -> avc1.640028)
     expect(renditions[1].resolution).toBe("1440p");
     expect(renditions[1].height).toBe(1440);
     expect(renditions[1].vcodec).toBe("avc1.640028");
+    expect(renditions[1].mimeType).toBe('video/mp4; codecs="avc1.640028"');
     expect(renditions[1].mediaHostname).toBe("cdn3.astalavr.com");
 
     // 2048p (type="video/mp4" without codec -> unknown)
     expect(renditions[2].resolution).toBe("2048p");
     expect(renditions[2].height).toBe(2048);
     expect(renditions[2].vcodec).toBe("unknown");
+    expect(renditions[2].mimeType).toBe("video/mp4");
     expect(renditions[2].mediaHostname).toBe("cdn3.astalavr.com");
   });
 
@@ -83,6 +86,24 @@ describe("AstalaVR Companion Probe", () => {
     const displayLabel = `[${r.resolution}] ${r.vcodec} (${r.mimeType}) Host: ${r.mediaHostname}`;
     expect(displayLabel).not.toContain("SUPER_SECRET_TOKEN_XYZ");
     expect(displayLabel).not.toContain("token=");
-    expect(displayLabel).toBe("[720p] unknown (video/mp4) Host: cdn3.astalavr.com");
+    expect(displayLabel).toBe("[720p] unknown (unknown) Host: cdn3.astalavr.com");
+  });
+
+  it("5. Strictly restricts source selector to dl8-video, ignoring external video tags", () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const document = window.document;
+    document.body.innerHTML = `
+      <dl8-video>
+        <source quality="1440p" src="https://cdn3.astalavr.com/qDAVn/1440P.mp4?token=target" />
+      </dl8-video>
+      <video id="unrelated-preview">
+        <source quality="480p" src="https://ads.astalavr.com/preview.mp4" />
+      </video>
+    `;
+
+    const renditions = parseAstalaVrDomRenditions(document as any, "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao");
+    expect(renditions).toHaveLength(1);
+    expect(renditions[0].resolution).toBe("1440p");
+    expect(renditions[0].mediaHostname).toBe("cdn3.astalavr.com");
   });
 });

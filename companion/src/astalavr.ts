@@ -78,7 +78,7 @@ export function detectAstalaVrPage(doc: Document = document, currentUrl?: string
 
 export function parseAstalaVrDomRenditions(root: ParentNode = document, baseHref?: string): AstalaVrRenditionSummary[] {
   const renditions: AstalaVrRenditionSummary[] = [];
-  const sources = root.querySelectorAll("dl8-video source, video source, source");
+  const sources = root.querySelectorAll("dl8-video source");
   const href = baseHref || (typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
 
   for (const source of Array.from(sources)) {
@@ -139,7 +139,7 @@ export function parseAstalaVrDomRenditions(root: ParentNode = document, baseHref
       vcodec = "hevc";
     }
 
-    const mimeType = typeAttr || "video/mp4";
+    const mimeType = typeAttr || "unknown";
     const resolution = height > 0 ? (height + "p") : (qualityAttr || "unknown");
     const formatId = resolution + "-" + vcodec;
 

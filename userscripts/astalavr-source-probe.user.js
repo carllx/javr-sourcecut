@@ -56,7 +56,7 @@
   }
   function parseAstalaVrDomRenditions(root = document, baseHref) {
     const renditions = [];
-    const sources = root.querySelectorAll("dl8-video source, video source, source");
+    const sources = root.querySelectorAll("dl8-video source");
     const href = baseHref || (typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
     for (const source of Array.from(sources)) {
       const rawSrc = source.getAttribute("src");
@@ -110,7 +110,7 @@
       } else if (typeAttr.includes("hvc1") || typeAttr.includes("hevc") || typeAttr.includes("h265")) {
         vcodec = "hevc";
       }
-      const mimeType = typeAttr || "video/mp4";
+      const mimeType = typeAttr || "unknown";
       const resolution = height > 0 ? height + "p" : qualityAttr || "unknown";
       const formatId = resolution + "-" + vcodec;
       if (!renditions.some((r) => r.fullDirectUrl === fullDirectUrl)) {
