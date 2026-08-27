@@ -527,8 +527,10 @@ export class AstalaVrProbeApp {
             testRangeResultEl.innerHTML = `
               <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
               <div><strong>ACTUAL_720P_RANGE_TEST=</strong>PASS</div>
+              <div><strong>VALIDATION_MODE=</strong>${res.validationMode || "unknown"}</div>
               <div><strong>HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
               <div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
+              <div><strong>CONTENT_LENGTH_PRESENT=</strong>${res.contentLengthPresent ? "YES" : "NO"}</div>
               ${res.contentLength !== null && res.contentLength !== undefined ? `<div><strong>CONTENT_LENGTH=</strong>${res.contentLength}</div>` : ""}
               ${res.contentType !== null && res.contentType !== undefined ? `<div><strong>CONTENT_TYPE=</strong>${res.contentType}</div>` : ""}
               <div><strong>BYTES_READ=</strong>${res.bytesRead ?? 0}</div>
@@ -544,6 +546,9 @@ export class AstalaVrProbeApp {
             if (res.failureKind === "FETCH_ERROR") {
               failDetails += `<div><strong>FAILURE_KIND=</strong>FETCH_ERROR</div><div><strong>ERROR_NAME=</strong>${res.errorName || "FetchError"}</div>`;
             } else {
+              if (res.failureKind !== undefined) {
+                failDetails += `<div><strong>FAILURE_KIND=</strong>${res.failureKind}</div>`;
+              }
               if (res.httpStatus !== undefined) {
                 failDetails += `<div><strong>HTTP_STATUS=</strong>${res.httpStatus}</div>`;
               }
@@ -552,6 +557,15 @@ export class AstalaVrProbeApp {
               }
               if (res.contentRangePresent !== undefined) {
                 failDetails += `<div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>`;
+              }
+              if (res.contentLengthPresent !== undefined) {
+                failDetails += `<div><strong>CONTENT_LENGTH_PRESENT=</strong>${res.contentLengthPresent ? "YES" : "NO"}</div>`;
+              }
+              if (res.contentLength !== null && res.contentLength !== undefined) {
+                failDetails += `<div><strong>CONTENT_LENGTH=</strong>${res.contentLength}</div>`;
+              }
+              if (res.contentType !== null && res.contentType !== undefined) {
+                failDetails += `<div><strong>CONTENT_TYPE=</strong>${res.contentType}</div>`;
               }
               if (res.bytesRead !== undefined) {
                 failDetails += `<div><strong>BYTES_READ=</strong>${res.bytesRead}</div>`;

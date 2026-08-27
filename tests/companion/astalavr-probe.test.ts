@@ -1122,9 +1122,11 @@ describe("AstalaVR Companion Probe", () => {
     const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
     expect(res.actualPlaybackUrlFound).toBe(true);
     expect(res.pass).toBe(true);
+    expect(res.validationMode).toBe("CONTENT_RANGE");
     expect(res.httpStatus).toBe(206);
     expect(res.contentRangePresent).toBe(true);
     expect(res.contentRangeValid).toBe(true);
+    expect(res.contentLengthPresent).toBe(true);
     expect(res.bytesRead).toBe(1048576);
     expect(res.maxBytesRead).toBe(1048576);
     expect(res.bodyRead).toBe("YES");
@@ -1401,5 +1403,209 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.bodyRead).toBe("NO");
     expect(res.bytesRead).toBe(0);
     expect(arrayBufferSpy).toHaveBeenCalledTimes(0);
+  });
+
+  it("35. testActualPlayback720pRange resolves PASS with CONTENT_LENGTH_FALLBACK when Content-Range is hidden by CORS", async () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf: any = {
+      getEntriesByType: () => [{ name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1", initiatorType: "video" }],
+    };
+
+    const oneMiBChunk = new Uint8Array(1048576);
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      status: 206,
+      headers: new Map([
+        // Content-Range is hidden by CORS
+        ["Content-Length", "1048576"],
+        ["Content-Type", "video/mp4"],
+      ]),
+      body: {
+        getReader: () => {
+          let delivered = false;
+          return {
+            read: async () => {
+              if (!delivered) {
+                delivered = true;
+                return { done: false, value: oneMiBChunk };
+              }
+              return { done: true, value: undefined };
+            },
+            cancel: async () => {},
+            releaseLock: () => {},
+          };
+        },
+      },
+    }));
+
+    const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(true);
+    expect(res.validationMode).toBe("CONTENT_LENGTH_FALLBACK");
+    expect(res.contentRangePresent).toBe(false);
+    expect(res.contentLengthPresent).toBe(true);
+    expect(res.contentLength).toBe("1048576");
+    expect(res.bytesRead).toBe(1048576);
+  });
+
+  it("36. testActualPlayback720pRange fails when Content-Range is hidden and Content-Length is missing", async () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf: any = {
+      getEntriesByType: () => [{ name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1", initiatorType: "video" }],
+    };
+
+    const oneMiBChunk = new Uint8Array(1048576);
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      status: 206,
+      headers: new Map([
+        // Both Content-Range and Content-Length are missing/hidden
+        ["Content-Type", "video/mp4"],
+      ]),
+      body: {
+        getReader: () => {
+          let delivered = false;
+          return {
+            read: async () => {
+              if (!delivered) {
+                delivered = true;
+                return { done: false, value: oneMiBChunk };
+              }
+              return { done: true, value: undefined };
+            },
+            cancel: async () => {},
+            releaseLock: () => {},
+          };
+        },
+      },
+    }));
+
+    const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(false);
+    expect(res.failureKind).toBe("CONTENT_LENGTH_MISSING_OR_INVALID");
+    expect(res.contentRangePresent).toBe(false);
+    expect(res.contentLengthPresent).toBe(false);
+  });
+
+  it("37. testActualPlayback720pRange fails when Content-Range is hidden and Content-Length != 1048576", async () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf: any = {
+      getEntriesByType: () => [{ name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1", initiatorType: "video" }],
+    };
+
+    const oneMiBChunk = new Uint8Array(1048576);
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      status: 206,
+      headers: new Map([
+        ["Content-Length", "50000000"], // Wrong Content-Length (full file size instead of 1 MiB)
+        ["Content-Type", "video/mp4"],
+      ]),
+      body: {
+        getReader: () => {
+          let delivered = false;
+          return {
+            read: async () => {
+              if (!delivered) {
+                delivered = true;
+                return { done: false, value: oneMiBChunk };
+              }
+              return { done: true, value: undefined };
+            },
+            cancel: async () => {},
+            releaseLock: () => {},
+          };
+        },
+      },
+    }));
+
+    const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(false);
+    expect(res.failureKind).toBe("CONTENT_LENGTH_MISSING_OR_INVALID");
+    expect(res.contentRangePresent).toBe(false);
+    expect(res.contentLengthPresent).toBe(true);
+  });
+
+  it("38. testActualPlayback720pRange fails closed when Content-Range is visible but invalid (must NOT use Content-Length fallback)", async () => {
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockPerf: any = {
+      getEntriesByType: () => [{ name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1", initiatorType: "video" }],
+    };
+
+    const oneMiBChunk = new Uint8Array(1048576);
+    const mockFetch = vi.fn().mockImplementation(async () => ({
+      status: 206,
+      headers: new Map([
+        ["Content-Range", "bytes 500-1000/99999999"], // Invalid requested range
+        ["Content-Length", "1048576"], // Content-Length matches but must NOT be used because Content-Range is visible and invalid
+        ["Content-Type", "video/mp4"],
+      ]),
+      body: {
+        getReader: () => {
+          let delivered = false;
+          return {
+            read: async () => {
+              if (!delivered) {
+                delivered = true;
+                return { done: false, value: oneMiBChunk };
+              }
+              return { done: true, value: undefined };
+            },
+            cancel: async () => {},
+            releaseLock: () => {},
+          };
+        },
+      },
+    }));
+
+    const res = await testActualPlayback720pRange(cachedRenditions as any, mockPerf, mockFetch as any);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(false);
+    expect(res.failureKind).toBe("INVALID_CONTENT_RANGE");
+    expect(res.contentRangePresent).toBe(true);
+    expect(res.contentRangeValid).toBe(false);
   });
 });

@@ -592,12 +592,21 @@ export interface ActualPlaybackRangeTestResult {
   httpStatus?: number;
   contentRangePresent?: boolean;
   contentRangeValid?: boolean;
+  contentLengthPresent?: boolean;
   contentLength?: string | null;
   contentType?: string | null;
   bytesRead?: number;
   maxBytesRead: number;
   bodyRead?: "YES" | "NO";
-  failureKind?: "FETCH_ERROR" | "STATUS_NOT_206" | "INVALID_CONTENT_RANGE" | "INCOMPLETE_READ" | "STREAM_UNAVAILABLE" | "UNKNOWN";
+  validationMode?: "CONTENT_RANGE" | "CONTENT_LENGTH_FALLBACK";
+  failureKind?:
+    | "FETCH_ERROR"
+    | "STATUS_NOT_206"
+    | "INVALID_CONTENT_RANGE"
+    | "CONTENT_LENGTH_MISSING_OR_INVALID"
+    | "INCOMPLETE_READ"
+    | "STREAM_UNAVAILABLE"
+    | "UNKNOWN";
   errorName?: string;
 }
 
@@ -678,6 +687,7 @@ export async function testActualPlayback720pRange(
     contentRangeHeader && /^bytes\s+0-1048575\//i.test(contentRangeHeader.trim())
   );
   const contentLength = response.headers ? response.headers.get("Content-Length") : null;
+  const contentLengthPresent = Boolean(contentLength !== null && contentLength !== undefined);
   const contentType = response.headers ? response.headers.get("Content-Type") : null;
 
   if (httpStatus !== 206) {
@@ -694,6 +704,7 @@ export async function testActualPlayback720pRange(
       httpStatus,
       contentRangePresent,
       contentRangeValid,
+      contentLengthPresent,
       contentLength,
       contentType,
       bodyRead: "NO",
@@ -710,6 +721,7 @@ export async function testActualPlayback720pRange(
       httpStatus,
       contentRangePresent,
       contentRangeValid,
+      contentLengthPresent,
       contentLength,
       contentType,
       bodyRead: "NO",
@@ -747,12 +759,39 @@ export async function testActualPlayback720pRange(
     } catch {}
   }
 
-  const pass = httpStatus === 206 && contentRangeValid && bytesRead === MAX_BYTES_READ;
+  // CORS-observability aware validation policy
+  let pass = false;
+  let validationMode: "CONTENT_RANGE" | "CONTENT_LENGTH_FALLBACK" | undefined;
   let failureKind: ActualPlaybackRangeTestResult["failureKind"];
-  if (!pass) {
-    if (!contentRangeValid) failureKind = "INVALID_CONTENT_RANGE";
-    else if (bytesRead !== MAX_BYTES_READ) failureKind = "INCOMPLETE_READ";
-    else failureKind = "UNKNOWN";
+
+  if (httpStatus === 206 && bytesRead === MAX_BYTES_READ) {
+    if (contentRangePresent) {
+      if (contentRangeValid) {
+        pass = true;
+        validationMode = "CONTENT_RANGE";
+      } else {
+        // Visible but invalid Content-Range fails closed; do not use Content-Length fallback
+        pass = false;
+        failureKind = "INVALID_CONTENT_RANGE";
+      }
+    } else {
+      // Content-Range not visible (CORS restriction) -> Content-Length fallback
+      const numericContentLength = contentLength !== null ? parseInt(contentLength, 10) : NaN;
+      if (contentLengthPresent && numericContentLength === MAX_BYTES_READ) {
+        pass = true;
+        validationMode = "CONTENT_LENGTH_FALLBACK";
+      } else {
+        pass = false;
+        failureKind = "CONTENT_LENGTH_MISSING_OR_INVALID";
+      }
+    }
+  } else {
+    pass = false;
+    if (bytesRead !== MAX_BYTES_READ) {
+      failureKind = "INCOMPLETE_READ";
+    } else {
+      failureKind = "UNKNOWN";
+    }
   }
 
   return {
@@ -761,11 +800,13 @@ export async function testActualPlayback720pRange(
     httpStatus,
     contentRangePresent,
     contentRangeValid,
+    contentLengthPresent,
     contentLength,
     contentType,
     bytesRead,
     maxBytesRead: MAX_BYTES_READ,
     bodyRead: "YES",
+    validationMode,
     failureKind,
   };
 }
