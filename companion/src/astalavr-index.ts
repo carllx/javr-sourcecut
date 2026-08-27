@@ -9,7 +9,10 @@ import {
   testActualPlaybackGmRange,
   testActualPlaybackPaired1MiB,
   download720pProxyFile,
+  checkActiveBridgeJob,
+  transfer720pProxyToBridge,
   type AstalaVrRenditionSummary,
+  type AstalaVrProxyDownloadProgress,
 } from "./astalavr.js";
 
 export class AstalaVrProbeApp {
@@ -25,6 +28,11 @@ export class AstalaVrProbeApp {
 
   // Ephemeral in-memory transport verification state for current page session
   private transportVerificationState: "UNTESTED" | "VERIFIED" | "FAILED" = "UNTESTED";
+
+  // Agent Bridge transfer state
+  private bridgeTransferState: "IDLE" | "TRANSFERRING" | "COMPLETED" | "FAILED" = "IDLE";
+  private bridgeProgress: AstalaVrProxyDownloadProgress | null = null;
+  private bridgeFailureReason: string | null = null;
 
   init(): void {
     this.createPanel();
@@ -214,140 +222,68 @@ export class AstalaVrProbeApp {
 
     this.contentElement.innerHTML = html;
 
-    // Normal UI action: Download 720p proxy
-    if (effectiveRenditions.length > 0) {
-      const downloadContainer = document.createElement("div");
-      downloadContainer.id = "astalavr-download-action-container";
-      downloadContainer.style.marginTop = "8px";
-      downloadContainer.style.borderTop = "1px solid #374151";
-      downloadContainer.style.paddingTop = "8px";
+    // Normal UI status: Agent Bridge status
+    const bridgeStatusEl = document.createElement("div");
+    bridgeStatusEl.id = "astalavr-agent-bridge-status-container";
+    bridgeStatusEl.style.marginTop = "8px";
+    bridgeStatusEl.style.borderTop = "1px solid #374151";
+    bridgeStatusEl.style.paddingTop = "6px";
+    bridgeStatusEl.style.fontSize = "11px";
+    bridgeStatusEl.style.lineHeight = "1.5";
 
-      const downloadBtn = document.createElement("button");
-      downloadBtn.id = "astalavr-download-720p-btn";
-      downloadBtn.textContent = "⬇ Download 720p proxy";
-      downloadBtn.style.width = "100%";
-      downloadBtn.style.padding = "8px 12px";
-      downloadBtn.style.backgroundColor = "#2563eb";
-      downloadBtn.style.color = "#ffffff";
-      downloadBtn.style.border = "none";
-      downloadBtn.style.borderRadius = "4px";
-      downloadBtn.style.cursor = "pointer";
-      downloadBtn.style.fontWeight = "bold";
-      downloadBtn.style.fontSize = "12px";
+    if (this.bridgeTransferState === "IDLE") {
+      bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #a78bfa;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #9ca3af;">Status: <strong>WAITING_FOR_AGENT_JOB</strong></div>
+      `;
+    } else if (this.bridgeTransferState === "TRANSFERRING") {
+      bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #a78bfa;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #60a5fa;">Status: <strong>TRANSFERRING_PROXY (${this.bridgeProgress?.percent.toFixed(1) ?? 0}%)</strong></div>
+        <div style="color: #9ca3af; font-size: 10px;">${this.bridgeProgress?.bytesWritten ?? 0} / ${this.bridgeProgress?.totalBytes ?? 0} bytes</div>
+      `;
+    } else if (this.bridgeTransferState === "COMPLETED") {
+      bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #34d399;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #34d399;">Status: <strong>TRANSFER_COMPLETE (PASS)</strong></div>
+      `;
+    } else if (this.bridgeTransferState === "FAILED") {
+      bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #f87171;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #f87171;">Status: <strong>TRANSFER_FAILED (${this.bridgeFailureReason || "ERROR"})</strong></div>
+      `;
+    }
+    this.contentElement.appendChild(bridgeStatusEl);
 
-      const downloadResultEl = document.createElement("div");
-      downloadResultEl.id = "astalavr-download-720p-result";
-      downloadResultEl.style.fontSize = "11px";
-      downloadResultEl.style.marginTop = "6px";
-      downloadResultEl.style.padding = "6px 8px";
-      downloadResultEl.style.borderRadius = "4px";
-      downloadResultEl.style.display = "none";
-      downloadResultEl.style.lineHeight = "1.4";
+    // Auto-check bridge job if actual playback is detected and we are IDLE
+    if (actualPlaybackDetected && this.bridgeTransferState === "IDLE" && !this.isTestingBrowserMedia) {
+      checkActiveBridgeJob().then((job) => {
+        if (job && job.active && job.assetId === assetId && this.bridgeTransferState === "IDLE") {
+          this.bridgeTransferState = "TRANSFERRING";
+          this.checkAndRender();
 
-      downloadBtn.onclick = async () => {
-        // Freeze scheduled polling
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        downloadBtn.disabled = true;
-        downloadResultEl.style.display = "block";
-        downloadResultEl.style.backgroundColor = "#1e293b";
-        downloadResultEl.style.color = "#93c5fd";
-        downloadResultEl.innerHTML = `<div>Preparing download picker...</div>`;
-
-        // Check showSaveFilePicker
-        if (typeof (window as any).showSaveFilePicker !== "function") {
-          downloadBtn.disabled = false;
-          downloadResultEl.style.backgroundColor = "#7f1d1d";
-          downloadResultEl.style.color = "#fee2e2";
-          downloadResultEl.innerHTML = `
-            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-            <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
-            <div style="font-size: 10px; color: #fca5a5; margin-top: 2px;">(showSaveFilePicker API is not supported in this browser environment)</div>
-          `;
-          return;
-        }
-
-        let fileHandle: any;
-        try {
-          const suggestedName = assetId ? `${assetId}-720p.mp4` : "astalavr-720p.mp4";
-          fileHandle = await (window as any).showSaveFilePicker({
-            suggestedName,
-            types: [
-              {
-                description: "MP4 Video",
-                accept: { "video/mp4": [".mp4"] },
-              },
-            ],
+          transfer720pProxyToBridge({
+            assetId,
+            cachedRenditions: effectiveRenditions,
+            performanceObj: typeof performance !== "undefined" ? performance : ({} as any),
+            onProgress: (prog) => {
+              this.bridgeProgress = prog;
+              const el = document.getElementById("astalavr-agent-bridge-status");
+              if (el) {
+                el.innerHTML = `Status: <strong>TRANSFERRING_PROXY (${prog.percent.toFixed(1)}%)</strong>`;
+              }
+            },
+          }).then((res) => {
+            if (res.pass) {
+              this.bridgeTransferState = "COMPLETED";
+            } else {
+              this.bridgeTransferState = "FAILED";
+              this.bridgeFailureReason = res.failureKind || "LOCAL_BRIDGE_UNREACHABLE";
+            }
+            this.checkAndRender();
           });
-        } catch (err: any) {
-          downloadBtn.disabled = false;
-          if (err && err.name === "AbortError") {
-            downloadResultEl.style.backgroundColor = "#1e293b";
-            downloadResultEl.style.color = "#f1f5f9";
-            downloadResultEl.innerHTML = `
-              <div><strong>PROXY_DOWNLOAD=</strong>CANCELLED</div>
-              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_CANCELLED</div>
-            `;
-          } else {
-            downloadResultEl.style.backgroundColor = "#7f1d1d";
-            downloadResultEl.style.color = "#fee2e2";
-            downloadResultEl.innerHTML = `
-              <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
-            `;
-          }
-          return;
         }
-
-        downloadResultEl.style.backgroundColor = "#1e293b";
-        downloadResultEl.style.color = "#60a5fa";
-        downloadResultEl.innerHTML = `<div>Starting sequential 1 MiB stream...</div>`;
-
-        const res = await download720pProxyFile(
-          effectiveRenditions,
-          typeof performance !== "undefined" ? performance : ({} as any),
-          fileHandle,
-          (progress) => {
-            downloadResultEl.innerHTML = `
-              <div style="font-weight: bold;">Downloading 720p proxy: ${progress.percent.toFixed(1)}%</div>
-              <div style="color: #9ca3af;">${progress.bytesWritten} / ${progress.totalBytes} bytes</div>
-            `;
-          }
-        );
-
-        downloadBtn.disabled = false;
-
-        if (res.pass) {
-          downloadResultEl.style.backgroundColor = "#065f46";
-          downloadResultEl.style.color = "#d1fae5";
-          downloadResultEl.innerHTML = `
-            <div><strong>PROXY_DOWNLOAD=</strong>PASS</div>
-            <div><strong>RENDITION=</strong>720p</div>
-            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
-            <div><strong>TOTAL_BYTES=</strong>${res.totalBytes ?? res.bytesWritten}</div>
-          `;
-        } else {
-          downloadResultEl.style.backgroundColor = "#7f1d1d";
-          downloadResultEl.style.color = "#fee2e2";
-          let failHtml = `
-            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-            <div><strong>FAILURE_KIND=</strong>${res.failureKind || "PAGE_FETCH_ERROR"}</div>
-            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
-          `;
-          if (res.totalBytes) {
-            failHtml += `<div><strong>TOTAL_BYTES=</strong>${res.totalBytes}</div>`;
-          }
-          downloadResultEl.innerHTML = failHtml;
-        }
-      };
-
-      downloadContainer.appendChild(downloadBtn);
-      downloadContainer.appendChild(downloadResultEl);
-      this.contentElement.appendChild(downloadContainer);
+      });
     }
 
     // Add collapsible Developer diagnostics section if renditions exist
@@ -376,7 +312,7 @@ export class AstalaVrProbeApp {
       devContainer.style.gap = "6px";
       devContainer.style.marginTop = "6px";
 
-      // Test paired 1MiB Range button (the only remaining diagnostic)
+      // Test paired 1MiB Range button (the paired diagnostic)
       const testPairBtn = document.createElement("button");
       testPairBtn.id = "astalavr-test-pair-range-btn";
       testPairBtn.textContent = "▶ Test paired 1MiB Range";

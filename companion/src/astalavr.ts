@@ -1553,10 +1553,18 @@ export interface AstalaVrProxyDownloadResult {
   failureKind?: AstalaVrProxyDownloadFailureKind;
 }
 
-export async function download720pProxyFile(
+export const ASTALAVR_BRIDGE_PORT = 38815;
+
+export interface AstalaVrChunkSink {
+  writeChunk: (chunk: Uint8Array, offset: number, totalBytes: number) => Promise<void>;
+  close: (totalBytes: number) => Promise<void>;
+  abort: (reason?: string) => Promise<void>;
+}
+
+export async function transfer720pProxyStream(
   cachedRenditions: AstalaVrRenditionSummary[],
   perfObj: Performance,
-  fileHandle: any,
+  sink: AstalaVrChunkSink,
   onProgress?: (p: AstalaVrProxyDownloadProgress) => void,
   customGmFn?: typeof GM_xmlhttpRequest,
   customFetchFn?: typeof fetch
@@ -1568,6 +1576,7 @@ export async function download720pProxyFile(
   );
 
   if (!targetRendition) {
+    await sink.abort("NO_PLAYBACK_RESOURCE");
     return {
       pass: false,
       bytesWritten: 0,
@@ -1611,31 +1620,13 @@ export async function download720pProxyFile(
   } catch {}
 
   if (!latestPlaybackUrl) {
+    await sink.abort("NO_PLAYBACK_RESOURCE");
     return {
       pass: false,
       bytesWritten: 0,
       failureKind: "NO_PLAYBACK_RESOURCE",
     };
   }
-
-  let writable: any;
-  try {
-    writable = await fileHandle.createWritable();
-  } catch {
-    return {
-      pass: false,
-      bytesWritten: 0,
-      failureKind: "FILE_WRITE_ERROR",
-    };
-  }
-
-  const safeAbortWritable = async () => {
-    try {
-      if (writable && typeof writable.abort === "function") {
-        await writable.abort();
-      }
-    } catch {}
-  };
 
   // ==========================================
   // PHASE 1: GM Metadata Plane (bytes=0-0) -> TOTAL
@@ -1645,7 +1636,7 @@ export async function download720pProxyFile(
     (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : undefined);
 
   if (!gmFn) {
-    await safeAbortWritable();
+    await sink.abort("GM_METADATA_FAILED");
     return {
       pass: false,
       bytesWritten: 0,
@@ -1749,7 +1740,7 @@ export async function download720pProxyFile(
   });
 
   if (!gmMeta.pass || !gmMeta.totalBytes || gmMeta.totalBytes <= 0) {
-    await safeAbortWritable();
+    await sink.abort("GM_METADATA_FAILED");
     return {
       pass: false,
       bytesWritten: 0,
@@ -1762,7 +1753,7 @@ export async function download720pProxyFile(
     customFetchFn || (typeof fetch !== "undefined" ? fetch : undefined);
 
   if (!pageFetchFn) {
-    await safeAbortWritable();
+    await sink.abort("PAGE_FETCH_ERROR");
     return {
       pass: false,
       bytesWritten: 0,
@@ -1789,7 +1780,7 @@ export async function download720pProxyFile(
         },
       });
     } catch {
-      await safeAbortWritable();
+      await sink.abort("PAGE_FETCH_ERROR");
       return {
         pass: false,
         bytesWritten,
@@ -1808,7 +1799,7 @@ export async function download720pProxyFile(
 
     if (pageResponse.status !== 206) {
       await safeCancelResponseBody();
-      await safeAbortWritable();
+      await sink.abort("PAGE_STATUS_NOT_206");
       return {
         pass: false,
         bytesWritten,
@@ -1820,7 +1811,7 @@ export async function download720pProxyFile(
     const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
     if (!clRaw) {
       await safeCancelResponseBody();
-      await safeAbortWritable();
+      await sink.abort("PAGE_CONTENT_LENGTH_MISSING");
       return {
         pass: false,
         bytesWritten,
@@ -1832,7 +1823,7 @@ export async function download720pProxyFile(
     const parsedCl = parseInt(clRaw.trim(), 10);
     if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
       await safeCancelResponseBody();
-      await safeAbortWritable();
+      await sink.abort("PAGE_CONTENT_LENGTH_MISMATCH");
       return {
         pass: false,
         bytesWritten,
@@ -1842,7 +1833,7 @@ export async function download720pProxyFile(
     }
 
     if (!pageResponse.body || typeof pageResponse.body.getReader !== "function") {
-      await safeAbortWritable();
+      await sink.abort("PAGE_STREAM_UNAVAILABLE");
       return {
         pass: false,
         bytesWritten,
@@ -1874,12 +1865,12 @@ export async function download720pProxyFile(
           }
 
           try {
-            await writable.write(chunkToWrite);
+            await sink.writeChunk(chunkToWrite, bytesWritten + (rangeBytesRead - chunkToWrite.byteLength), TOTAL);
           } catch {
             try {
               await reader.cancel();
             } catch {}
-            await safeAbortWritable();
+            await sink.abort("FILE_WRITE_ERROR");
             return {
               pass: false,
               bytesWritten,
@@ -1897,7 +1888,7 @@ export async function download720pProxyFile(
       try {
         await reader.cancel();
       } catch {}
-      await safeAbortWritable();
+      await sink.abort("PAGE_FETCH_ERROR");
       return {
         pass: false,
         bytesWritten,
@@ -1911,7 +1902,7 @@ export async function download720pProxyFile(
     }
 
     if (rangeBytesRead !== expectedChunkLength) {
-      await safeAbortWritable();
+      await sink.abort("PAGE_BODY_LENGTH_MISMATCH");
       return {
         pass: false,
         bytesWritten,
@@ -1931,7 +1922,7 @@ export async function download720pProxyFile(
   }
 
   if (bytesWritten !== TOTAL) {
-    await safeAbortWritable();
+    await sink.abort("PAGE_BODY_LENGTH_MISMATCH");
     return {
       pass: false,
       bytesWritten,
@@ -1941,9 +1932,9 @@ export async function download720pProxyFile(
   }
 
   try {
-    await writable.close();
+    await sink.close(TOTAL);
   } catch {
-    await safeAbortWritable();
+    await sink.abort("FILE_WRITE_ERROR");
     return {
       pass: false,
       bytesWritten,
@@ -1959,4 +1950,198 @@ export async function download720pProxyFile(
   };
 }
 
+export async function download720pProxyFile(
+  cachedRenditions: AstalaVrRenditionSummary[],
+  performanceObj: Performance,
+  fileHandle: FileSystemFileHandle,
+  onProgress?: (progress: AstalaVrProxyDownloadProgress) => void,
+  customGmFn?: typeof GM_xmlhttpRequest,
+  customFetchFn?: typeof fetch
+): Promise<AstalaVrProxyDownloadResult> {
+  let writable: FileSystemWritableFileStream | null = null;
+  try {
+    writable = await fileHandle.createWritable();
+  } catch {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "FILE_PICKER_UNAVAILABLE",
+    };
+  }
 
+  const fileSink: AstalaVrChunkSink = {
+    writeChunk: async (chunk) => {
+      if (writable) {
+        await writable.write(chunk as any);
+      }
+    },
+    close: async () => {
+      if (writable) {
+        await writable.close();
+      }
+    },
+    abort: async () => {
+      try {
+        if (writable && typeof writable.abort === "function") {
+          await writable.abort();
+        }
+      } catch {}
+    },
+  };
+
+  return transfer720pProxyStream(
+    cachedRenditions,
+    performanceObj,
+    fileSink,
+    onProgress,
+    customGmFn,
+    customFetchFn
+  );
+}
+
+export interface AstalaVrBridgeTransferOptions {
+  assetId: string;
+  port?: number;
+  cachedRenditions: AstalaVrRenditionSummary[];
+  performanceObj: Performance;
+  onProgress?: (progress: AstalaVrProxyDownloadProgress) => void;
+  customGmFn?: typeof GM_xmlhttpRequest;
+  customFetchFn?: typeof fetch;
+}
+
+export async function checkActiveBridgeJob(
+  port = 38815,
+  customGmFn?: typeof GM_xmlhttpRequest
+): Promise<{ active: boolean; assetId?: string; bytesWritten?: number; totalBytes?: number | null } | null> {
+  const gmFn =
+    customGmFn ||
+    (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : undefined);
+
+  if (!gmFn) return null;
+
+  return new Promise((resolve) => {
+    try {
+      gmFn({
+        method: "GET",
+        url: `http://127.0.0.1:${port}/astalavr/job`,
+        timeout: 2000,
+        onload: (res) => {
+          if (res.status === 200) {
+            try {
+              const data = JSON.parse(res.responseText);
+              resolve(data);
+            } catch {
+              resolve(null);
+            }
+          } else {
+            resolve(null);
+          }
+        },
+        onerror: () => resolve(null),
+        ontimeout: () => resolve(null),
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function transfer720pProxyToBridge(
+  options: AstalaVrBridgeTransferOptions
+): Promise<AstalaVrProxyDownloadResult> {
+  const port = options.port || 38815;
+  const gmFn =
+    options.customGmFn ||
+    (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : undefined);
+
+  if (!gmFn) {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "LOCAL_BRIDGE_UNREACHABLE" as any,
+    };
+  }
+
+  const postGm = (url: string, headers: Record<string, string>, data?: any): Promise<{ status: number; text: string }> => {
+    return new Promise((resolve, reject) => {
+      try {
+        gmFn({
+          method: "POST",
+          url,
+          headers,
+          data,
+          timeout: 10000,
+          onload: (res) => resolve({ status: res.status, text: res.responseText }),
+          onerror: (err) => reject(err),
+          ontimeout: () => reject(new Error("BRIDGE_TIMEOUT")),
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+
+  const bridgeSink: AstalaVrChunkSink = {
+    writeChunk: async (chunk: Uint8Array, offset: number, totalBytes: number) => {
+      try {
+        const res = await postGm(
+          `http://127.0.0.1:${port}/astalavr/chunk`,
+          {
+            "Content-Type": "application/octet-stream",
+            "X-Asset-Id": options.assetId,
+            "X-Offset": String(offset),
+            "X-Total-Bytes": String(totalBytes),
+          },
+          chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)
+        );
+        if (res.status !== 200) {
+          throw new Error(`Bridge chunk write failed: status ${res.status}`);
+        }
+      } catch (err) {
+        throw new Error(`LOCAL_BRIDGE_UNREACHABLE: ${String(err)}`);
+      }
+    },
+    close: async () => {
+      try {
+        const res = await postGm(
+          `http://127.0.0.1:${port}/astalavr/complete`,
+          {
+            "X-Asset-Id": options.assetId,
+          }
+        );
+        if (res.status !== 200) {
+          throw new Error(`Bridge complete failed: status ${res.status}`);
+        }
+      } catch (err) {
+        throw new Error(`Bridge complete failed: ${String(err)}`);
+      }
+    },
+    abort: async () => {
+      try {
+        await postGm(
+          `http://127.0.0.1:${port}/astalavr/fail`,
+          {
+            "X-Asset-Id": options.assetId,
+          }
+        );
+      } catch {}
+    },
+  };
+
+  try {
+    return await transfer720pProxyStream(
+      options.cachedRenditions,
+      options.performanceObj,
+      bridgeSink,
+      options.onProgress,
+      options.customGmFn,
+      options.customFetchFn
+    );
+  } catch (err: any) {
+    return {
+      pass: false,
+      bytesWritten: 0,
+      failureKind: "LOCAL_BRIDGE_UNREACHABLE" as any,
+    };
+  }
+}

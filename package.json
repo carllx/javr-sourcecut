@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc",
     "build:companion": "node companion/build.mjs",
+    "astalavr:proxy": "node dist/cli.js astalavr:proxy",
     "test": "vitest run --exclude '**/*.browser.test.ts'",
     "test:browser": "vitest run tests/core/session.browser.test.ts",
     "test:companion": "vitest run tests/companion",

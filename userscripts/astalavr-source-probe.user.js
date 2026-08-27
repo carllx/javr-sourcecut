@@ -8,6 +8,7 @@
 // @icon         https://astalavr.com/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @connect      cdn3.astalavr.com
+// @connect      127.0.0.1
 // @run-at       document-end
 // ==/UserScript==
 
@@ -460,12 +461,13 @@
       pairFailureKind: pageBytesMatch ? void 0 : "PAGE_BYTES_MISMATCH"
     };
   }
-  async function download720pProxyFile(cachedRenditions, perfObj, fileHandle, onProgress, customGmFn, customFetchFn) {
+  async function transfer720pProxyStream(cachedRenditions, perfObj, sink, onProgress, customGmFn, customFetchFn) {
     const RANGE_SIZE = 1048576;
     const targetRendition = cachedRenditions.find(
       (r) => r.resolution === "720p" || r.height === 720
     );
     if (!targetRendition) {
+      await sink.abort("NO_PLAYBACK_RESOURCE");
       return {
         pass: false,
         bytesWritten: 0,
@@ -500,33 +502,16 @@
     } catch {
     }
     if (!latestPlaybackUrl) {
+      await sink.abort("NO_PLAYBACK_RESOURCE");
       return {
         pass: false,
         bytesWritten: 0,
         failureKind: "NO_PLAYBACK_RESOURCE"
       };
     }
-    let writable;
-    try {
-      writable = await fileHandle.createWritable();
-    } catch {
-      return {
-        pass: false,
-        bytesWritten: 0,
-        failureKind: "FILE_WRITE_ERROR"
-      };
-    }
-    const safeAbortWritable = async () => {
-      try {
-        if (writable && typeof writable.abort === "function") {
-          await writable.abort();
-        }
-      } catch {
-      }
-    };
     const gmFn = customGmFn || (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : void 0);
     if (!gmFn) {
-      await safeAbortWritable();
+      await sink.abort("GM_METADATA_FAILED");
       return {
         pass: false,
         bytesWritten: 0,
@@ -620,7 +605,7 @@
       }
     });
     if (!gmMeta.pass || !gmMeta.totalBytes || gmMeta.totalBytes <= 0) {
-      await safeAbortWritable();
+      await sink.abort("GM_METADATA_FAILED");
       return {
         pass: false,
         bytesWritten: 0,
@@ -630,7 +615,7 @@
     const TOTAL = gmMeta.totalBytes;
     const pageFetchFn = customFetchFn || (typeof fetch !== "undefined" ? fetch : void 0);
     if (!pageFetchFn) {
-      await safeAbortWritable();
+      await sink.abort("PAGE_FETCH_ERROR");
       return {
         pass: false,
         bytesWritten: 0,
@@ -651,7 +636,7 @@
           }
         });
       } catch {
-        await safeAbortWritable();
+        await sink.abort("PAGE_FETCH_ERROR");
         return {
           pass: false,
           bytesWritten,
@@ -669,7 +654,7 @@
       };
       if (pageResponse.status !== 206) {
         await safeCancelResponseBody();
-        await safeAbortWritable();
+        await sink.abort("PAGE_STATUS_NOT_206");
         return {
           pass: false,
           bytesWritten,
@@ -680,7 +665,7 @@
       const clRaw = pageResponse.headers.get("content-length") || pageResponse.headers.get("Content-Length");
       if (!clRaw) {
         await safeCancelResponseBody();
-        await safeAbortWritable();
+        await sink.abort("PAGE_CONTENT_LENGTH_MISSING");
         return {
           pass: false,
           bytesWritten,
@@ -691,7 +676,7 @@
       const parsedCl = parseInt(clRaw.trim(), 10);
       if (isNaN(parsedCl) || parsedCl !== expectedChunkLength) {
         await safeCancelResponseBody();
-        await safeAbortWritable();
+        await sink.abort("PAGE_CONTENT_LENGTH_MISMATCH");
         return {
           pass: false,
           bytesWritten,
@@ -700,7 +685,7 @@
         };
       }
       if (!pageResponse.body || typeof pageResponse.body.getReader !== "function") {
-        await safeAbortWritable();
+        await sink.abort("PAGE_STREAM_UNAVAILABLE");
         return {
           pass: false,
           bytesWritten,
@@ -729,13 +714,13 @@
               rangeBytesRead += value.byteLength;
             }
             try {
-              await writable.write(chunkToWrite);
+              await sink.writeChunk(chunkToWrite, bytesWritten + (rangeBytesRead - chunkToWrite.byteLength), TOTAL);
             } catch {
               try {
                 await reader.cancel();
               } catch {
               }
-              await safeAbortWritable();
+              await sink.abort("FILE_WRITE_ERROR");
               return {
                 pass: false,
                 bytesWritten,
@@ -753,7 +738,7 @@
           await reader.cancel();
         } catch {
         }
-        await safeAbortWritable();
+        await sink.abort("PAGE_FETCH_ERROR");
         return {
           pass: false,
           bytesWritten,
@@ -767,7 +752,7 @@
         }
       }
       if (rangeBytesRead !== expectedChunkLength) {
-        await safeAbortWritable();
+        await sink.abort("PAGE_BODY_LENGTH_MISMATCH");
         return {
           pass: false,
           bytesWritten,
@@ -785,7 +770,7 @@
       }
     }
     if (bytesWritten !== TOTAL) {
-      await safeAbortWritable();
+      await sink.abort("PAGE_BODY_LENGTH_MISMATCH");
       return {
         pass: false,
         bytesWritten,
@@ -794,9 +779,9 @@
       };
     }
     try {
-      await writable.close();
+      await sink.close(TOTAL);
     } catch {
-      await safeAbortWritable();
+      await sink.abort("FILE_WRITE_ERROR");
       return {
         pass: false,
         bytesWritten,
@@ -809,6 +794,127 @@
       bytesWritten,
       totalBytes: TOTAL
     };
+  }
+  async function checkActiveBridgeJob(port = 38815, customGmFn) {
+    const gmFn = customGmFn || (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : void 0);
+    if (!gmFn) return null;
+    return new Promise((resolve) => {
+      try {
+        gmFn({
+          method: "GET",
+          url: `http://127.0.0.1:${port}/astalavr/job`,
+          timeout: 2e3,
+          onload: (res) => {
+            if (res.status === 200) {
+              try {
+                const data = JSON.parse(res.responseText);
+                resolve(data);
+              } catch {
+                resolve(null);
+              }
+            } else {
+              resolve(null);
+            }
+          },
+          onerror: () => resolve(null),
+          ontimeout: () => resolve(null)
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  async function transfer720pProxyToBridge(options) {
+    const port = options.port || 38815;
+    const gmFn = options.customGmFn || (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : void 0);
+    if (!gmFn) {
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "LOCAL_BRIDGE_UNREACHABLE"
+      };
+    }
+    const postGm = (url, headers, data) => {
+      return new Promise((resolve, reject) => {
+        try {
+          gmFn({
+            method: "POST",
+            url,
+            headers,
+            data,
+            timeout: 1e4,
+            onload: (res) => resolve({ status: res.status, text: res.responseText }),
+            onerror: (err) => reject(err),
+            ontimeout: () => reject(new Error("BRIDGE_TIMEOUT"))
+          });
+        } catch (err) {
+          reject(err);
+        }
+      });
+    };
+    const bridgeSink = {
+      writeChunk: async (chunk, offset, totalBytes) => {
+        try {
+          const res = await postGm(
+            `http://127.0.0.1:${port}/astalavr/chunk`,
+            {
+              "Content-Type": "application/octet-stream",
+              "X-Asset-Id": options.assetId,
+              "X-Offset": String(offset),
+              "X-Total-Bytes": String(totalBytes)
+            },
+            chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)
+          );
+          if (res.status !== 200) {
+            throw new Error(`Bridge chunk write failed: status ${res.status}`);
+          }
+        } catch (err) {
+          throw new Error(`LOCAL_BRIDGE_UNREACHABLE: ${String(err)}`);
+        }
+      },
+      close: async () => {
+        try {
+          const res = await postGm(
+            `http://127.0.0.1:${port}/astalavr/complete`,
+            {
+              "X-Asset-Id": options.assetId
+            }
+          );
+          if (res.status !== 200) {
+            throw new Error(`Bridge complete failed: status ${res.status}`);
+          }
+        } catch (err) {
+          throw new Error(`Bridge complete failed: ${String(err)}`);
+        }
+      },
+      abort: async () => {
+        try {
+          await postGm(
+            `http://127.0.0.1:${port}/astalavr/fail`,
+            {
+              "X-Asset-Id": options.assetId
+            }
+          );
+        } catch {
+        }
+      }
+    };
+    try {
+      return await transfer720pProxyStream(
+        options.cachedRenditions,
+        options.performanceObj,
+        bridgeSink,
+        options.onProgress,
+        options.customGmFn,
+        options.customFetchFn
+      );
+    } catch (err) {
+      return {
+        pass: false,
+        bytesWritten: 0,
+        failureKind: "LOCAL_BRIDGE_UNREACHABLE"
+      };
+    }
   }
 
   // companion/src/astalavr-index.ts
@@ -824,6 +930,10 @@
       __publicField(this, "isTestingBrowserMedia", false);
       // Ephemeral in-memory transport verification state for current page session
       __publicField(this, "transportVerificationState", "UNTESTED");
+      // Agent Bridge transfer state
+      __publicField(this, "bridgeTransferState", "IDLE");
+      __publicField(this, "bridgeProgress", null);
+      __publicField(this, "bridgeFailureReason", null);
     }
     init() {
       this.createPanel();
@@ -979,126 +1089,63 @@
       `;
       }
       this.contentElement.innerHTML = html;
-      if (effectiveRenditions.length > 0) {
-        const downloadContainer = document.createElement("div");
-        downloadContainer.id = "astalavr-download-action-container";
-        downloadContainer.style.marginTop = "8px";
-        downloadContainer.style.borderTop = "1px solid #374151";
-        downloadContainer.style.paddingTop = "8px";
-        const downloadBtn = document.createElement("button");
-        downloadBtn.id = "astalavr-download-720p-btn";
-        downloadBtn.textContent = "\u2B07 Download 720p proxy";
-        downloadBtn.style.width = "100%";
-        downloadBtn.style.padding = "8px 12px";
-        downloadBtn.style.backgroundColor = "#2563eb";
-        downloadBtn.style.color = "#ffffff";
-        downloadBtn.style.border = "none";
-        downloadBtn.style.borderRadius = "4px";
-        downloadBtn.style.cursor = "pointer";
-        downloadBtn.style.fontWeight = "bold";
-        downloadBtn.style.fontSize = "12px";
-        const downloadResultEl = document.createElement("div");
-        downloadResultEl.id = "astalavr-download-720p-result";
-        downloadResultEl.style.fontSize = "11px";
-        downloadResultEl.style.marginTop = "6px";
-        downloadResultEl.style.padding = "6px 8px";
-        downloadResultEl.style.borderRadius = "4px";
-        downloadResultEl.style.display = "none";
-        downloadResultEl.style.lineHeight = "1.4";
-        downloadBtn.onclick = async () => {
-          this.isTestingBrowserMedia = true;
-          if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-            this.pollInterval = void 0;
-          }
-          downloadBtn.disabled = true;
-          downloadResultEl.style.display = "block";
-          downloadResultEl.style.backgroundColor = "#1e293b";
-          downloadResultEl.style.color = "#93c5fd";
-          downloadResultEl.innerHTML = `<div>Preparing download picker...</div>`;
-          if (typeof window.showSaveFilePicker !== "function") {
-            downloadBtn.disabled = false;
-            downloadResultEl.style.backgroundColor = "#7f1d1d";
-            downloadResultEl.style.color = "#fee2e2";
-            downloadResultEl.innerHTML = `
-            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-            <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
-            <div style="font-size: 10px; color: #fca5a5; margin-top: 2px;">(showSaveFilePicker API is not supported in this browser environment)</div>
-          `;
-            return;
-          }
-          let fileHandle;
-          try {
-            const suggestedName = assetId ? `${assetId}-720p.mp4` : "astalavr-720p.mp4";
-            fileHandle = await window.showSaveFilePicker({
-              suggestedName,
-              types: [
-                {
-                  description: "MP4 Video",
-                  accept: { "video/mp4": [".mp4"] }
+      const bridgeStatusEl = document.createElement("div");
+      bridgeStatusEl.id = "astalavr-agent-bridge-status-container";
+      bridgeStatusEl.style.marginTop = "8px";
+      bridgeStatusEl.style.borderTop = "1px solid #374151";
+      bridgeStatusEl.style.paddingTop = "6px";
+      bridgeStatusEl.style.fontSize = "11px";
+      bridgeStatusEl.style.lineHeight = "1.5";
+      if (this.bridgeTransferState === "IDLE") {
+        bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #a78bfa;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #9ca3af;">Status: <strong>WAITING_FOR_AGENT_JOB</strong></div>
+      `;
+      } else if (this.bridgeTransferState === "TRANSFERRING") {
+        bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #a78bfa;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #60a5fa;">Status: <strong>TRANSFERRING_PROXY (${this.bridgeProgress?.percent.toFixed(1) ?? 0}%)</strong></div>
+        <div style="color: #9ca3af; font-size: 10px;">${this.bridgeProgress?.bytesWritten ?? 0} / ${this.bridgeProgress?.totalBytes ?? 0} bytes</div>
+      `;
+      } else if (this.bridgeTransferState === "COMPLETED") {
+        bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #34d399;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #34d399;">Status: <strong>TRANSFER_COMPLETE (PASS)</strong></div>
+      `;
+      } else if (this.bridgeTransferState === "FAILED") {
+        bridgeStatusEl.innerHTML = `
+        <div style="font-weight: bold; color: #f87171;">Agent Bridge</div>
+        <div id="astalavr-agent-bridge-status" style="color: #f87171;">Status: <strong>TRANSFER_FAILED (${this.bridgeFailureReason || "ERROR"})</strong></div>
+      `;
+      }
+      this.contentElement.appendChild(bridgeStatusEl);
+      if (actualPlaybackDetected && this.bridgeTransferState === "IDLE" && !this.isTestingBrowserMedia) {
+        checkActiveBridgeJob().then((job) => {
+          if (job && job.active && job.assetId === assetId && this.bridgeTransferState === "IDLE") {
+            this.bridgeTransferState = "TRANSFERRING";
+            this.checkAndRender();
+            transfer720pProxyToBridge({
+              assetId,
+              cachedRenditions: effectiveRenditions,
+              performanceObj: typeof performance !== "undefined" ? performance : {},
+              onProgress: (prog) => {
+                this.bridgeProgress = prog;
+                const el = document.getElementById("astalavr-agent-bridge-status");
+                if (el) {
+                  el.innerHTML = `Status: <strong>TRANSFERRING_PROXY (${prog.percent.toFixed(1)}%)</strong>`;
                 }
-              ]
+              }
+            }).then((res) => {
+              if (res.pass) {
+                this.bridgeTransferState = "COMPLETED";
+              } else {
+                this.bridgeTransferState = "FAILED";
+                this.bridgeFailureReason = res.failureKind || "LOCAL_BRIDGE_UNREACHABLE";
+              }
+              this.checkAndRender();
             });
-          } catch (err) {
-            downloadBtn.disabled = false;
-            if (err && err.name === "AbortError") {
-              downloadResultEl.style.backgroundColor = "#1e293b";
-              downloadResultEl.style.color = "#f1f5f9";
-              downloadResultEl.innerHTML = `
-              <div><strong>PROXY_DOWNLOAD=</strong>CANCELLED</div>
-              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_CANCELLED</div>
-            `;
-            } else {
-              downloadResultEl.style.backgroundColor = "#7f1d1d";
-              downloadResultEl.style.color = "#fee2e2";
-              downloadResultEl.innerHTML = `
-              <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-              <div><strong>FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE</div>
-            `;
-            }
-            return;
           }
-          downloadResultEl.style.backgroundColor = "#1e293b";
-          downloadResultEl.style.color = "#60a5fa";
-          downloadResultEl.innerHTML = `<div>Starting sequential 1 MiB stream...</div>`;
-          const res = await download720pProxyFile(
-            effectiveRenditions,
-            typeof performance !== "undefined" ? performance : {},
-            fileHandle,
-            (progress) => {
-              downloadResultEl.innerHTML = `
-              <div style="font-weight: bold;">Downloading 720p proxy: ${progress.percent.toFixed(1)}%</div>
-              <div style="color: #9ca3af;">${progress.bytesWritten} / ${progress.totalBytes} bytes</div>
-            `;
-            }
-          );
-          downloadBtn.disabled = false;
-          if (res.pass) {
-            downloadResultEl.style.backgroundColor = "#065f46";
-            downloadResultEl.style.color = "#d1fae5";
-            downloadResultEl.innerHTML = `
-            <div><strong>PROXY_DOWNLOAD=</strong>PASS</div>
-            <div><strong>RENDITION=</strong>720p</div>
-            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
-            <div><strong>TOTAL_BYTES=</strong>${res.totalBytes ?? res.bytesWritten}</div>
-          `;
-          } else {
-            downloadResultEl.style.backgroundColor = "#7f1d1d";
-            downloadResultEl.style.color = "#fee2e2";
-            let failHtml = `
-            <div><strong>PROXY_DOWNLOAD=</strong>FAIL</div>
-            <div><strong>FAILURE_KIND=</strong>${res.failureKind || "PAGE_FETCH_ERROR"}</div>
-            <div><strong>BYTES_WRITTEN=</strong>${res.bytesWritten}</div>
-          `;
-            if (res.totalBytes) {
-              failHtml += `<div><strong>TOTAL_BYTES=</strong>${res.totalBytes}</div>`;
-            }
-            downloadResultEl.innerHTML = failHtml;
-          }
-        };
-        downloadContainer.appendChild(downloadBtn);
-        downloadContainer.appendChild(downloadResultEl);
-        this.contentElement.appendChild(downloadContainer);
+        });
       }
       if (effectiveRenditions.length > 0) {
         const devDetails = document.createElement("details");

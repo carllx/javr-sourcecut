@@ -11,6 +11,8 @@ import {
   testActualPlaybackGmRange,
   testActualPlaybackPaired1MiB,
   download720pProxyFile,
+  checkActiveBridgeJob,
+  transfer720pProxyToBridge,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -3163,71 +3165,75 @@ describe("AstalaVR Companion Probe", () => {
       expect(readerCancelCalled).toBe(true);
     });
 
-    it("7. no request is made before explicit button click, and button click streams proxy to saveFilePicker", async () => {
+    it("7. normal Companion UI has NO browser-download save button", async () => {
       const window = new Window({ url: "https://astalavr.com/videos/78yre/sample" });
       const originalWindow = (globalThis as any).window;
       const originalDocument = (globalThis as any).document;
-      const originalPerformance = (globalThis as any).performance;
-      const originalGm = (globalThis as any).GM_xmlhttpRequest;
-      const originalFetch = (globalThis as any).fetch;
 
       (globalThis as any).window = window;
       (globalThis as any).document = window.document;
 
-      (globalThis as any).performance = {
-        now: () => Date.now(),
-        getEntriesByType: (type: string) => {
-          if (type === "resource") {
-            return [
-              {
-                name: "https://cdn3.astalavr.com/78yre/720P.mp4?token=SUPER_SECRET_URL_789",
-                initiatorType: "video",
-                duration: 50,
-              },
-            ];
-          }
-          return [];
-        },
-      };
+      window.document.body.innerHTML = `
+        <dl8-video title="Sample">
+          <source quality="720p" src="https://cdn3.astalavr.com/78yre/720P.mp4?token=dom_token" />
+        </dl8-video>
+      `;
 
-      const mockWritable = {
-        write: vi.fn(async () => {}),
-        close: vi.fn(async () => {}),
-        abort: vi.fn(async () => {}),
-      };
+      const app = new AstalaVrProbeApp();
+      app.init();
 
-      (window as any).showSaveFilePicker = vi.fn(async () => ({
-        createWritable: async () => mockWritable,
-      }));
+      const downloadBtn = window.document.getElementById("astalavr-download-720p-btn");
+      expect(downloadBtn).toBeNull();
 
-      let gmCallCount = 0;
-      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
-        gmCallCount++;
-        setTimeout(() => {
-          if (details.onreadystatechange) {
-            details.onreadystatechange({
-              readyState: 2,
-              status: 206,
-              responseHeaders: "Content-Range: bytes 0-0/1048576\r\n",
-            });
-          }
-        }, 10);
+      const bridgeStatus = window.document.getElementById("astalavr-agent-bridge-status");
+      expect(bridgeStatus).not.toBeNull();
+      expect(bridgeStatus?.innerHTML).toContain("WAITING_FOR_AGENT_JOB");
+
+      app.destroy();
+      (globalThis as any).window = originalWindow;
+      (globalThis as any).document = originalDocument;
+    });
+
+    it("8. browser bridge sends Uint8Array/ArrayBuffer chunks to local bridge server", async () => {
+      const postedChunks: { url: string; headers: any; data: any }[] = [];
+
+      const mockGm = vi.fn((details: any) => {
+        if (details.method === "GET" && details.headers?.Range === "bytes=0-0") {
+          setTimeout(() => {
+            if (details.onreadystatechange) {
+              details.onreadystatechange({
+                readyState: 2,
+                status: 206,
+                responseHeaders: "Content-Range: bytes 0-0/1048576\r\n",
+              });
+            }
+          }, 5);
+        } else if (details.method === "POST") {
+          postedChunks.push({
+            url: details.url,
+            headers: details.headers,
+            data: details.data,
+          });
+          setTimeout(() => {
+            if (details.onload) {
+              details.onload({ status: 200, responseText: JSON.stringify({ status: "OK" }) });
+            }
+          }, 5);
+        }
         return { abort: () => {} };
-      };
+      });
 
-      let fetchCallCount = 0;
-      (globalThis as any).fetch = vi.fn(async () => {
-        fetchCallCount++;
+      const mockPageFetch = vi.fn(async () => {
         return {
           status: 206,
           headers: new Map([["Content-Length", "1048576"]]),
           body: {
             getReader: () => {
-              let sent = false;
+              let delivered = false;
               return {
                 read: async () => {
-                  if (!sent) {
-                    sent = true;
+                  if (!delivered) {
+                    delivered = true;
                     return { done: false, value: new Uint8Array(1048576) };
                   }
                   return { done: true, value: undefined };
@@ -3240,77 +3246,81 @@ describe("AstalaVR Companion Probe", () => {
         };
       });
 
-      window.document.body.innerHTML = `
-        <dl8-video title="Sample">
-          <source quality="720p" src="https://cdn3.astalavr.com/78yre/720P.mp4?token=dom_token" />
-        </dl8-video>
-      `;
+      const res = await transfer720pProxyToBridge({
+        assetId: "78yre",
+        cachedRenditions: cachedRenditions as any,
+        performanceObj: mockPerf as any,
+        customGmFn: mockGm as any,
+        customFetchFn: mockPageFetch as any,
+      });
 
-      const app = new AstalaVrProbeApp();
-      app.init();
+      expect(res.pass).toBe(true);
+      expect(res.bytesWritten).toBe(1048576);
 
-      // Ensure 0 requests before click
-      expect(gmCallCount).toBe(0);
-      expect(fetchCallCount).toBe(0);
+      // Verify chunk POST and complete POST
+      expect(postedChunks.length).toBe(2);
+      expect(postedChunks[0].url).toBe("http://127.0.0.1:38815/astalavr/chunk");
+      expect(postedChunks[0].headers["X-Asset-Id"]).toBe("78yre");
+      expect(postedChunks[0].headers["X-Offset"]).toBe("0");
+      expect(postedChunks[0].data instanceof ArrayBuffer).toBe(true);
+      expect(postedChunks[1].url).toBe("http://127.0.0.1:38815/astalavr/complete");
 
-      const downloadBtn = window.document.getElementById("astalavr-download-720p-btn") as HTMLButtonElement;
-      expect(downloadBtn).not.toBeNull();
-
-      downloadBtn.click();
-
-      await new Promise((r) => setTimeout(r, 100));
-
-      const resultEl = window.document.getElementById("astalavr-download-720p-result")!;
-      expect(resultEl.style.display).toBe("block");
-      expect(resultEl.innerHTML).toContain("PROXY_DOWNLOAD=</strong>PASS");
-      expect(resultEl.innerHTML).toContain("RENDITION=</strong>720p");
-      expect(resultEl.innerHTML).toContain("BYTES_WRITTEN=</strong>1048576");
-      expect(resultEl.innerHTML).toContain("TOTAL_BYTES=</strong>1048576");
-
-      // Verify token confidentiality
-      expect(resultEl.innerHTML).not.toContain("SUPER_SECRET_URL_789");
-      expect(resultEl.innerHTML).not.toContain("token=");
-
-      app.destroy();
-      (globalThis as any).window = originalWindow;
-      (globalThis as any).document = originalDocument;
-      (globalThis as any).performance = originalPerformance;
-      (globalThis as any).GM_xmlhttpRequest = originalGm;
-      (globalThis as any).fetch = originalFetch;
+      // Verify signed URL never sent across IPC
+      for (const p of postedChunks) {
+        expect(JSON.stringify(p.headers)).not.toContain("active_playback_token_777");
+        expect(p.url).not.toContain("active_playback_token_777");
+      }
     });
 
-    it("8. showSaveFilePicker unavailable displays FILE_PICKER_UNAVAILABLE visibly without crashing", async () => {
-      const window = new Window({ url: "https://astalavr.com/videos/78yre/sample" });
-      const originalWindow = (globalThis as any).window;
-      const originalDocument = (globalThis as any).document;
+    it("9. local bridge unreachable returns LOCAL_BRIDGE_UNREACHABLE without falling back to browser-file", async () => {
+      const mockGm = vi.fn((details: any) => {
+        if (details.method === "GET" && details.headers?.Range === "bytes=0-0") {
+          setTimeout(() => {
+            if (details.onreadystatechange) {
+              details.onreadystatechange({
+                readyState: 2,
+                status: 206,
+                responseHeaders: "Content-Range: bytes 0-0/1048576\r\n",
+              });
+            }
+          }, 5);
+        } else if (details.method === "POST") {
+          // Connection refused / unreachable
+          setTimeout(() => {
+            if (details.onerror) {
+              details.onerror(new Error("Connection refused"));
+            }
+          }, 5);
+        }
+        return { abort: () => {} };
+      });
 
-      (globalThis as any).window = window;
-      (globalThis as any).document = window.document;
+      const mockPageFetch = vi.fn(async () => {
+        return {
+          status: 206,
+          headers: new Map([["Content-Length", "1048576"]]),
+          body: {
+            getReader: () => {
+              return {
+                read: async () => ({ done: false, value: new Uint8Array(1048576) }),
+                cancel: async () => {},
+                releaseLock: () => {},
+              };
+            },
+          },
+        };
+      });
 
-      // showSaveFilePicker is undefined
-      delete (window as any).showSaveFilePicker;
+      const res = await transfer720pProxyToBridge({
+        assetId: "78yre",
+        cachedRenditions: cachedRenditions as any,
+        performanceObj: mockPerf as any,
+        customGmFn: mockGm as any,
+        customFetchFn: mockPageFetch as any,
+      });
 
-      window.document.body.innerHTML = `
-        <dl8-video title="Sample">
-          <source quality="720p" src="https://cdn3.astalavr.com/78yre/720P.mp4?token=dom_token" />
-        </dl8-video>
-      `;
-
-      const app = new AstalaVrProbeApp();
-      app.init();
-
-      const downloadBtn = window.document.getElementById("astalavr-download-720p-btn") as HTMLButtonElement;
-      downloadBtn.click();
-
-      await new Promise((r) => setTimeout(r, 50));
-
-      const resultEl = window.document.getElementById("astalavr-download-720p-result")!;
-      expect(resultEl.innerHTML).toContain("PROXY_DOWNLOAD=</strong>FAIL");
-      expect(resultEl.innerHTML).toContain("FAILURE_KIND=</strong>FILE_PICKER_UNAVAILABLE");
-
-      app.destroy();
-      (globalThis as any).window = originalWindow;
-      (globalThis as any).document = originalDocument;
+      expect(res.pass).toBe(false);
+      expect(res.failureKind).toBe("FILE_WRITE_ERROR");
     });
   });
 });

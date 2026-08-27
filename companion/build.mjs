@@ -48,6 +48,7 @@ const ASTALAVR_HEADER = `// ==UserScript==
 // @icon         https://astalavr.com/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @connect      cdn3.astalavr.com
+// @connect      127.0.0.1
 // @run-at       document-end
 // ==/UserScript==
 

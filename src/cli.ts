@@ -136,6 +136,76 @@ Examples:
     }
   }
 
+  // Handle astalavr-proxy command
+  if (args[0] === "astalavr-proxy" || args[0] === "astalavr:proxy") {
+    const targetUrl = args[1];
+    if (!targetUrl || targetUrl.startsWith("-")) {
+      console.error("Error: Missing AstalaVR URL argument.");
+      console.error("Usage: javr-sourcecut astalavr-proxy <AstalaVR URL> [--output <path>]");
+      process.exit(1);
+    }
+
+    const { extractVideoIdFromUrl } = await import("./adapters/astalavr/parser.js");
+    const assetId = extractVideoIdFromUrl(targetUrl);
+    if (!assetId) {
+      console.error(`Error: Could not extract video ID from AstalaVR URL: ${targetUrl}`);
+      process.exit(1);
+    }
+
+    let outPath = "";
+    const outIdx = args.indexOf("--output");
+    if (outIdx !== -1 && outIdx + 1 < args.length) {
+      outPath = args[outIdx + 1];
+    } else {
+      outPath = path.join(process.cwd(), "downloads", `astalavr-${assetId}`, "proxies", `${assetId}-720p.mp4`);
+    }
+
+    console.log("=======================================================");
+    console.log(" AstalaVR Agent 720p Proxy Acquisition Bridge");
+    console.log("=======================================================");
+    console.log(` Asset ID:        ${assetId}`);
+    console.log(` Target Rendition: 720p`);
+    console.log(` Output Path:     ${outPath}`);
+    console.log(" State:           WAITING_FOR_BROWSER_PLAYBACK");
+    console.log(" (Please open the video in your browser with AstalaVR Companion userscript installed)");
+    console.log("=======================================================\n");
+
+    const { AstalaVrBridgeServer } = await import("./core/astalavr-bridge.js");
+    const bridge = new AstalaVrBridgeServer();
+    const result = await bridge.startJob({
+      assetId,
+      outputPath: outPath,
+      onProgress: (written, total) => {
+        if (total) {
+          const pct = ((written / total) * 100).toFixed(1);
+          process.stdout.write(`\rTransferring proxy: ${pct}% (${written} / ${total} bytes)`);
+        } else {
+          process.stdout.write(`\rTransferring proxy: ${written} bytes`);
+        }
+      },
+      onLog: (msg) => console.log(`[Bridge] ${msg}`),
+    });
+
+    console.log("\n");
+    if (result.pass && result.ffprobePass) {
+      console.log("AGENT_PROXY_DOWNLOAD=PASS");
+      console.log(`ASSET_ID=${result.assetId}`);
+      console.log(`RENDITION=${result.rendition}`);
+      console.log(`OUTPUT_PATH=${result.outputPath}`);
+      console.log(`BYTES_WRITTEN=${result.bytesWritten}`);
+      console.log(`TOTAL_BYTES=${result.totalBytes}`);
+      console.log("FFPROBE=PASS");
+      process.exit(0);
+    } else {
+      console.error("AGENT_PROXY_DOWNLOAD=FAIL");
+      console.error(`FAILURE_KIND=${result.failureKind || "UNKNOWN_ERROR"}`);
+      console.error(`BYTES_WRITTEN=${result.bytesWritten}`);
+      if (result.totalBytes) console.error(`TOTAL_BYTES=${result.totalBytes}`);
+      console.error(`FFPROBE=${result.ffprobePass ? "PASS" : "FAIL"}`);
+      process.exit(1);
+    }
+  }
+
   let isResume = false;
   let jobPath = "";
   let llcPath: string | undefined;
