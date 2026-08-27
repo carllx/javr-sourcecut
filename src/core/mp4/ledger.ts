@@ -224,15 +224,32 @@ export class TransferLedgerManager {
       `transfer-ledger.json.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`
     );
 
-    const handle = await fsp.open(tmpPath, "w");
-    try {
-      await handle.writeFile(content, "utf-8");
-      await handle.sync();
-    } finally {
-      await handle.close();
+    await fsp.writeFile(tmpPath, content, "utf-8");
+
+    let saved = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await fsp.rename(tmpPath, this.ledgerPath);
+        saved = true;
+        break;
+      } catch (err: any) {
+        if ((err.code === "EPERM" || err.code === "EBUSY") && attempt < 9) {
+          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
+          continue;
+        }
+      }
     }
 
-    await fsp.rename(tmpPath, this.ledgerPath);
+    if (!saved) {
+      try {
+        await fsp.copyFile(tmpPath, this.ledgerPath);
+        await fsp.unlink(tmpPath).catch(() => {});
+      } catch {
+        // Direct write fallback
+        await fsp.writeFile(this.ledgerPath, content, "utf-8");
+        await fsp.unlink(tmpPath).catch(() => {});
+      }
+    }
   }
 
   /**
