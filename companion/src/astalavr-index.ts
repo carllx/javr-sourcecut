@@ -1,4 +1,11 @@
-import { detectAstalaVrPage, parseAstalaVrDomRenditions, testBrowserMedia720p, inspectActivePlayer, type AstalaVrRenditionSummary } from "./astalavr.js";
+import {
+  detectAstalaVrPage,
+  parseAstalaVrDomRenditions,
+  testBrowserMedia720p,
+  inspectActivePlayer,
+  inspectPlaybackResources,
+  type AstalaVrRenditionSummary,
+} from "./astalavr.js";
 
 export class AstalaVrProbeApp {
   private panelElement: HTMLElement | null = null;
@@ -320,6 +327,72 @@ export class AstalaVrProbeApp {
 
       btnContainer.appendChild(inspectBtn);
       btnContainer.appendChild(inspectResultEl);
+
+      // Add Inspect playback resources button
+      const inspectResBtn = document.createElement("button");
+      inspectResBtn.id = "astalavr-inspect-resources-btn";
+      inspectResBtn.textContent = "🔍 Inspect playback resources";
+      inspectResBtn.style.width = "100%";
+      inspectResBtn.style.padding = "6px 12px";
+      inspectResBtn.style.backgroundColor = "#0284c7";
+      inspectResBtn.style.color = "#ffffff";
+      inspectResBtn.style.border = "none";
+      inspectResBtn.style.borderRadius = "4px";
+      inspectResBtn.style.cursor = "pointer";
+      inspectResBtn.style.fontWeight = "bold";
+
+      const inspectResResultEl = document.createElement("div");
+      inspectResResultEl.id = "astalavr-inspect-resources-result";
+      inspectResResultEl.style.fontSize = "11px";
+      inspectResResultEl.style.padding = "6px 8px";
+      inspectResResultEl.style.borderRadius = "4px";
+      inspectResResultEl.style.backgroundColor = "#1e293b";
+      inspectResResultEl.style.color = "#f1f5f9";
+      inspectResResultEl.style.display = "none";
+      inspectResResultEl.style.lineHeight = "1.4";
+
+      inspectResBtn.onclick = () => {
+        // Freeze scheduled polling so inspection result UI is preserved
+        this.isTestingBrowserMedia = true;
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = undefined;
+        }
+
+        const resInfo = inspectPlaybackResources(document, effectiveRenditions);
+        inspectResResultEl.style.display = "block";
+
+        let text = `
+          <div><strong>DL8_VIDEO_FOUND=</strong>${resInfo.dl8VideoFound ? "YES" : "NO"}</div>
+          <div><strong>DL8_SHADOW_ROOT=</strong>${resInfo.dl8ShadowRoot}</div>
+          <div style="margin-top: 4px;"><strong>RESOURCE_MATCH_COUNT=</strong>${resInfo.resourceMatchCount}</div>
+        `;
+
+        if (resInfo.resources.length > 0) {
+          text += `<div style="border-top: 1px solid #334155; margin-top: 4px; padding-top: 4px;">`;
+          resInfo.resources.forEach((r, idx) => {
+            const n = idx + 1;
+            text += `
+              <div style="margin-bottom: 6px; padding: 4px; background: rgba(255,255,255,0.03); border-radius: 4px;">
+                <div><strong>RESOURCE_${n}_INITIATOR_TYPE=</strong>${r.initiatorType}</div>
+                <div><strong>RESOURCE_${n}_HOST=</strong>${r.host}</div>
+                <div><strong>RESOURCE_${n}_PATH=</strong>${r.path}</div>
+                <div><strong>RESOURCE_${n}_HAS_TOKEN=</strong>${r.hasToken ? "YES" : "NO"}</div>
+                <div style="color: #38bdf8;"><strong>RESOURCE_${n}_MATCHED_RENDITION=</strong>${r.matchedRendition}</div>
+                <div><strong>RESOURCE_${n}_DURATION_MS=</strong>${r.durationMs}</div>
+                ${r.transferSize !== undefined ? `<div><strong>RESOURCE_${n}_TRANSFER_SIZE=</strong>${r.transferSize}</div>` : ""}
+                ${r.encodedBodySize !== undefined ? `<div><strong>RESOURCE_${n}_ENCODED_BODY_SIZE=</strong>${r.encodedBodySize}</div>` : ""}
+              </div>
+            `;
+          });
+          text += `</div>`;
+        }
+
+        inspectResResultEl.innerHTML = text;
+      };
+
+      btnContainer.appendChild(inspectResBtn);
+      btnContainer.appendChild(inspectResResultEl);
 
       btnContainer.appendChild(copyBtn);
       this.contentElement.appendChild(btnContainer);

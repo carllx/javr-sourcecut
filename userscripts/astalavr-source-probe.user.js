@@ -268,6 +268,63 @@
       matchedCachedRendition
     };
   }
+  function inspectPlaybackResources(doc = document, cachedRenditions = [], perf = typeof performance !== "undefined" ? performance : {}) {
+    const dl8VideoEl = doc.querySelector("dl8-video");
+    const dl8VideoFound = Boolean(dl8VideoEl);
+    const dl8ShadowRoot = dl8VideoEl && dl8VideoEl.shadowRoot ? "OPEN" : "UNAVAILABLE";
+    const entries = perf && typeof perf.getEntriesByType === "function" ? perf.getEntriesByType("resource") : [];
+    const matchedResources = [];
+    for (const entry of entries) {
+      const rawUrl = entry.name;
+      if (!rawUrl || typeof rawUrl !== "string") continue;
+      try {
+        const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        const host = parsed.hostname;
+        const path = parsed.pathname;
+        const hasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
+        let matchedRendition = "NONE";
+        const entryOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
+        for (const r of cachedRenditions) {
+          try {
+            const rParsed = new URL(r.fullDirectUrl);
+            const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
+            if (entryOriginPath === rOriginPath) {
+              if (r.resolution === "720p" || r.height === 720) {
+                matchedRendition = "720p";
+              } else if (r.resolution === "1440p" || r.height === 1440) {
+                matchedRendition = "1440p";
+              } else if (r.resolution === "2048p" || r.height === 2048) {
+                matchedRendition = "2048p";
+              }
+              break;
+            }
+          } catch {
+          }
+        }
+        const isCdn = host === "cdn3.astalavr.com" || host.endsWith(".astalavr.com");
+        const isRenditionMatch = matchedRendition !== "NONE";
+        if (isCdn || isRenditionMatch) {
+          matchedResources.push({
+            initiatorType: entry.initiatorType || "unknown",
+            host,
+            path,
+            hasToken,
+            matchedRendition,
+            durationMs: Math.round(entry.duration || 0),
+            transferSize: typeof entry.transferSize === "number" ? entry.transferSize : void 0,
+            encodedBodySize: typeof entry.encodedBodySize === "number" ? entry.encodedBodySize : void 0
+          });
+        }
+      } catch {
+      }
+    }
+    return {
+      dl8VideoFound,
+      dl8ShadowRoot,
+      resourceMatchCount: matchedResources.length,
+      resources: matchedResources
+    };
+  }
 
   // companion/src/astalavr-index.ts
   var AstalaVrProbeApp = class {
@@ -547,6 +604,62 @@
         };
         btnContainer.appendChild(inspectBtn);
         btnContainer.appendChild(inspectResultEl);
+        const inspectResBtn = document.createElement("button");
+        inspectResBtn.id = "astalavr-inspect-resources-btn";
+        inspectResBtn.textContent = "\u{1F50D} Inspect playback resources";
+        inspectResBtn.style.width = "100%";
+        inspectResBtn.style.padding = "6px 12px";
+        inspectResBtn.style.backgroundColor = "#0284c7";
+        inspectResBtn.style.color = "#ffffff";
+        inspectResBtn.style.border = "none";
+        inspectResBtn.style.borderRadius = "4px";
+        inspectResBtn.style.cursor = "pointer";
+        inspectResBtn.style.fontWeight = "bold";
+        const inspectResResultEl = document.createElement("div");
+        inspectResResultEl.id = "astalavr-inspect-resources-result";
+        inspectResResultEl.style.fontSize = "11px";
+        inspectResResultEl.style.padding = "6px 8px";
+        inspectResResultEl.style.borderRadius = "4px";
+        inspectResResultEl.style.backgroundColor = "#1e293b";
+        inspectResResultEl.style.color = "#f1f5f9";
+        inspectResResultEl.style.display = "none";
+        inspectResResultEl.style.lineHeight = "1.4";
+        inspectResBtn.onclick = () => {
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = void 0;
+          }
+          const resInfo = inspectPlaybackResources(document, effectiveRenditions);
+          inspectResResultEl.style.display = "block";
+          let text = `
+          <div><strong>DL8_VIDEO_FOUND=</strong>${resInfo.dl8VideoFound ? "YES" : "NO"}</div>
+          <div><strong>DL8_SHADOW_ROOT=</strong>${resInfo.dl8ShadowRoot}</div>
+          <div style="margin-top: 4px;"><strong>RESOURCE_MATCH_COUNT=</strong>${resInfo.resourceMatchCount}</div>
+        `;
+          if (resInfo.resources.length > 0) {
+            text += `<div style="border-top: 1px solid #334155; margin-top: 4px; padding-top: 4px;">`;
+            resInfo.resources.forEach((r, idx) => {
+              const n = idx + 1;
+              text += `
+              <div style="margin-bottom: 6px; padding: 4px; background: rgba(255,255,255,0.03); border-radius: 4px;">
+                <div><strong>RESOURCE_${n}_INITIATOR_TYPE=</strong>${r.initiatorType}</div>
+                <div><strong>RESOURCE_${n}_HOST=</strong>${r.host}</div>
+                <div><strong>RESOURCE_${n}_PATH=</strong>${r.path}</div>
+                <div><strong>RESOURCE_${n}_HAS_TOKEN=</strong>${r.hasToken ? "YES" : "NO"}</div>
+                <div style="color: #38bdf8;"><strong>RESOURCE_${n}_MATCHED_RENDITION=</strong>${r.matchedRendition}</div>
+                <div><strong>RESOURCE_${n}_DURATION_MS=</strong>${r.durationMs}</div>
+                ${r.transferSize !== void 0 ? `<div><strong>RESOURCE_${n}_TRANSFER_SIZE=</strong>${r.transferSize}</div>` : ""}
+                ${r.encodedBodySize !== void 0 ? `<div><strong>RESOURCE_${n}_ENCODED_BODY_SIZE=</strong>${r.encodedBodySize}</div>` : ""}
+              </div>
+            `;
+            });
+            text += `</div>`;
+          }
+          inspectResResultEl.innerHTML = text;
+        };
+        btnContainer.appendChild(inspectResBtn);
+        btnContainer.appendChild(inspectResResultEl);
         btnContainer.appendChild(copyBtn);
         this.contentElement.appendChild(btnContainer);
       }

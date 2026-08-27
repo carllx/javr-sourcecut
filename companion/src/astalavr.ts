@@ -353,3 +353,94 @@ export function inspectActivePlayer(
     matchedCachedRendition,
   };
 }
+
+export interface PlaybackResourceItem {
+  initiatorType: string;
+  host: string;
+  path: string;
+  hasToken: boolean;
+  matchedRendition: "720p" | "1440p" | "2048p" | "NONE";
+  durationMs: number;
+  transferSize?: number;
+  encodedBodySize?: number;
+}
+
+export interface PlaybackResourcesInspection {
+  dl8VideoFound: boolean;
+  dl8ShadowRoot: "OPEN" | "UNAVAILABLE";
+  resourceMatchCount: number;
+  resources: PlaybackResourceItem[];
+}
+
+export function inspectPlaybackResources(
+  doc: Document = document,
+  cachedRenditions: AstalaVrRenditionSummary[] = [],
+  perf: Performance = typeof performance !== "undefined" ? performance : ({} as any)
+): PlaybackResourcesInspection {
+  const dl8VideoEl = doc.querySelector("dl8-video");
+  const dl8VideoFound = Boolean(dl8VideoEl);
+  const dl8ShadowRoot: "OPEN" | "UNAVAILABLE" =
+    dl8VideoEl && dl8VideoEl.shadowRoot ? "OPEN" : "UNAVAILABLE";
+
+  const entries =
+    perf && typeof perf.getEntriesByType === "function"
+      ? (perf.getEntriesByType("resource") as PerformanceResourceTiming[])
+      : [];
+
+  const matchedResources: PlaybackResourceItem[] = [];
+
+  for (const entry of entries) {
+    const rawUrl = entry.name;
+    if (!rawUrl || typeof rawUrl !== "string") continue;
+
+    try {
+      const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+      const host = parsed.hostname;
+      const path = parsed.pathname;
+      const hasToken = parsed.searchParams.has("token") || parsed.search.includes("token=");
+
+      let matchedRendition: "720p" | "1440p" | "2048p" | "NONE" = "NONE";
+      const entryOriginPath = (parsed.origin + parsed.pathname).toLowerCase();
+
+      for (const r of cachedRenditions) {
+        try {
+          const rParsed = new URL(r.fullDirectUrl);
+          const rOriginPath = (rParsed.origin + rParsed.pathname).toLowerCase();
+          if (entryOriginPath === rOriginPath) {
+            if (r.resolution === "720p" || r.height === 720) {
+              matchedRendition = "720p";
+            } else if (r.resolution === "1440p" || r.height === 1440) {
+              matchedRendition = "1440p";
+            } else if (r.resolution === "2048p" || r.height === 2048) {
+              matchedRendition = "2048p";
+            }
+            break;
+          }
+        } catch {}
+      }
+
+      const isCdn = host === "cdn3.astalavr.com" || host.endsWith(".astalavr.com");
+      const isRenditionMatch = matchedRendition !== "NONE";
+
+      if (isCdn || isRenditionMatch) {
+        matchedResources.push({
+          initiatorType: entry.initiatorType || "unknown",
+          host,
+          path,
+          hasToken,
+          matchedRendition,
+          durationMs: Math.round(entry.duration || 0),
+          transferSize: typeof entry.transferSize === "number" ? entry.transferSize : undefined,
+          encodedBodySize: typeof entry.encodedBodySize === "number" ? entry.encodedBodySize : undefined,
+        });
+      }
+    } catch {}
+  }
+
+  return {
+    dl8VideoFound,
+    dl8ShadowRoot,
+    resourceMatchCount: matchedResources.length,
+    resources: matchedResources,
+  };
+}
