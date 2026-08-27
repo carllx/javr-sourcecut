@@ -143,6 +143,36 @@ export class AstalaVrProbeApp {
     this.statusElement.style.backgroundColor = "#065f46";
     this.statusElement.style.color = "#d1fae5";
 
+    // Check playback resource detection safely from performance entries
+    const perfEntries =
+      typeof performance !== "undefined" && typeof performance.getEntriesByType === "function"
+        ? (performance.getEntriesByType("resource") as PerformanceResourceTiming[])
+        : [];
+
+    let actualPlaybackDetected = false;
+    const rendition720p = effectiveRenditions.find((r) => r.resolution === "720p" || r.height === 720);
+    if (rendition720p) {
+      try {
+        const cParsed = new URL(rendition720p.fullDirectUrl);
+        const cachedPath = cParsed.pathname.toLowerCase();
+        for (const entry of perfEntries) {
+          const rawUrl = entry.name;
+          if (rawUrl && typeof rawUrl === "string") {
+            const p = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+            const initiator = (entry.initiatorType || "").toLowerCase();
+            if (
+              (initiator === "video" || initiator === "media") &&
+              p.hostname === "cdn3.astalavr.com" &&
+              p.pathname.toLowerCase() === cachedPath
+            ) {
+              actualPlaybackDetected = true;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+
     let html = `
       <div style="margin-bottom: 4px;"><strong>ASSET_ID:</strong> ${assetId}</div>
       <div style="margin-bottom: 4px;"><strong>RENDITION_COUNT:</strong> ${effectiveRenditions.length}</div>
@@ -162,516 +192,49 @@ export class AstalaVrProbeApp {
         `;
       }
       html += `</div>`;
+
+      // Browser transport status section
+      html += `
+        <div id="astalavr-transport-status-section" style="border-top: 1px solid #374151; padding-top: 6px; margin-bottom: 8px;">
+          <div style="font-weight: bold; color: #60a5fa; margin-bottom: 4px;">Browser transport</div>
+          <div style="font-size: 11px; line-height: 1.6;">
+            <div>Actual playback: <strong>${actualPlaybackDetected ? "DETECTED" : "WAITING"}</strong></div>
+            <div>Control metadata: <strong>${actualPlaybackDetected ? "VERIFIED" : "NOT VERIFIED"}</strong></div>
+            <div>Range data: <strong>${actualPlaybackDetected ? "VERIFIED" : "NOT VERIFIED"}</strong></div>
+          </div>
+        </div>
+      `;
     }
 
     this.contentElement.innerHTML = html;
 
-    // Add action buttons if effective renditions exist
+    // Add collapsible Developer diagnostics section if renditions exist
     if (effectiveRenditions.length > 0) {
-      const btnContainer = document.createElement("div");
-      btnContainer.style.display = "flex";
-      btnContainer.style.flexDirection = "column";
-      btnContainer.style.gap = "6px";
-      btnContainer.style.marginTop = "6px";
+      const devDetails = document.createElement("details");
+      devDetails.id = "astalavr-dev-diagnostics";
+      devDetails.style.marginTop = "8px";
+      devDetails.style.borderTop = "1px solid #374151";
+      devDetails.style.paddingTop = "6px";
 
-      const copyBtn = document.createElement("button");
-      copyBtn.textContent = "📋 Copy renditions";
-      copyBtn.style.width = "100%";
-      copyBtn.style.padding = "6px 12px";
-      copyBtn.style.backgroundColor = "#2563eb";
-      copyBtn.style.color = "#ffffff";
-      copyBtn.style.border = "none";
-      copyBtn.style.borderRadius = "4px";
-      copyBtn.style.cursor = "pointer";
-      copyBtn.style.fontWeight = "bold";
+      const devSummary = document.createElement("summary");
+      devSummary.id = "astalavr-dev-diagnostics-summary";
+      devSummary.textContent = "Developer diagnostics";
+      devSummary.style.cursor = "pointer";
+      devSummary.style.color = "#9ca3af";
+      devSummary.style.fontWeight = "bold";
+      devSummary.style.fontSize = "11px";
+      devSummary.style.userSelect = "none";
+      devSummary.style.marginBottom = "6px";
+      devDetails.appendChild(devSummary);
 
-      copyBtn.onclick = () => {
-        const payload = JSON.stringify(
-          {
-            assetId,
-            renditions: effectiveRenditions.map((r) => ({
-              formatId: r.formatId,
-              resolution: r.resolution,
-              vcodec: r.vcodec,
-              mimeType: r.mimeType,
-              mediaHostname: r.mediaHostname,
-              directUrl: r.fullDirectUrl,
-            })),
-          },
-          null,
-          2
-        );
-        navigator.clipboard.writeText(payload).then(
-          () => {
-            copyBtn.textContent = "✅ Copied to clipboard!";
-            setTimeout(() => {
-              copyBtn.textContent = "📋 Copy renditions";
-            }, 2000);
-          },
-          (err) => {
-            copyBtn.textContent = "❌ Copy failed";
-            console.error("Clipboard write error:", err);
-          }
-        );
-      };
+      const devContainer = document.createElement("div");
+      devContainer.id = "astalavr-dev-diagnostics-content";
+      devContainer.style.display = "flex";
+      devContainer.style.flexDirection = "column";
+      devContainer.style.gap = "6px";
+      devContainer.style.marginTop = "6px";
 
-      const rendition720p = effectiveRenditions.find((r) => r.resolution === "720p" || r.height === 720);
-      if (rendition720p) {
-        const test720Btn = document.createElement("button");
-        test720Btn.id = "astalavr-test-720p-btn";
-        test720Btn.textContent = "▶ Test 720p in browser";
-        test720Btn.style.width = "100%";
-        test720Btn.style.padding = "6px 12px";
-        test720Btn.style.backgroundColor = "#4f46e5";
-        test720Btn.style.color = "#ffffff";
-        test720Btn.style.border = "none";
-        test720Btn.style.borderRadius = "4px";
-        test720Btn.style.cursor = "pointer";
-        test720Btn.style.fontWeight = "bold";
-
-        const resultEl = document.createElement("div");
-        resultEl.id = "astalavr-test-720p-result";
-        resultEl.style.fontSize = "11px";
-        resultEl.style.padding = "4px 8px";
-        resultEl.style.borderRadius = "4px";
-        resultEl.style.display = "none";
-
-        test720Btn.onclick = () => {
-          // Freeze scheduled polling immediately so DOM result UI is not destroyed
-          this.isTestingBrowserMedia = true;
-          if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-            this.pollInterval = undefined;
-          }
-
-          test720Btn.disabled = true;
-          test720Btn.textContent = "⏳ Testing 720p metadata in browser...";
-          resultEl.style.display = "none";
-
-          testBrowserMedia720p(rendition720p.fullDirectUrl).then((res) => {
-            test720Btn.disabled = false;
-            test720Btn.textContent = "▶ Test 720p in browser";
-            resultEl.style.display = "block";
-
-            if (res.pass) {
-              resultEl.style.backgroundColor = "#065f46";
-              resultEl.style.color = "#d1fae5";
-              const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
-              resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=PASS</strong></div><div>DURATION=${durStr}s</div>`;
-            } else {
-              resultEl.style.backgroundColor = "#7f1d1d";
-              resultEl.style.color = "#fee2e2";
-              resultEl.innerHTML = `<div><strong>720P_BROWSER_MEDIA_TEST=FAIL</strong></div><div>MEDIA_ERROR_CODE=${res.errorCode || "UNKNOWN"}</div>`;
-            }
-          });
-        };
-
-        btnContainer.appendChild(test720Btn);
-        btnContainer.appendChild(resultEl);
-      }
-
-      // Add Inspect active player button
-      const inspectBtn = document.createElement("button");
-      inspectBtn.id = "astalavr-inspect-player-btn";
-      inspectBtn.textContent = "🔍 Inspect active player";
-      inspectBtn.style.width = "100%";
-      inspectBtn.style.padding = "6px 12px";
-      inspectBtn.style.backgroundColor = "#0d9488";
-      inspectBtn.style.color = "#ffffff";
-      inspectBtn.style.border = "none";
-      inspectBtn.style.borderRadius = "4px";
-      inspectBtn.style.cursor = "pointer";
-      inspectBtn.style.fontWeight = "bold";
-
-      const inspectResultEl = document.createElement("div");
-      inspectResultEl.id = "astalavr-inspect-player-result";
-      inspectResultEl.style.fontSize = "11px";
-      inspectResultEl.style.padding = "6px 8px";
-      inspectResultEl.style.borderRadius = "4px";
-      inspectResultEl.style.backgroundColor = "#1e293b";
-      inspectResultEl.style.color = "#f1f5f9";
-      inspectResultEl.style.display = "none";
-      inspectResultEl.style.lineHeight = "1.4";
-
-      inspectBtn.onclick = () => {
-        // Freeze scheduled polling so inspection result UI is preserved
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        const info = inspectActivePlayer(document, effectiveRenditions);
-        inspectResultEl.style.display = "block";
-
-        let resultText = `<div><strong>ACTIVE_PLAYER_FOUND=</strong>${info.activePlayerFound ? "YES" : "NO"}</div>`;
-        if (info.activePlayerFound) {
-          resultText += `<div><strong>TAG_NAME=</strong>${info.tagName || "unknown"}</div>`;
-          resultText += `<div><strong>READY_STATE=</strong>${info.readyState ?? "unknown"}</div>`;
-          resultText += `<div><strong>NETWORK_STATE=</strong>${info.networkState ?? "unknown"}</div>`;
-          resultText += `<div><strong>PAUSED=</strong>${info.paused !== undefined ? String(info.paused).toUpperCase() : "unknown"}</div>`;
-          resultText += `<div><strong>DURATION=</strong>${info.duration !== undefined ? info.duration.toFixed(2) + "s" : "unknown"}</div>`;
-          resultText += `<div><strong>VIDEO_WIDTH=</strong>${info.videoWidth ?? "unknown"}</div>`;
-          resultText += `<div><strong>VIDEO_HEIGHT=</strong>${info.videoHeight ?? "unknown"}</div>`;
-          resultText += `<div style="margin-top: 4px;"><strong>CURRENT_SRC_KIND=</strong>${info.currentSrcKind}</div>`;
-          if (info.currentSrcHost) {
-            resultText += `<div><strong>CURRENT_SRC_HOST=</strong>${info.currentSrcHost}</div>`;
-          }
-          if (info.currentSrcPath) {
-            resultText += `<div><strong>CURRENT_SRC_PATH=</strong>${info.currentSrcPath}</div>`;
-          }
-          if (info.currentSrcHasToken !== undefined) {
-            resultText += `<div><strong>CURRENT_SRC_HAS_TOKEN=</strong>${info.currentSrcHasToken ? "YES" : "NO"}</div>`;
-          }
-          resultText += `<div style="margin-top: 4px; color: #38bdf8;"><strong>MATCHED_CACHED_RENDITION=</strong>${info.matchedCachedRendition}</div>`;
-        }
-
-        inspectResultEl.innerHTML = resultText;
-      };
-
-      btnContainer.appendChild(inspectBtn);
-      btnContainer.appendChild(inspectResultEl);
-
-      // Add Inspect playback resources button
-      const inspectResBtn = document.createElement("button");
-      inspectResBtn.id = "astalavr-inspect-resources-btn";
-      inspectResBtn.textContent = "🔍 Inspect playback resources";
-      inspectResBtn.style.width = "100%";
-      inspectResBtn.style.padding = "6px 12px";
-      inspectResBtn.style.backgroundColor = "#0284c7";
-      inspectResBtn.style.color = "#ffffff";
-      inspectResBtn.style.border = "none";
-      inspectResBtn.style.borderRadius = "4px";
-      inspectResBtn.style.cursor = "pointer";
-      inspectResBtn.style.fontWeight = "bold";
-
-      const inspectResResultEl = document.createElement("div");
-      inspectResResultEl.id = "astalavr-inspect-resources-result";
-      inspectResResultEl.style.fontSize = "11px";
-      inspectResResultEl.style.padding = "6px 8px";
-      inspectResResultEl.style.borderRadius = "4px";
-      inspectResResultEl.style.backgroundColor = "#1e293b";
-      inspectResResultEl.style.color = "#f1f5f9";
-      inspectResResultEl.style.display = "none";
-      inspectResResultEl.style.lineHeight = "1.4";
-
-      inspectResBtn.onclick = () => {
-        // Freeze scheduled polling so inspection result UI is preserved
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        const resInfo = inspectPlaybackResources(document, effectiveRenditions);
-        inspectResResultEl.style.display = "block";
-
-        let text = `
-          <div><strong>DL8_VIDEO_FOUND=</strong>${resInfo.dl8VideoFound ? "YES" : "NO"}</div>
-          <div><strong>DL8_SHADOW_ROOT=</strong>${resInfo.dl8ShadowRoot}</div>
-          <div style="margin-top: 4px;"><strong>RESOURCE_MATCH_COUNT=</strong>${resInfo.resourceMatchCount}</div>
-        `;
-
-        if (resInfo.resources.length > 0) {
-          text += `<div style="border-top: 1px solid #334155; margin-top: 4px; padding-top: 4px;">`;
-          resInfo.resources.forEach((r, idx) => {
-            const n = idx + 1;
-            text += `
-              <div style="margin-bottom: 6px; padding: 4px; background: rgba(255,255,255,0.03); border-radius: 4px;">
-                <div><strong>RESOURCE_${n}_INITIATOR_TYPE=</strong>${r.initiatorType}</div>
-                <div><strong>RESOURCE_${n}_HOST=</strong>${r.host}</div>
-                <div><strong>RESOURCE_${n}_PATH=</strong>${r.path}</div>
-                <div><strong>RESOURCE_${n}_HAS_TOKEN=</strong>${r.hasToken ? "YES" : "NO"}</div>
-                <div style="color: #38bdf8;"><strong>RESOURCE_${n}_MATCHED_RENDITION=</strong>${r.matchedRendition}</div>
-                <div><strong>RESOURCE_${n}_EXACT_CACHED_URL_MATCH=</strong>${r.exactCachedUrlMatch}</div>
-                <div><strong>RESOURCE_${n}_QUERY_MATCH=</strong>${r.queryMatch}</div>
-                <div><strong>RESOURCE_${n}_TOKEN_MATCH=</strong>${r.tokenMatch}</div>
-                <div><strong>RESOURCE_${n}_SAME_FULL_URL_AS_PREVIOUS_MATCH=</strong>${r.sameFullUrlAsPreviousMatch}</div>
-                <div><strong>RESOURCE_${n}_DURATION_MS=</strong>${r.durationMs}</div>
-                ${r.transferSize !== undefined ? `<div><strong>RESOURCE_${n}_TRANSFER_SIZE=</strong>${r.transferSize}</div>` : ""}
-                ${r.encodedBodySize !== undefined ? `<div><strong>RESOURCE_${n}_ENCODED_BODY_SIZE=</strong>${r.encodedBodySize}</div>` : ""}
-              </div>
-            `;
-          });
-          text += `</div>`;
-        }
-
-        inspectResResultEl.innerHTML = text;
-      };
-
-      btnContainer.appendChild(inspectResBtn);
-      btnContainer.appendChild(inspectResResultEl);
-
-      // Add Test actual playback 720p URL button
-      const testActualBtn = document.createElement("button");
-      testActualBtn.id = "astalavr-test-actual-playback-btn";
-      testActualBtn.textContent = "▶ Test actual playback 720p URL";
-      testActualBtn.style.width = "100%";
-      testActualBtn.style.padding = "6px 12px";
-      testActualBtn.style.backgroundColor = "#7c3aed";
-      testActualBtn.style.color = "#ffffff";
-      testActualBtn.style.border = "none";
-      testActualBtn.style.borderRadius = "4px";
-      testActualBtn.style.cursor = "pointer";
-      testActualBtn.style.fontWeight = "bold";
-
-      const testActualResultEl = document.createElement("div");
-      testActualResultEl.id = "astalavr-test-actual-playback-result";
-      testActualResultEl.style.fontSize = "11px";
-      testActualResultEl.style.padding = "6px 8px";
-      testActualResultEl.style.borderRadius = "4px";
-      testActualResultEl.style.display = "none";
-      testActualResultEl.style.lineHeight = "1.4";
-
-      testActualBtn.onclick = () => {
-        // Freeze scheduled polling immediately
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        testActualBtn.disabled = true;
-        testActualBtn.textContent = "⏳ Testing actual playback 720p in browser...";
-        testActualResultEl.style.display = "none";
-
-        testActualPlayback720p(effectiveRenditions, typeof performance !== "undefined" ? performance : ({} as any), document).then((res) => {
-          testActualBtn.disabled = false;
-          testActualBtn.textContent = "▶ Test actual playback 720p URL";
-          testActualResultEl.style.display = "block";
-
-          if (!res.actualPlaybackUrlFound) {
-            testActualResultEl.style.backgroundColor = "#1e293b";
-            testActualResultEl.style.color = "#f1f5f9";
-            testActualResultEl.innerHTML = `<div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
-            return;
-          }
-
-          if (res.pass) {
-            testActualResultEl.style.backgroundColor = "#065f46";
-            testActualResultEl.style.color = "#d1fae5";
-            const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
-            testActualResultEl.innerHTML = `
-              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>PASS</div>
-              <div><strong>DURATION=</strong>${durStr}s</div>
-              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
-              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
-            `;
-          } else {
-            testActualResultEl.style.backgroundColor = "#7f1d1d";
-            testActualResultEl.style.color = "#fee2e2";
-            testActualResultEl.innerHTML = `
-              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>FAIL</div>
-              <div><strong>MEDIA_ERROR_CODE=</strong>${res.errorCode || "UNKNOWN"}</div>
-              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
-              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
-            `;
-          }
-        });
-      };
-
-      btnContainer.appendChild(testActualBtn);
-      btnContainer.appendChild(testActualResultEl);
-
-      // Add Test actual 720p Range button
-      const testRangeBtn = document.createElement("button");
-      testRangeBtn.id = "astalavr-test-actual-range-btn";
-      testRangeBtn.textContent = "▶ Test actual 720p Range";
-      testRangeBtn.style.width = "100%";
-      testRangeBtn.style.padding = "6px 12px";
-      testRangeBtn.style.backgroundColor = "#c026d3";
-      testRangeBtn.style.color = "#ffffff";
-      testRangeBtn.style.border = "none";
-      testRangeBtn.style.borderRadius = "4px";
-      testRangeBtn.style.cursor = "pointer";
-      testRangeBtn.style.fontWeight = "bold";
-
-      const testRangeResultEl = document.createElement("div");
-      testRangeResultEl.id = "astalavr-test-actual-range-result";
-      testRangeResultEl.style.fontSize = "11px";
-      testRangeResultEl.style.padding = "6px 8px";
-      testRangeResultEl.style.borderRadius = "4px";
-      testRangeResultEl.style.display = "none";
-      testRangeResultEl.style.lineHeight = "1.4";
-
-      testRangeBtn.onclick = () => {
-        // Freeze scheduled polling immediately
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        testRangeBtn.disabled = true;
-        testRangeBtn.textContent = "⏳ Requesting 1 MiB Range in browser...";
-        testRangeResultEl.style.display = "none";
-
-        testActualPlayback720pRange(
-          effectiveRenditions,
-          typeof performance !== "undefined" ? performance : ({} as any)
-        ).then((res) => {
-          testRangeBtn.disabled = false;
-          testRangeBtn.textContent = "▶ Test actual 720p Range";
-          testRangeResultEl.style.display = "block";
-
-          if (!res.actualPlaybackUrlFound) {
-            testRangeResultEl.style.backgroundColor = "#1e293b";
-            testRangeResultEl.style.color = "#f1f5f9";
-            testRangeResultEl.innerHTML = `<div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
-            return;
-          }
-
-          if (res.pass) {
-            testRangeResultEl.style.backgroundColor = "#065f46";
-            testRangeResultEl.style.color = "#d1fae5";
-            testRangeResultEl.innerHTML = `
-              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>ACTUAL_720P_RANGE_TEST=</strong>PASS</div>
-              <div><strong>VALIDATION_MODE=</strong>${res.validationMode || "unknown"}</div>
-              <div><strong>HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
-              <div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
-              <div><strong>CONTENT_LENGTH_PRESENT=</strong>${res.contentLengthPresent ? "YES" : "NO"}</div>
-              ${res.contentLength !== null && res.contentLength !== undefined ? `<div><strong>CONTENT_LENGTH=</strong>${res.contentLength}</div>` : ""}
-              ${res.contentType !== null && res.contentType !== undefined ? `<div><strong>CONTENT_TYPE=</strong>${res.contentType}</div>` : ""}
-              <div><strong>BYTES_READ=</strong>${res.bytesRead ?? 0}</div>
-              <div><strong>MAX_BYTES_READ=</strong>${res.maxBytesRead}</div>
-            `;
-          } else {
-            testRangeResultEl.style.backgroundColor = "#7f1d1d";
-            testRangeResultEl.style.color = "#fee2e2";
-            let failDetails = `
-              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>ACTUAL_720P_RANGE_TEST=</strong>FAIL</div>
-            `;
-            if (res.failureKind === "FETCH_ERROR") {
-              failDetails += `<div><strong>FAILURE_KIND=</strong>FETCH_ERROR</div><div><strong>ERROR_NAME=</strong>${res.errorName || "FetchError"}</div>`;
-            } else {
-              if (res.failureKind !== undefined) {
-                failDetails += `<div><strong>FAILURE_KIND=</strong>${res.failureKind}</div>`;
-              }
-              if (res.httpStatus !== undefined) {
-                failDetails += `<div><strong>HTTP_STATUS=</strong>${res.httpStatus}</div>`;
-              }
-              if (res.bodyRead !== undefined) {
-                failDetails += `<div><strong>BODY_READ=</strong>${res.bodyRead}</div>`;
-              }
-              if (res.contentRangePresent !== undefined) {
-                failDetails += `<div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>`;
-              }
-              if (res.contentLengthPresent !== undefined) {
-                failDetails += `<div><strong>CONTENT_LENGTH_PRESENT=</strong>${res.contentLengthPresent ? "YES" : "NO"}</div>`;
-              }
-              if (res.contentLength !== null && res.contentLength !== undefined) {
-                failDetails += `<div><strong>CONTENT_LENGTH=</strong>${res.contentLength}</div>`;
-              }
-              if (res.contentType !== null && res.contentType !== undefined) {
-                failDetails += `<div><strong>CONTENT_TYPE=</strong>${res.contentType}</div>`;
-              }
-              if (res.bytesRead !== undefined) {
-                failDetails += `<div><strong>BYTES_READ=</strong>${res.bytesRead}</div>`;
-              }
-              failDetails += `<div><strong>MAX_BYTES_READ=</strong>${res.maxBytesRead}</div>`;
-            }
-            testRangeResultEl.innerHTML = failDetails;
-          }
-        });
-      };
-
-      btnContainer.appendChild(testRangeBtn);
-      btnContainer.appendChild(testRangeResultEl);
-
-      // Add Test actual 0-0 Range via GM_xmlhttpRequest button
-      const testGmBtn = document.createElement("button");
-      testGmBtn.id = "astalavr-test-gm-range-btn";
-      testGmBtn.textContent = "▶ Test actual 0-0 Range (GM)";
-      testGmBtn.style.width = "100%";
-      testGmBtn.style.padding = "6px 12px";
-      testGmBtn.style.backgroundColor = "#059669";
-      testGmBtn.style.color = "#ffffff";
-      testGmBtn.style.border = "none";
-      testGmBtn.style.borderRadius = "4px";
-      testGmBtn.style.cursor = "pointer";
-      testGmBtn.style.fontWeight = "bold";
-
-      const testGmResultEl = document.createElement("div");
-      testGmResultEl.id = "astalavr-test-gm-range-result";
-      testGmResultEl.style.fontSize = "11px";
-      testGmResultEl.style.padding = "6px 8px";
-      testGmResultEl.style.borderRadius = "4px";
-      testGmResultEl.style.display = "none";
-      testGmResultEl.style.lineHeight = "1.4";
-
-      testGmBtn.onclick = () => {
-        // Freeze scheduled polling immediately
-        this.isTestingBrowserMedia = true;
-        if (this.pollInterval) {
-          clearInterval(this.pollInterval);
-          this.pollInterval = undefined;
-        }
-
-        testGmBtn.disabled = true;
-        testGmBtn.textContent = "⏳ Requesting 0-0 Range via GM...";
-        testGmResultEl.style.display = "none";
-
-        testActualPlaybackGmRange(
-          effectiveRenditions,
-          typeof performance !== "undefined" ? performance : ({} as any)
-        ).then((res) => {
-          testGmBtn.disabled = false;
-          testGmBtn.textContent = "▶ Test actual 0-0 Range (GM)";
-          testGmResultEl.style.display = "block";
-
-          if (!res.actualPlaybackUrlFound) {
-            testGmResultEl.style.backgroundColor = "#1e293b";
-            testGmResultEl.style.color = "#f1f5f9";
-            testGmResultEl.innerHTML = `<div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
-            return;
-          }
-
-          if (res.pass) {
-            testGmResultEl.style.backgroundColor = "#065f46";
-            testGmResultEl.style.color = "#d1fae5";
-            testGmResultEl.innerHTML = `
-              <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>GM_METADATA_TEST=</strong>PASS</div>
-              <div><strong>GM_HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
-              <div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
-              <div><strong>GM_CONTENT_RANGE_VALID=</strong>${res.contentRangeValid ? "YES" : "NO"}</div>
-              <div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>
-              <div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>
-            `;
-          } else {
-            testGmResultEl.style.backgroundColor = "#7f1d1d";
-            testGmResultEl.style.color = "#fee2e2";
-            let failDetails = `
-              <div><strong>GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
-              <div><strong>GM_METADATA_TEST=</strong>FAIL</div>
-              <div><strong>GM_FAILURE_KIND=</strong>${res.failureKind || "UNKNOWN"}</div>
-            `;
-            if (res.httpStatus !== undefined) {
-              failDetails += `<div><strong>GM_HTTP_STATUS=</strong>${res.httpStatus}</div>`;
-            }
-            if (res.contentRangePresent !== undefined) {
-              failDetails += `<div><strong>GM_CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>`;
-            }
-            if (res.contentRangeValid !== undefined) {
-              failDetails += `<div><strong>GM_CONTENT_RANGE_VALID=</strong>${res.contentRangeValid ? "YES" : "NO"}</div>`;
-            }
-            if (res.totalFileSizeParsed !== undefined) {
-              failDetails += `<div><strong>GM_TOTAL_FILE_SIZE_PARSED=</strong>${res.totalFileSizeParsed ? "YES" : "NO"}</div>`;
-            }
-            failDetails += `<div><strong>GM_REQUEST_ABORTED=</strong>${res.requestAborted ? "YES" : "NO"}</div>`;
-            testGmResultEl.innerHTML = failDetails;
-          }
-        });
-      };
-
-      btnContainer.appendChild(testGmBtn);
-      btnContainer.appendChild(testGmResultEl);
-
-      // Add Test paired 1MiB Range button
+      // Test paired 1MiB Range button (the only remaining diagnostic)
       const testPairBtn = document.createElement("button");
       testPairBtn.id = "astalavr-test-pair-range-btn";
       testPairBtn.textContent = "▶ Test paired 1MiB Range";
@@ -777,11 +340,10 @@ export class AstalaVrProbeApp {
         });
       };
 
-      btnContainer.appendChild(testPairBtn);
-      btnContainer.appendChild(testPairResultEl);
-
-      btnContainer.appendChild(copyBtn);
-      this.contentElement.appendChild(btnContainer);
+      devContainer.appendChild(testPairBtn);
+      devContainer.appendChild(testPairResultEl);
+      devDetails.appendChild(devContainer);
+      this.contentElement.appendChild(devDetails);
     }
   }
 

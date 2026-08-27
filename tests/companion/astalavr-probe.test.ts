@@ -312,26 +312,28 @@ describe("AstalaVR Companion Probe", () => {
     const app = new AstalaVrProbeApp();
     app.init();
 
-    const testBtn = window.document.getElementById("astalavr-test-720p-btn") as HTMLButtonElement;
-    expect(testBtn).not.toBeNull();
+    // Normal UI must NOT have historical diagnostic buttons
+    expect(window.document.getElementById("astalavr-test-720p-btn")).toBeNull();
+    expect(window.document.getElementById("astalavr-inspect-player-btn")).toBeNull();
+    expect(window.document.getElementById("astalavr-inspect-resources-btn")).toBeNull();
+    expect(window.document.getElementById("astalavr-test-actual-playback-btn")).toBeNull();
+    expect(window.document.getElementById("astalavr-test-actual-range-btn")).toBeNull();
+    expect(window.document.getElementById("astalavr-test-gm-range-btn")).toBeNull();
 
-    // Click test button
-    testBtn.click();
+    // Transport status section is visible in normal UI
+    const transportStatusEl = window.document.getElementById("astalavr-transport-status-section");
+    expect(transportStatusEl).not.toBeNull();
+    expect(transportStatusEl!.innerHTML).toContain("Browser transport");
+    expect(transportStatusEl!.innerHTML).toContain("Actual playback: <strong>WAITING</strong>");
 
-    // Wait for async test completion
-    await new Promise((r) => setTimeout(r, 100));
+    // Developer diagnostics details element is present and default collapsed
+    const devDetails = window.document.getElementById("astalavr-dev-diagnostics") as HTMLDetailsElement;
+    expect(devDetails).not.toBeNull();
+    expect(devDetails.open).toBe(false);
 
-    const resultEl = window.document.getElementById("astalavr-test-720p-result")!;
-    expect(resultEl.style.display).toBe("block");
-    expect(resultEl.innerHTML).toContain("720P_BROWSER_MEDIA_TEST=PASS");
-    expect(resultEl.innerHTML).toContain("DURATION=543.21s");
-
-    // In a regular cycle, mutating DOM shouldn't re-render and overwrite test result because polling stopped
-    window.document.querySelector("dl8-video")!.innerHTML = "";
-    // Wait an extra interval
-    await new Promise((r) => setTimeout(r, 150));
-
-    expect(window.document.getElementById("astalavr-test-720p-result")!.innerHTML).toContain("720P_BROWSER_MEDIA_TEST=PASS");
+    // Paired test button exists inside developer diagnostics
+    const testPairBtn = window.document.getElementById("astalavr-test-pair-range-btn") as HTMLButtonElement;
+    expect(testPairBtn).not.toBeNull();
 
     app.destroy();
     spy.mockRestore();
@@ -410,77 +412,67 @@ describe("AstalaVR Companion Probe", () => {
     expect(info.matchedCachedRendition).toBe("NONE");
   });
 
-  it("13. clicking Inspect active player renders sanitized inspection report in UI", () => {
+  it("13. inspectActivePlayer function safely reports properties without leaking token", () => {
     const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
-    const originalWindow = (globalThis as any).window;
-    const originalDocument = (globalThis as any).document;
-    (globalThis as any).window = window;
-    (globalThis as any).document = window.document;
+    const doc = window.document;
 
-    window.document.body.innerHTML = `
+    doc.body.innerHTML = `
       <dl8-video title="TMAVR285">
         <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
         <video src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=super_secret_query"></video>
       </dl8-video>
     `;
 
-    const app = new AstalaVrProbeApp();
-    app.init();
+    const info = inspectActivePlayer(doc as any, [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=cached_token_123",
+      },
+    ]);
 
-    const inspectBtn = window.document.getElementById("astalavr-inspect-player-btn") as HTMLButtonElement;
-    expect(inspectBtn).not.toBeNull();
-
-    inspectBtn.click();
-
-    const inspectResultEl = window.document.getElementById("astalavr-inspect-player-result")!;
-    expect(inspectResultEl.style.display).toBe("block");
-    expect(inspectResultEl.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
-    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_HOST=</strong>cdn3.astalavr.com");
-    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_PATH=</strong>/qDAVn/720P.mp4");
-    expect(inspectResultEl.innerHTML).toContain("CURRENT_SRC_HAS_TOKEN=</strong>YES");
-    expect(inspectResultEl.innerHTML).toContain("MATCHED_CACHED_RENDITION=</strong>720p");
-    expect(inspectResultEl.innerHTML).not.toContain("super_secret_query");
-    expect(inspectResultEl.innerHTML).not.toContain("token=");
-
-    app.destroy();
-    (globalThis as any).window = originalWindow;
-    (globalThis as any).document = originalDocument;
+    expect(info.activePlayerFound).toBe(true);
+    expect(info.currentSrcHost).toBe("cdn3.astalavr.com");
+    expect(info.currentSrcPath).toBe("/qDAVn/720P.mp4");
+    expect(info.currentSrcHasToken).toBe(true);
+    expect(info.matchedCachedRendition).toBe("720p");
+    expect(JSON.stringify(info)).not.toContain("super_secret_query");
   });
 
-  it("14. clicking Inspect active player stops polling so result is preserved on subsequent DOM changes", async () => {
+  it("14. opening Developer diagnostics details does not execute any network request", async () => {
     const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
     const originalWindow = (globalThis as any).window;
     const originalDocument = (globalThis as any).document;
+    const fetchSpy = vi.fn();
+    (globalThis as any).fetch = fetchSpy;
     (globalThis as any).window = window;
     (globalThis as any).document = window.document;
 
     window.document.body.innerHTML = `
       <dl8-video title="TMAVR285">
         <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
-        <video src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=super_secret_query"></video>
       </dl8-video>
     `;
 
     const app = new AstalaVrProbeApp();
     app.init();
 
-    const inspectBtn = window.document.getElementById("astalavr-inspect-player-btn") as HTMLButtonElement;
-    expect(inspectBtn).not.toBeNull();
+    const devDetails = window.document.getElementById("astalavr-dev-diagnostics") as HTMLDetailsElement;
+    expect(devDetails).not.toBeNull();
+    expect(devDetails.open).toBe(false);
 
-    // Click inspect button
-    inspectBtn.click();
+    // Open the details accordion
+    devDetails.open = true;
+    devDetails.dispatchEvent(new window.Event("toggle"));
 
-    const inspectResultEl = window.document.getElementById("astalavr-inspect-player-result")!;
-    expect(inspectResultEl.style.display).toBe("block");
-    expect(inspectResultEl.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
+    await new Promise((r) => setTimeout(r, 50));
 
-    // Clear sources or mutate DOM
-    window.document.querySelector("dl8-video")!.innerHTML = "";
-    // Wait interval
-    await new Promise((r) => setTimeout(r, 100));
-
-    // Result must remain visible and intact
-    expect(window.document.getElementById("astalavr-inspect-player-result")!.innerHTML).toContain("ACTIVE_PLAYER_FOUND=</strong>YES");
+    // Must NOT have issued any network request just by expanding
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
 
     app.destroy();
     (globalThis as any).window = originalWindow;
@@ -635,17 +627,11 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.resources).toHaveLength(0);
   });
 
-  it("20. clicking Inspect playback resources stops polling and renders safe output without leaking token", () => {
+  it("20. inspectPlaybackResources safely parses resource timing entries without leaking token", () => {
     const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
-    const originalWindow = (globalThis as any).window;
-    const originalDocument = (globalThis as any).document;
-    const originalPerformance = (globalThis as any).performance;
-    (globalThis as any).window = window;
-    (globalThis as any).document = window.document;
+    const doc = window.document;
 
-    const origNow = typeof originalPerformance?.now === "function" ? originalPerformance.now.bind(originalPerformance) : () => Date.now();
-    (globalThis as any).performance = {
-      now: origNow,
+    const mockPerf = {
       getEntriesByType: (type: string) => {
         if (type === "resource") {
           return [
@@ -662,43 +648,36 @@ describe("AstalaVR Companion Probe", () => {
       },
     };
 
-    window.document.body.innerHTML = `
+    doc.body.innerHTML = `
       <dl8-video title="TMAVR285">
         <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
       </dl8-video>
     `;
 
-    const app = new AstalaVrProbeApp();
-    app.init();
+    const res = inspectPlaybackResources(
+      doc as any,
+      [
+        {
+          formatId: "720p-unknown",
+          resolution: "720p",
+          height: 720,
+          vcodec: "unknown",
+          mimeType: "unknown",
+          mediaHostname: "cdn3.astalavr.com",
+          fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1",
+        },
+      ],
+      mockPerf as any
+    );
 
-    const inspectResBtn = window.document.getElementById("astalavr-inspect-resources-btn") as HTMLButtonElement;
-    expect(inspectResBtn).not.toBeNull();
-
-    // Click inspect resources button
-    inspectResBtn.click();
-
-    const resResultEl = window.document.getElementById("astalavr-inspect-resources-result")!;
-    expect(resResultEl.style.display).toBe("block");
-    expect(resResultEl.innerHTML).toContain("DL8_VIDEO_FOUND=</strong>YES");
-    expect(resResultEl.innerHTML).toContain("DL8_SHADOW_ROOT=</strong>UNAVAILABLE");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_MATCH_COUNT=</strong>1");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_INITIATOR_TYPE=</strong>media");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_HOST=</strong>cdn3.astalavr.com");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_PATH=</strong>/qDAVn/720P.mp4");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_HAS_TOKEN=</strong>YES");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_MATCHED_RENDITION=</strong>720p");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_DURATION_MS=</strong>33");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_TRANSFER_SIZE=</strong>524288");
-    expect(resResultEl.innerHTML).toContain("RESOURCE_1_ENCODED_BODY_SIZE=</strong>524000");
-
-    // Token must never appear in UI
-    expect(resResultEl.innerHTML).not.toContain("SUPER_SECRET_PLAYBACK_TOKEN");
-    expect(resResultEl.innerHTML).not.toContain("token=");
-
-    app.destroy();
-    (globalThis as any).window = originalWindow;
-    (globalThis as any).document = originalDocument;
-    (globalThis as any).performance = originalPerformance;
+    expect(res.dl8VideoFound).toBe(true);
+    expect(res.dl8ShadowRoot).toBe("UNAVAILABLE");
+    expect(res.resourceMatchCount).toBe(1);
+    expect(res.resources[0].initiatorType).toBe("media");
+    expect(res.resources[0].host).toBe("cdn3.astalavr.com");
+    expect(res.resources[0].path).toBe("/qDAVn/720P.mp4");
+    expect(res.resources[0].hasToken).toBe(true);
+    expect(JSON.stringify(res)).not.toContain("SUPER_SECRET_PLAYBACK_TOKEN");
   });
 
   it("21. exact URL, query, and token match -> EXACT_CACHED_URL_MATCH=YES, QUERY_MATCH=YES, TOKEN_MATCH=YES", () => {
@@ -1025,35 +1004,29 @@ describe("AstalaVR Companion Probe", () => {
       return origCreateElement(tag);
     });
 
-    window.document.body.innerHTML = `
-      <dl8-video title="TMAVR285">
-        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_abc" />
-      </dl8-video>
-    `;
+    const res = await testActualPlayback720p(
+      [
+        {
+          formatId: "720p-unknown",
+          resolution: "720p",
+          height: 720,
+          vcodec: "unknown",
+          mimeType: "unknown",
+          mediaHostname: "cdn3.astalavr.com",
+          fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_abc",
+        },
+      ],
+      (globalThis as any).performance as any,
+      window.document
+    );
 
-    const app = new AstalaVrProbeApp();
-    app.init();
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(true);
+    expect(res.duration).toBe(555.55);
+    expect(res.pathMatch).toBe(true);
+    expect(res.tokenDiffersFromDom).toBe(true);
+    expect(JSON.stringify(res)).not.toContain("SUPER_SECRET_PLAYBACK_TOKEN_123");
 
-    const testActualBtn = window.document.getElementById("astalavr-test-actual-playback-btn") as HTMLButtonElement;
-    expect(testActualBtn).not.toBeNull();
-
-    testActualBtn.click();
-
-    await new Promise((r) => setTimeout(r, 100));
-
-    const resultEl = window.document.getElementById("astalavr-test-actual-playback-result")!;
-    expect(resultEl.style.display).toBe("block");
-    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
-    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_720P_TEST=</strong>PASS");
-    expect(resultEl.innerHTML).toContain("DURATION=</strong>555.55s");
-    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_PATH_MATCH=</strong>YES");
-    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>YES");
-
-    // UI must never leak the secret token
-    expect(resultEl.innerHTML).not.toContain("SUPER_SECRET_PLAYBACK_TOKEN_123");
-    expect(resultEl.innerHTML).not.toContain("dom_token_abc");
-
-    app.destroy();
     spy.mockRestore();
     (globalThis as any).window = originalWindow;
     (globalThis as any).document = originalDocument;
@@ -1332,38 +1305,32 @@ describe("AstalaVR Companion Probe", () => {
       },
     }));
 
-    window.document.body.innerHTML = `
-      <dl8-video title="TMAVR285">
-        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_123" />
-      </dl8-video>
-    `;
+    const res = await testActualPlayback720pRange(
+      [
+        {
+          formatId: "720p-unknown",
+          resolution: "720p",
+          height: 720,
+          vcodec: "unknown",
+          mimeType: "unknown",
+          mediaHostname: "cdn3.astalavr.com",
+          fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_123",
+        },
+      ],
+      (globalThis as any).performance as any,
+      (globalThis as any).fetch
+    );
 
-    const app = new AstalaVrProbeApp();
-    app.init();
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(true);
+    expect(res.httpStatus).toBe(206);
+    expect(res.contentRangePresent).toBe(true);
+    expect(res.contentLength).toBe("1048576");
+    expect(res.contentType).toBe("video/mp4");
+    expect(res.bytesRead).toBe(1048576);
+    expect(res.maxBytesRead).toBe(1048576);
+    expect(JSON.stringify(res)).not.toContain("RANGE_SECRET_TOKEN_999");
 
-    const testRangeBtn = window.document.getElementById("astalavr-test-actual-range-btn") as HTMLButtonElement;
-    expect(testRangeBtn).not.toBeNull();
-
-    testRangeBtn.click();
-
-    await new Promise((r) => setTimeout(r, 100));
-
-    const resultEl = window.document.getElementById("astalavr-test-actual-range-result")!;
-    expect(resultEl.style.display).toBe("block");
-    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
-    expect(resultEl.innerHTML).toContain("ACTUAL_720P_RANGE_TEST=</strong>PASS");
-    expect(resultEl.innerHTML).toContain("HTTP_STATUS=</strong>206");
-    expect(resultEl.innerHTML).toContain("CONTENT_RANGE_PRESENT=</strong>YES");
-    expect(resultEl.innerHTML).toContain("CONTENT_LENGTH=</strong>1048576");
-    expect(resultEl.innerHTML).toContain("CONTENT_TYPE=</strong>video/mp4");
-    expect(resultEl.innerHTML).toContain("BYTES_READ=</strong>1048576");
-    expect(resultEl.innerHTML).toContain("MAX_BYTES_READ=</strong>1048576");
-
-    // UI must never leak the secret token
-    expect(resultEl.innerHTML).not.toContain("RANGE_SECRET_TOKEN_999");
-    expect(resultEl.innerHTML).not.toContain("dom_token_123");
-
-    app.destroy();
     (globalThis as any).window = originalWindow;
     (globalThis as any).document = originalDocument;
     (globalThis as any).performance = originalPerformance;
@@ -1847,18 +1814,8 @@ describe("AstalaVR Companion Probe", () => {
       expect(resTimeout.requestAborted).toBe(true);
     });
 
-    it("H. clicking Test actual 0-0 Range (GM) in UI stops polling and renders safe output without leaking URL/token", async () => {
-      const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
-      const originalWindow = (globalThis as any).window;
-      const originalDocument = (globalThis as any).document;
-      const originalPerformance = (globalThis as any).performance;
-      const originalGm = (globalThis as any).GM_xmlhttpRequest;
-
-      (globalThis as any).window = window;
-      (globalThis as any).document = window.document;
-
-      (globalThis as any).performance = {
-        now: () => Date.now(),
+    it("H. testActualPlaybackGmRange parses total file size and returns safe output without leaking URL/token", async () => {
+      const mockPerf = {
         getEntriesByType: (type: string) => {
           if (type === "resource") {
             return [
@@ -1873,7 +1830,7 @@ describe("AstalaVR Companion Probe", () => {
         },
       };
 
-      (globalThis as any).GM_xmlhttpRequest = (details: any) => {
+      const mockGm = (details: any) => {
         setTimeout(() => {
           if (details.onreadystatechange) {
             details.onreadystatechange({
@@ -1886,43 +1843,32 @@ describe("AstalaVR Companion Probe", () => {
         return { abort: () => {} };
       };
 
-      window.document.body.innerHTML = `
-        <dl8-video title="TMAVR285">
-          <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1" />
-        </dl8-video>
-      `;
+      const res = await testActualPlaybackGmRange(
+        [
+          {
+            formatId: "720p-unknown",
+            resolution: "720p",
+            height: 720,
+            vcodec: "unknown",
+            mimeType: "unknown",
+            mediaHostname: "cdn3.astalavr.com",
+            fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=token1",
+          },
+        ],
+        mockPerf as any,
+        mockGm as any
+      );
 
-      const app = new AstalaVrProbeApp();
-      app.init();
+      expect(res.actualPlaybackUrlFound).toBe(true);
+      expect(res.pass).toBe(true);
+      expect(res.httpStatus).toBe(206);
+      expect(res.contentRangePresent).toBe(true);
+      expect(res.contentRangeValid).toBe(true);
+      expect(res.totalFileSizeParsed).toBe(true);
+      expect(res.requestAborted).toBe(true);
 
-      const testGmBtn = window.document.getElementById("astalavr-test-gm-range-btn") as HTMLButtonElement;
-      expect(testGmBtn).not.toBeNull();
-
-      testGmBtn.click();
-
-      await new Promise((r) => setTimeout(r, 60));
-
-      const resultEl = window.document.getElementById("astalavr-test-gm-range-result")!;
-      expect(resultEl.style.display).toBe("block");
-      expect(resultEl.innerHTML).toContain("GM_ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_METADATA_TEST=</strong>PASS");
-      expect(resultEl.innerHTML).toContain("GM_HTTP_STATUS=</strong>206");
-      expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_PRESENT=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_CONTENT_RANGE_VALID=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_TOTAL_FILE_SIZE_PARSED=</strong>YES");
-      expect(resultEl.innerHTML).toContain("GM_REQUEST_ABORTED=</strong>YES");
-
-      // Verify strict token & raw header confidentiality in UI output
-      expect(resultEl.innerHTML).not.toContain("ULTRA_SECRET_TOKEN_GM");
-      expect(resultEl.innerHTML).not.toContain("token=");
-      expect(resultEl.innerHTML).not.toContain("524288000"); // Total file size not displayed
-      expect(resultEl.innerHTML).not.toContain("bytes 0-0"); // Raw header not displayed
-
-      app.destroy();
-      (globalThis as any).window = originalWindow;
-      (globalThis as any).document = originalDocument;
-      (globalThis as any).performance = originalPerformance;
-      (globalThis as any).GM_xmlhttpRequest = originalGm;
+      // Verify strict confidentiality
+      expect(JSON.stringify(res)).not.toContain("ULTRA_SECRET_TOKEN_GM");
     });
 
     it("I. userscript build header metadata has @grant GM_xmlhttpRequest and exact @connect cdn3.astalavr.com only", async () => {
