@@ -4,6 +4,7 @@ import {
   testBrowserMedia720p,
   inspectActivePlayer,
   inspectPlaybackResources,
+  testActualPlayback720p,
   type AstalaVrRenditionSummary,
 } from "./astalavr.js";
 
@@ -397,6 +398,79 @@ export class AstalaVrProbeApp {
 
       btnContainer.appendChild(inspectResBtn);
       btnContainer.appendChild(inspectResResultEl);
+
+      // Add Test actual playback 720p URL button
+      const testActualBtn = document.createElement("button");
+      testActualBtn.id = "astalavr-test-actual-playback-btn";
+      testActualBtn.textContent = "▶ Test actual playback 720p URL";
+      testActualBtn.style.width = "100%";
+      testActualBtn.style.padding = "6px 12px";
+      testActualBtn.style.backgroundColor = "#7c3aed";
+      testActualBtn.style.color = "#ffffff";
+      testActualBtn.style.border = "none";
+      testActualBtn.style.borderRadius = "4px";
+      testActualBtn.style.cursor = "pointer";
+      testActualBtn.style.fontWeight = "bold";
+
+      const testActualResultEl = document.createElement("div");
+      testActualResultEl.id = "astalavr-test-actual-playback-result";
+      testActualResultEl.style.fontSize = "11px";
+      testActualResultEl.style.padding = "6px 8px";
+      testActualResultEl.style.borderRadius = "4px";
+      testActualResultEl.style.display = "none";
+      testActualResultEl.style.lineHeight = "1.4";
+
+      testActualBtn.onclick = () => {
+        // Freeze scheduled polling immediately
+        this.isTestingBrowserMedia = true;
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = undefined;
+        }
+
+        testActualBtn.disabled = true;
+        testActualBtn.textContent = "⏳ Testing actual playback 720p in browser...";
+        testActualResultEl.style.display = "none";
+
+        testActualPlayback720p(effectiveRenditions, typeof performance !== "undefined" ? performance : ({} as any), document).then((res) => {
+          testActualBtn.disabled = false;
+          testActualBtn.textContent = "▶ Test actual playback 720p URL";
+          testActualResultEl.style.display = "block";
+
+          if (!res.actualPlaybackUrlFound) {
+            testActualResultEl.style.backgroundColor = "#1e293b";
+            testActualResultEl.style.color = "#f1f5f9";
+            testActualResultEl.innerHTML = `<div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
+            return;
+          }
+
+          if (res.pass) {
+            testActualResultEl.style.backgroundColor = "#065f46";
+            testActualResultEl.style.color = "#d1fae5";
+            const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+            testActualResultEl.innerHTML = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>PASS</div>
+              <div><strong>DURATION=</strong>${durStr}s</div>
+              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
+              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
+            `;
+          } else {
+            testActualResultEl.style.backgroundColor = "#7f1d1d";
+            testActualResultEl.style.color = "#fee2e2";
+            testActualResultEl.innerHTML = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>FAIL</div>
+              <div><strong>MEDIA_ERROR_CODE=</strong>${res.errorCode || "UNKNOWN"}</div>
+              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
+              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
+            `;
+          }
+        });
+      };
+
+      btnContainer.appendChild(testActualBtn);
+      btnContainer.appendChild(testActualResultEl);
 
       btnContainer.appendChild(copyBtn);
       this.contentElement.appendChild(btnContainer);

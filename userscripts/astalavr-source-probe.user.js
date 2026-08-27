@@ -356,6 +356,71 @@
       resources: matchedResources
     };
   }
+  async function testActualPlayback720p(cachedRenditions = [], perf = typeof performance !== "undefined" ? performance : {}, doc = typeof document !== "undefined" ? document : null, timeoutMs = 1e4) {
+    const targetDoc = doc || (typeof document !== "undefined" ? document : null);
+    if (!targetDoc) {
+      return {
+        actualPlaybackUrlFound: false,
+        pass: false,
+        errorCode: "NO_DOCUMENT"
+      };
+    }
+    const entries = perf && typeof perf.getEntriesByType === "function" ? perf.getEntriesByType("resource") : [];
+    const rendition720p = cachedRenditions.find((r) => r.resolution === "720p" || r.height === 720);
+    let cached720pPath = "";
+    let cached720pToken = null;
+    if (rendition720p) {
+      try {
+        const cParsed = new URL(rendition720p.fullDirectUrl);
+        cached720pPath = cParsed.pathname.toLowerCase();
+        cached720pToken = cParsed.searchParams.get("token");
+      } catch {
+      }
+    }
+    const matchingUrls = [];
+    for (const entry of entries) {
+      const rawUrl = entry.name;
+      if (!rawUrl || typeof rawUrl !== "string") continue;
+      try {
+        const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+        const host = parsed.hostname;
+        const path = parsed.pathname.toLowerCase();
+        const initiator = (entry.initiatorType || "").toLowerCase();
+        if ((initiator === "video" || initiator === "media") && host === "cdn3.astalavr.com" && cached720pPath && path === cached720pPath) {
+          matchingUrls.push(parsed.href);
+        }
+      } catch {
+      }
+    }
+    if (matchingUrls.length === 0) {
+      return {
+        actualPlaybackUrlFound: false
+      };
+    }
+    const latestPlaybackUrl = matchingUrls[matchingUrls.length - 1];
+    let pathMatch = false;
+    let tokenDiffersFromDom = false;
+    try {
+      const playParsed = new URL(latestPlaybackUrl);
+      pathMatch = playParsed.pathname.toLowerCase() === cached720pPath;
+      const playToken = playParsed.searchParams.get("token");
+      if (playToken !== null && cached720pToken !== null) {
+        tokenDiffersFromDom = playToken !== cached720pToken;
+      } else {
+        tokenDiffersFromDom = playToken !== cached720pToken;
+      }
+    } catch {
+    }
+    const mediaRes = await testBrowserMedia720p(latestPlaybackUrl, timeoutMs, targetDoc);
+    return {
+      actualPlaybackUrlFound: true,
+      pass: mediaRes.pass,
+      duration: mediaRes.duration,
+      errorCode: mediaRes.errorCode,
+      pathMatch,
+      tokenDiffersFromDom
+    };
+  }
 
   // companion/src/astalavr-index.ts
   var AstalaVrProbeApp = class {
@@ -695,6 +760,69 @@
         };
         btnContainer.appendChild(inspectResBtn);
         btnContainer.appendChild(inspectResResultEl);
+        const testActualBtn = document.createElement("button");
+        testActualBtn.id = "astalavr-test-actual-playback-btn";
+        testActualBtn.textContent = "\u25B6 Test actual playback 720p URL";
+        testActualBtn.style.width = "100%";
+        testActualBtn.style.padding = "6px 12px";
+        testActualBtn.style.backgroundColor = "#7c3aed";
+        testActualBtn.style.color = "#ffffff";
+        testActualBtn.style.border = "none";
+        testActualBtn.style.borderRadius = "4px";
+        testActualBtn.style.cursor = "pointer";
+        testActualBtn.style.fontWeight = "bold";
+        const testActualResultEl = document.createElement("div");
+        testActualResultEl.id = "astalavr-test-actual-playback-result";
+        testActualResultEl.style.fontSize = "11px";
+        testActualResultEl.style.padding = "6px 8px";
+        testActualResultEl.style.borderRadius = "4px";
+        testActualResultEl.style.display = "none";
+        testActualResultEl.style.lineHeight = "1.4";
+        testActualBtn.onclick = () => {
+          this.isTestingBrowserMedia = true;
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = void 0;
+          }
+          testActualBtn.disabled = true;
+          testActualBtn.textContent = "\u23F3 Testing actual playback 720p in browser...";
+          testActualResultEl.style.display = "none";
+          testActualPlayback720p(effectiveRenditions, typeof performance !== "undefined" ? performance : {}, document).then((res) => {
+            testActualBtn.disabled = false;
+            testActualBtn.textContent = "\u25B6 Test actual playback 720p URL";
+            testActualResultEl.style.display = "block";
+            if (!res.actualPlaybackUrlFound) {
+              testActualResultEl.style.backgroundColor = "#1e293b";
+              testActualResultEl.style.color = "#f1f5f9";
+              testActualResultEl.innerHTML = `<div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
+              return;
+            }
+            if (res.pass) {
+              testActualResultEl.style.backgroundColor = "#065f46";
+              testActualResultEl.style.color = "#d1fae5";
+              const durStr = typeof res.duration === "number" ? res.duration.toFixed(2) : "unknown";
+              testActualResultEl.innerHTML = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>PASS</div>
+              <div><strong>DURATION=</strong>${durStr}s</div>
+              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
+              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
+            `;
+            } else {
+              testActualResultEl.style.backgroundColor = "#7f1d1d";
+              testActualResultEl.style.color = "#fee2e2";
+              testActualResultEl.innerHTML = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_PLAYBACK_720P_TEST=</strong>FAIL</div>
+              <div><strong>MEDIA_ERROR_CODE=</strong>${res.errorCode || "UNKNOWN"}</div>
+              <div><strong>ACTUAL_PLAYBACK_PATH_MATCH=</strong>${res.pathMatch ? "YES" : "NO"}</div>
+              <div><strong>ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>${res.tokenDiffersFromDom ? "YES" : "NO"}</div>
+            `;
+            }
+          });
+        };
+        btnContainer.appendChild(testActualBtn);
+        btnContainer.appendChild(testActualResultEl);
         btnContainer.appendChild(copyBtn);
         this.contentElement.appendChild(btnContainer);
       }

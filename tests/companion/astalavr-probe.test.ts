@@ -6,6 +6,7 @@ import {
   testBrowserMedia720p,
   inspectActivePlayer,
   inspectPlaybackResources,
+  testActualPlayback720p,
 } from "../../companion/src/astalavr.js";
 import { AstalaVrProbeApp } from "../../companion/src/astalavr-index.js";
 
@@ -819,5 +820,240 @@ describe("AstalaVR Companion Probe", () => {
     expect(res.resources[1].exactCachedUrlMatch).toBe("NO");
     expect(res.resources[1].tokenMatch).toBe("NO");
     expect(res.resources[1].sameFullUrlAsPreviousMatch).toBe("NO");
+  });
+
+  it("24. testActualPlayback720p selects latest matching video entry and detects token difference from DOM", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_initial",
+      },
+    ];
+
+    let createdVideoSrc = "";
+    const mockVideo: any = {
+      tagName: "VIDEO",
+      preload: "",
+      src: "",
+      duration: 1234.56,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onloadedmetadata) mockVideo.onloadedmetadata();
+        }, 30);
+      },
+      removeAttribute: () => {},
+      remove: () => {},
+    };
+
+    const origCreateElement = doc.createElement.bind(doc);
+    const spy = vi.spyOn(doc, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") {
+        return new Proxy(mockVideo, {
+          set(target, prop, value) {
+            if (prop === "src") createdVideoSrc = value;
+            target[prop] = value;
+            return true;
+          },
+        });
+      }
+      return origCreateElement(tag);
+    });
+
+    const mockPerf: any = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=old_player_token_1",
+              initiatorType: "video",
+              duration: 50,
+            },
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=latest_active_player_token_2",
+              initiatorType: "video",
+              duration: 60,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const res = await testActualPlayback720p(cachedRenditions as any, mockPerf, doc as any, 1000);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(true);
+    expect(res.duration).toBe(1234.56);
+    expect(res.pathMatch).toBe(true);
+    expect(res.tokenDiffersFromDom).toBe(true);
+    expect(createdVideoSrc).toBe("https://cdn3.astalavr.com/qDAVn/720P.mp4?token=latest_active_player_token_2");
+
+    spy.mockRestore();
+  });
+
+  it("25. testActualPlayback720p reports FAIL on video error without leaking URL or token", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    const cachedRenditions = [
+      {
+        formatId: "720p-unknown",
+        resolution: "720p",
+        height: 720,
+        vcodec: "unknown",
+        mimeType: "unknown",
+        mediaHostname: "cdn3.astalavr.com",
+        fullDirectUrl: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token",
+      },
+    ];
+
+    const mockVideo: any = {
+      tagName: "VIDEO",
+      preload: "",
+      src: "",
+      error: { code: 4 },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onerror) mockVideo.onerror();
+        }, 30);
+      },
+      removeAttribute: () => {},
+      remove: () => {},
+    };
+
+    const origCreateElement = doc.createElement.bind(doc);
+    const spy = vi.spyOn(doc, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") return mockVideo;
+      return origCreateElement(tag);
+    });
+
+    const mockPerf: any = {
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=secret_player_token",
+              initiatorType: "video",
+              duration: 50,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const res = await testActualPlayback720p(cachedRenditions as any, mockPerf, doc as any, 1000);
+    expect(res.actualPlaybackUrlFound).toBe(true);
+    expect(res.pass).toBe(false);
+    expect(res.errorCode).toBe(4);
+    expect(res.pathMatch).toBe(true);
+    expect(res.tokenDiffersFromDom).toBe(true);
+
+    spy.mockRestore();
+  });
+
+  it("26. testActualPlayback720p returns ACTUAL_PLAYBACK_URL_FOUND=false when no matching resource exists", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const doc = window.document;
+
+    const mockPerf: any = {
+      getEntriesByType: () => [],
+    };
+
+    const res = await testActualPlayback720p([], mockPerf, doc as any, 1000);
+    expect(res.actualPlaybackUrlFound).toBe(false);
+  });
+
+  it("27. clicking Test actual playback 720p URL renders safe result UI and freezes polling", async () => {
+    const window = new Window({ url: "https://astalavr.com/videos/qDAVn/tmavr285-jun-suehiro-oguri-misao" });
+    const originalWindow = (globalThis as any).window;
+    const originalDocument = (globalThis as any).document;
+    const originalPerformance = (globalThis as any).performance;
+    (globalThis as any).window = window;
+    (globalThis as any).document = window.document;
+
+    const origNow = typeof originalPerformance?.now === "function" ? originalPerformance.now.bind(originalPerformance) : () => Date.now();
+    (globalThis as any).performance = {
+      now: origNow,
+      getEntriesByType: (type: string) => {
+        if (type === "resource") {
+          return [
+            {
+              name: "https://cdn3.astalavr.com/qDAVn/720P.mp4?token=SUPER_SECRET_PLAYBACK_TOKEN_123",
+              initiatorType: "video",
+              duration: 50,
+            },
+          ];
+        }
+        return [];
+      },
+    };
+
+    const mockVideo: any = {
+      tagName: "VIDEO",
+      preload: "",
+      src: "",
+      duration: 555.55,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      load: () => {
+        setTimeout(() => {
+          if (mockVideo.onloadedmetadata) mockVideo.onloadedmetadata();
+        }, 30);
+      },
+      removeAttribute: () => {},
+      remove: () => {},
+    };
+
+    const origCreateElement = window.document.createElement.bind(window.document);
+    const spy = vi.spyOn(window.document, "createElement").mockImplementation((tag: string) => {
+      if (tag === "video") return mockVideo;
+      return origCreateElement(tag);
+    });
+
+    window.document.body.innerHTML = `
+      <dl8-video title="TMAVR285">
+        <source quality="720p" src="https://cdn3.astalavr.com/qDAVn/720P.mp4?token=dom_token_abc" />
+      </dl8-video>
+    `;
+
+    const app = new AstalaVrProbeApp();
+    app.init();
+
+    const testActualBtn = window.document.getElementById("astalavr-test-actual-playback-btn") as HTMLButtonElement;
+    expect(testActualBtn).not.toBeNull();
+
+    testActualBtn.click();
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const resultEl = window.document.getElementById("astalavr-test-actual-playback-result")!;
+    expect(resultEl.style.display).toBe("block");
+    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_URL_FOUND=</strong>YES");
+    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_720P_TEST=</strong>PASS");
+    expect(resultEl.innerHTML).toContain("DURATION=</strong>555.55s");
+    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_PATH_MATCH=</strong>YES");
+    expect(resultEl.innerHTML).toContain("ACTUAL_PLAYBACK_TOKEN_DIFFERS_FROM_DOM=</strong>YES");
+
+    // UI must never leak the secret token
+    expect(resultEl.innerHTML).not.toContain("SUPER_SECRET_PLAYBACK_TOKEN_123");
+    expect(resultEl.innerHTML).not.toContain("dom_token_abc");
+
+    app.destroy();
+    spy.mockRestore();
+    (globalThis as any).window = originalWindow;
+    (globalThis as any).document = originalDocument;
+    (globalThis as any).performance = originalPerformance;
   });
 });
