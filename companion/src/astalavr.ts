@@ -585,3 +585,181 @@ export async function testActualPlayback720p(
     tokenDiffersFromDom,
   };
 }
+
+export interface ActualPlaybackRangeTestResult {
+  actualPlaybackUrlFound: boolean;
+  pass?: boolean;
+  httpStatus?: number;
+  contentRangePresent?: boolean;
+  contentRangeValid?: boolean;
+  contentLength?: string | null;
+  contentType?: string | null;
+  bytesRead?: number;
+  maxBytesRead: number;
+  bodyRead?: "YES" | "NO";
+  failureKind?: "FETCH_ERROR" | "STATUS_NOT_206" | "INVALID_CONTENT_RANGE" | "INCOMPLETE_READ" | "UNKNOWN";
+  errorName?: string;
+}
+
+export async function testActualPlayback720pRange(
+  cachedRenditions: AstalaVrRenditionSummary[] = [],
+  perf: Performance = typeof performance !== "undefined" ? performance : ({} as any),
+  fetchFn: typeof fetch = typeof fetch !== "undefined" ? fetch.bind(globalThis) : (null as any)
+): Promise<ActualPlaybackRangeTestResult> {
+  const MAX_BYTES_READ = 1048576; // 1 MiB
+
+  const entries =
+    perf && typeof perf.getEntriesByType === "function"
+      ? (perf.getEntriesByType("resource") as PerformanceResourceTiming[])
+      : [];
+
+  const rendition720p = cachedRenditions.find((r) => r.resolution === "720p" || r.height === 720);
+  let cached720pPath = "";
+  if (rendition720p) {
+    try {
+      const cParsed = new URL(rendition720p.fullDirectUrl);
+      cached720pPath = cParsed.pathname.toLowerCase();
+    } catch {}
+  }
+
+  const matchingUrls: string[] = [];
+  for (const entry of entries) {
+    const rawUrl = entry.name;
+    if (!rawUrl || typeof rawUrl !== "string") continue;
+
+    try {
+      const parsed = new URL(rawUrl, typeof window !== "undefined" ? window.location.href : "https://astalavr.com");
+      const host = parsed.hostname;
+      const path = parsed.pathname.toLowerCase();
+      const initiator = (entry.initiatorType || "").toLowerCase();
+
+      if (
+        (initiator === "video" || initiator === "media") &&
+        host === "cdn3.astalavr.com" &&
+        cached720pPath &&
+        path === cached720pPath
+      ) {
+        matchingUrls.push(parsed.href);
+      }
+    } catch {}
+  }
+
+  if (matchingUrls.length === 0) {
+    return {
+      actualPlaybackUrlFound: false,
+      maxBytesRead: MAX_BYTES_READ,
+    };
+  }
+
+  const latestPlaybackUrl = matchingUrls[matchingUrls.length - 1];
+
+  let response: Response;
+  try {
+    response = await fetchFn(latestPlaybackUrl, {
+      headers: {
+        Range: "bytes=0-1048575",
+      },
+    });
+  } catch (err: any) {
+    const errorName = (err && typeof err.name === "string" ? err.name : "FetchError") || "FetchError";
+    return {
+      actualPlaybackUrlFound: true,
+      pass: false,
+      failureKind: "FETCH_ERROR",
+      errorName,
+      maxBytesRead: MAX_BYTES_READ,
+    };
+  }
+
+  const httpStatus = response.status;
+  const contentRangeHeader = response.headers ? response.headers.get("Content-Range") : null;
+  const contentRangePresent = Boolean(contentRangeHeader);
+  const contentRangeValid = Boolean(
+    contentRangeHeader && /^bytes\s+0-1048575\//i.test(contentRangeHeader.trim())
+  );
+  const contentLength = response.headers ? response.headers.get("Content-Length") : null;
+  const contentType = response.headers ? response.headers.get("Content-Type") : null;
+
+  if (httpStatus !== 206) {
+    // Cancel response body immediately if possible
+    try {
+      if (response.body && typeof response.body.cancel === "function") {
+        await response.body.cancel();
+      }
+    } catch {}
+
+    return {
+      actualPlaybackUrlFound: true,
+      pass: false,
+      httpStatus,
+      contentRangePresent,
+      contentRangeValid,
+      contentLength,
+      contentType,
+      bodyRead: "NO",
+      bytesRead: 0,
+      failureKind: "STATUS_NOT_206",
+      maxBytesRead: MAX_BYTES_READ,
+    };
+  }
+
+  // Read response stream enforcing 1 MiB cap
+  let bytesRead = 0;
+  if (!response.body) {
+    // Fallback if reader not available (e.g. arrayBuffer in non-streaming environment)
+    try {
+      const buf = await response.arrayBuffer();
+      bytesRead = Math.min(buf.byteLength, MAX_BYTES_READ);
+    } catch {
+      bytesRead = 0;
+    }
+  } else {
+    const reader = response.body.getReader();
+    try {
+      while (bytesRead < MAX_BYTES_READ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          const remaining = MAX_BYTES_READ - bytesRead;
+          if (value.byteLength > remaining) {
+            bytesRead += remaining;
+            try {
+              await reader.cancel();
+            } catch {}
+            break;
+          } else {
+            bytesRead += value.byteLength;
+          }
+        }
+      }
+    } catch {
+      // Reader error
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
+  }
+
+  const pass = httpStatus === 206 && contentRangeValid && bytesRead === MAX_BYTES_READ;
+  let failureKind: ActualPlaybackRangeTestResult["failureKind"];
+  if (!pass) {
+    if (!contentRangeValid) failureKind = "INVALID_CONTENT_RANGE";
+    else if (bytesRead !== MAX_BYTES_READ) failureKind = "INCOMPLETE_READ";
+    else failureKind = "UNKNOWN";
+  }
+
+  return {
+    actualPlaybackUrlFound: true,
+    pass,
+    httpStatus,
+    contentRangePresent,
+    contentRangeValid,
+    contentLength,
+    contentType,
+    bytesRead,
+    maxBytesRead: MAX_BYTES_READ,
+    bodyRead: "YES",
+    failureKind,
+  };
+}

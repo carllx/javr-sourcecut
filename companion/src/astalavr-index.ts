@@ -5,6 +5,7 @@ import {
   inspectActivePlayer,
   inspectPlaybackResources,
   testActualPlayback720p,
+  testActualPlayback720pRange,
   type AstalaVrRenditionSummary,
 } from "./astalavr.js";
 
@@ -471,6 +472,99 @@ export class AstalaVrProbeApp {
 
       btnContainer.appendChild(testActualBtn);
       btnContainer.appendChild(testActualResultEl);
+
+      // Add Test actual 720p Range button
+      const testRangeBtn = document.createElement("button");
+      testRangeBtn.id = "astalavr-test-actual-range-btn";
+      testRangeBtn.textContent = "▶ Test actual 720p Range";
+      testRangeBtn.style.width = "100%";
+      testRangeBtn.style.padding = "6px 12px";
+      testRangeBtn.style.backgroundColor = "#c026d3";
+      testRangeBtn.style.color = "#ffffff";
+      testRangeBtn.style.border = "none";
+      testRangeBtn.style.borderRadius = "4px";
+      testRangeBtn.style.cursor = "pointer";
+      testRangeBtn.style.fontWeight = "bold";
+
+      const testRangeResultEl = document.createElement("div");
+      testRangeResultEl.id = "astalavr-test-actual-range-result";
+      testRangeResultEl.style.fontSize = "11px";
+      testRangeResultEl.style.padding = "6px 8px";
+      testRangeResultEl.style.borderRadius = "4px";
+      testRangeResultEl.style.display = "none";
+      testRangeResultEl.style.lineHeight = "1.4";
+
+      testRangeBtn.onclick = () => {
+        // Freeze scheduled polling immediately
+        this.isTestingBrowserMedia = true;
+        if (this.pollInterval) {
+          clearInterval(this.pollInterval);
+          this.pollInterval = undefined;
+        }
+
+        testRangeBtn.disabled = true;
+        testRangeBtn.textContent = "⏳ Requesting 1 MiB Range in browser...";
+        testRangeResultEl.style.display = "none";
+
+        testActualPlayback720pRange(
+          effectiveRenditions,
+          typeof performance !== "undefined" ? performance : ({} as any)
+        ).then((res) => {
+          testRangeBtn.disabled = false;
+          testRangeBtn.textContent = "▶ Test actual 720p Range";
+          testRangeResultEl.style.display = "block";
+
+          if (!res.actualPlaybackUrlFound) {
+            testRangeResultEl.style.backgroundColor = "#1e293b";
+            testRangeResultEl.style.color = "#f1f5f9";
+            testRangeResultEl.innerHTML = `<div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>NO</div><div>(No matching video resource found in performance entries yet. Please start playback first.)</div>`;
+            return;
+          }
+
+          if (res.pass) {
+            testRangeResultEl.style.backgroundColor = "#065f46";
+            testRangeResultEl.style.color = "#d1fae5";
+            testRangeResultEl.innerHTML = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_720P_RANGE_TEST=</strong>PASS</div>
+              <div><strong>HTTP_STATUS=</strong>${res.httpStatus ?? "unknown"}</div>
+              <div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>
+              ${res.contentLength !== null && res.contentLength !== undefined ? `<div><strong>CONTENT_LENGTH=</strong>${res.contentLength}</div>` : ""}
+              ${res.contentType !== null && res.contentType !== undefined ? `<div><strong>CONTENT_TYPE=</strong>${res.contentType}</div>` : ""}
+              <div><strong>BYTES_READ=</strong>${res.bytesRead ?? 0}</div>
+              <div><strong>MAX_BYTES_READ=</strong>${res.maxBytesRead}</div>
+            `;
+          } else {
+            testRangeResultEl.style.backgroundColor = "#7f1d1d";
+            testRangeResultEl.style.color = "#fee2e2";
+            let failDetails = `
+              <div><strong>ACTUAL_PLAYBACK_URL_FOUND=</strong>YES</div>
+              <div><strong>ACTUAL_720P_RANGE_TEST=</strong>FAIL</div>
+            `;
+            if (res.failureKind === "FETCH_ERROR") {
+              failDetails += `<div><strong>FAILURE_KIND=</strong>FETCH_ERROR</div><div><strong>ERROR_NAME=</strong>${res.errorName || "FetchError"}</div>`;
+            } else {
+              if (res.httpStatus !== undefined) {
+                failDetails += `<div><strong>HTTP_STATUS=</strong>${res.httpStatus}</div>`;
+              }
+              if (res.bodyRead !== undefined) {
+                failDetails += `<div><strong>BODY_READ=</strong>${res.bodyRead}</div>`;
+              }
+              if (res.contentRangePresent !== undefined) {
+                failDetails += `<div><strong>CONTENT_RANGE_PRESENT=</strong>${res.contentRangePresent ? "YES" : "NO"}</div>`;
+              }
+              if (res.bytesRead !== undefined) {
+                failDetails += `<div><strong>BYTES_READ=</strong>${res.bytesRead}</div>`;
+              }
+              failDetails += `<div><strong>MAX_BYTES_READ=</strong>${res.maxBytesRead}</div>`;
+            }
+            testRangeResultEl.innerHTML = failDetails;
+          }
+        });
+      };
+
+      btnContainer.appendChild(testRangeBtn);
+      btnContainer.appendChild(testRangeResultEl);
 
       btnContainer.appendChild(copyBtn);
       this.contentElement.appendChild(btnContainer);
