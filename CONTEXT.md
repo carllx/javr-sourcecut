@@ -76,3 +76,47 @@ _Avoid_: Source region, Studio region
 A temporary browse state used when a performer's nationality/region is unknown. Missing region metadata does not block Library Ready.
 _Avoid_: Invalid performer, Pending work
 
+### Performer
+
+A stable identity for a real person. Stage names, romanizations, localized names, and other aliases are names of the same Performer unless evidence supports separate people.
+_Avoid_: Performer name as identity, Alias as separate person
+
+### Work
+
+A stable identity for a published content item. A JAV title, a Western scene released as a standalone item, or a separately released compilation can each be a Work. A compilation may relate back to earlier Works or Segments without becoming merely an edition of them.
+_Avoid_: Filename, Provider page, Catalog number as the Work identity
+
+### Work Identifier
+
+An official or provider-issued identifier used to identify a Work, such as a JAV catalog number or a stable provider scene ID. One Work may have multiple parallel official identifiers; they are not inherently primary/subordinate.
+_Avoid_: Internal immutable identity, Parenthetical master/alias hierarchy
+
+### Identification Evidence
+
+The combination of descriptive facts used to determine which Work a media item belongs to. For JAV this can include catalog number plus Performer; for Western material it can include provider, Performer, title, and provider identifiers. These facts support matching but are not themselves the Work's immutable identity.
+_Avoid_: Composite database key, Metadata field values as permanent identity
+
+### Content Version
+
+A materially different presentation of the same Work, such as a cut/uncut or meaningfully different-duration release. Pure technical changes such as codec, container, or resolution do not create a new Content Version.
+_Avoid_: Every encode as a version
+
+### Preferred Library Version
+
+The single version of a Work intended to remain in the final library after comparison. Other versions may be kept temporarily for review, then retained, replaced, or deleted according to the user's decision and storage constraints.
+_Avoid_: Every discovered version as permanent library content
+
+### Segment
+
+A retained, independently indexable portion of a Work, such as A/B/C, P1/P2, or a performer-specific cut. A full Work does not require a synthetic whole-work Segment. Small timing adjustments do not create a new Segment when the intended content remains the same.
+_Avoid_: Time range alone, Every file as a segment
+
+### Local File
+
+A concrete local media representation of a Work or Segment. Renaming or moving the same file does not create a new Local File identity; re-encoding creates a new Local File that may still represent the same Work or Segment. Exact duplicate copies are redundant rather than distinct library content.
+_Avoid_: Path as identity, Codec as content identity
+
+### Source Reference
+
+A provider page or external metadata record used to describe a Work. Multiple Source References may describe the same Work; an additional source does not create an additional Work.
+_Avoid_: Source page as Work identity
