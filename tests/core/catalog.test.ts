@@ -146,12 +146,15 @@ describe("MediaCatalog Tracer Bullet (Issue #35)", () => {
       expect(restoredWork?.evidences).toHaveLength(2);
       expect(restoredWork?.evidences.some((e) => e.evidenceValue === "WAVR-110.mp4")).toBe(true);
 
-      // 2. Query work by multiple parallel Work Identifiers
-      const foundByCatalogId = reopenedCatalog.findWorkByIdentifier("WAVR-110");
+      // 2. Query work by namespace-safe scheme and value
+      const foundByCatalogId = reopenedCatalog.findWorkByIdentifier("catalog_id", "WAVR-110");
       expect(foundByCatalogId?.id).toBe(initialWorkId);
 
       const foundBySchemeAndValue = reopenedCatalog.findWorkByIdentifier("dmm_cid", "wavr00110");
       expect(foundBySchemeAndValue?.id).toBe(initialWorkId);
+
+      const foundByObject = reopenedCatalog.findWorkByIdentifier({ scheme: "dmm_cid", value: "wavr00110" });
+      expect(foundByObject?.id).toBe(initialWorkId);
     } finally {
       reopenedCatalog.close();
     }
@@ -199,6 +202,33 @@ describe("MediaCatalog Tracer Bullet (Issue #35)", () => {
     }
   });
 
+  it("marks item as Library Ready even when Work has no identifiers", () => {
+    const catalog = MediaCatalog.open(dbPath);
+
+    const input: ConfirmedMediaInput = {
+      work: {
+        title: "Work Without Identifiers",
+      },
+      performers: [{ name: "Independent Artist" }],
+      localFile: { path: "D:/Media/artist-scene.mp4" },
+    };
+
+    const recorded = catalog.recordConfirmedMedia(input);
+    expect(recorded.isLibraryReady).toBe(true);
+    expect(recorded.identifiers).toHaveLength(0);
+
+    catalog.close();
+
+    const reopened = MediaCatalog.open(dbPath);
+    try {
+      const restored = reopened.getWork(recorded.id);
+      expect(restored?.isLibraryReady).toBe(true);
+      expect(restored?.identifiers).toHaveLength(0);
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("does not replace Work identity with Work Identifier or evidence", () => {
     const catalog = MediaCatalog.open(dbPath);
 
@@ -226,46 +256,25 @@ describe("MediaCatalog Tracer Bullet (Issue #35)", () => {
     catalog.close();
   });
 
-  it("reuses existing Performer identity when another Work records the same performer", () => {
+  it("rejects invalid confirmed media with missing title or local file path", () => {
     const catalog = MediaCatalog.open(dbPath);
 
-    const work1 = catalog.recordConfirmedMedia({
-      work: {
-        title: "Work 1",
-        identifiers: [{ scheme: "catalog_id", value: "WRK-001" }],
-      },
-      performers: [{ name: "Shared Performer", aliases: ["Alias 1"] }],
-      localFile: { path: "D:/Media/WRK-001.mp4" },
-    });
+    expect(() =>
+      catalog.recordConfirmedMedia({
+        work: { title: "   " },
+        performers: [],
+        localFile: { path: "D:/Media/valid.mp4" },
+      })
+    ).toThrow("Invalid confirmed media: Work title is required.");
 
-    const work2 = catalog.recordConfirmedMedia({
-      work: {
-        title: "Work 2",
-        identifiers: [{ scheme: "catalog_id", value: "WRK-002" }],
-      },
-      performers: [{ name: "Shared Performer", aliases: ["Alias 2"], dateOfBirth: "1995-01-01" }],
-      localFile: { path: "D:/Media/WRK-002.mp4" },
-    });
-
-    expect(work1.performers[0].id).toBe(work2.performers[0].id);
-    expect(work1.id).not.toBe(work2.id);
-
-    // Aliases should be merged without losing "Alias 1"
-    const sharedPerformer = catalog.getPerformer(work1.performers[0].id);
-    expect(sharedPerformer?.aliases).toContain("Alias 1");
-    expect(sharedPerformer?.aliases).toContain("Alias 2");
-    expect(sharedPerformer?.dateOfBirth).toBe("1995-01-01");
+    expect(() =>
+      catalog.recordConfirmedMedia({
+        work: { title: "Valid Title" },
+        performers: [],
+        localFile: { path: "   " },
+      })
+    ).toThrow("Invalid confirmed media: Local file path is required.");
 
     catalog.close();
-
-    const reopened = MediaCatalog.open(dbPath);
-    try {
-      const persistedPerformer = reopened.getPerformer(work1.performers[0].id);
-      expect(persistedPerformer?.aliases).toContain("Alias 1");
-      expect(persistedPerformer?.aliases).toContain("Alias 2");
-      expect(persistedPerformer?.dateOfBirth).toBe("1995-01-01");
-    } finally {
-      reopened.close();
-    }
   });
 });

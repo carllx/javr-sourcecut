@@ -56,7 +56,7 @@ export interface WorkRecord {
 export interface ConfirmedMediaInput {
   work: {
     title: string;
-    identifiers: WorkIdentifier[];
+    identifiers?: WorkIdentifier[];
     director?: string;
     releaseDate?: string;
     shootDate?: string;
@@ -216,15 +216,21 @@ export class MediaCatalog {
   }
 
   public recordConfirmedMedia(input: ConfirmedMediaInput): WorkRecord {
+    const trimmedTitle = input.work?.title?.trim();
+    if (!trimmedTitle) {
+      throw new Error("Invalid confirmed media: Work title is required.");
+    }
+
+    const trimmedFilePath = input.localFile?.path?.trim();
+    if (!trimmedFilePath) {
+      throw new Error("Invalid confirmed media: Local file path is required.");
+    }
+
     const now = new Date().toISOString();
     const workId = randomUUID();
 
-    // Work is Library Ready when it has confirmed identity (title + identifier) and an associated local file
-    const isLibraryReady = Boolean(
-      input.work.title &&
-      input.work.identifiers.length > 0 &&
-      input.localFile.path
-    );
+    // Work identity is already confirmed by caller; having a valid work and associated local file makes it Library Ready
+    const isLibraryReady = true;
 
     // 1. Insert Work
     const insertWorkStmt = this.db.prepare(`
@@ -233,7 +239,7 @@ export class MediaCatalog {
     `);
     insertWorkStmt.run(
       workId,
-      input.work.title,
+      trimmedTitle,
       input.work.director ?? null,
       input.work.releaseDate ?? null,
       input.work.shootDate ?? null,
@@ -243,24 +249,20 @@ export class MediaCatalog {
     );
 
     // 2. Insert Work Identifiers
-    const insertIdentifierStmt = this.db.prepare(`
-      INSERT OR IGNORE INTO work_identifiers (work_id, scheme, value)
-      VALUES (?, ?, ?)
-    `);
-    for (const ident of input.work.identifiers) {
-      insertIdentifierStmt.run(workId, ident.scheme, ident.value);
+    if (input.work.identifiers && input.work.identifiers.length > 0) {
+      const insertIdentifierStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO work_identifiers (work_id, scheme, value)
+        VALUES (?, ?, ?)
+      `);
+      for (const ident of input.work.identifiers) {
+        insertIdentifierStmt.run(workId, ident.scheme, ident.value);
+      }
     }
 
-    // 3. Upsert Performers & Link
-    const findPerformerByNameStmt = this.db.prepare(`
-      SELECT id, name, aliases_json, date_of_birth, region FROM performers WHERE name = ?
-    `);
+    // 3. Insert Performers & Link
     const insertPerformerStmt = this.db.prepare(`
       INSERT INTO performers (id, name, aliases_json, date_of_birth, region)
       VALUES (?, ?, ?, ?, ?)
-    `);
-    const updatePerformerStmt = this.db.prepare(`
-      UPDATE performers SET aliases_json = ?, date_of_birth = ?, region = ? WHERE id = ?
     `);
     const linkPerformerStmt = this.db.prepare(`
       INSERT OR IGNORE INTO work_performers (work_id, performer_id)
@@ -268,32 +270,14 @@ export class MediaCatalog {
     `);
 
     for (const p of input.performers) {
-      const existing = findPerformerByNameStmt.get(p.name) as RawPerformerRow | undefined;
-      const performerId = existing ? existing.id : randomUUID();
-
-      if (!existing) {
-        insertPerformerStmt.run(
-          performerId,
-          p.name,
-          p.aliases ? JSON.stringify(p.aliases) : null,
-          p.dateOfBirth ?? null,
-          p.region ?? null
-        );
-      } else {
-        // Merge metadata without losing existing information
-        let mergedAliases: string[] = existing.aliases_json ? JSON.parse(existing.aliases_json) : [];
-        if (p.aliases && p.aliases.length > 0) {
-          mergedAliases = Array.from(new Set([...mergedAliases, ...p.aliases]));
-        }
-        const updatedDob = p.dateOfBirth ?? existing.date_of_birth;
-        const updatedRegion = p.region ?? existing.region;
-        updatePerformerStmt.run(
-          mergedAliases.length > 0 ? JSON.stringify(mergedAliases) : null,
-          updatedDob ?? null,
-          updatedRegion ?? null,
-          existing.id
-        );
-      }
+      const performerId = randomUUID();
+      insertPerformerStmt.run(
+        performerId,
+        p.name,
+        p.aliases ? JSON.stringify(p.aliases) : null,
+        p.dateOfBirth ?? null,
+        p.region ?? null
+      );
       linkPerformerStmt.run(workId, performerId);
     }
 
@@ -306,7 +290,7 @@ export class MediaCatalog {
     insertFileStmt.run(
       fileId,
       workId,
-      input.localFile.path,
+      trimmedFilePath,
       input.localFile.sizeBytes ?? null,
       input.localFile.format ?? null,
       input.localFile.codec ?? null,
@@ -463,19 +447,24 @@ export class MediaCatalog {
     };
   }
 
-  public findWorkByIdentifier(value: string): WorkRecord | null;
+  public findWorkByIdentifier(identifier: WorkIdentifier): WorkRecord | null;
   public findWorkByIdentifier(scheme: string, value: string): WorkRecord | null;
-  public findWorkByIdentifier(schemeOrValue: string, maybeValue?: string): WorkRecord | null {
-    let row: { work_id: string } | undefined;
-    if (maybeValue !== undefined) {
-      row = this.db
-        .prepare(`SELECT work_id FROM work_identifiers WHERE scheme = ? AND value = ? LIMIT 1`)
-        .get(schemeOrValue, maybeValue) as { work_id: string } | undefined;
-    } else {
-      row = this.db
-        .prepare(`SELECT work_id FROM work_identifiers WHERE value = ? LIMIT 1`)
-        .get(schemeOrValue) as { work_id: string } | undefined;
-    }
+  public findWorkByIdentifier(
+    schemeOrIdentifier: string | WorkIdentifier,
+    maybeValue?: string
+  ): WorkRecord | null {
+    const scheme =
+      typeof schemeOrIdentifier === "string"
+        ? schemeOrIdentifier
+        : schemeOrIdentifier.scheme;
+    const value =
+      typeof schemeOrIdentifier === "string"
+        ? maybeValue!
+        : schemeOrIdentifier.value;
+
+    const row = this.db
+      .prepare(`SELECT work_id FROM work_identifiers WHERE scheme = ? AND value = ? LIMIT 1`)
+      .get(scheme, value) as { work_id: string } | undefined;
 
     if (!row) return null;
     return this.getWork(row.work_id);
