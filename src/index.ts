@@ -19,3 +19,4 @@ export * from "./core/llc.js";
 export * from "./core/workflow.js";
 export * from "./core/preflight.js";
 export * from "./core/mp4/index.js";
+export * from "./core/catalog.js";
