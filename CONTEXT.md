@@ -66,3 +66,13 @@ _Avoid_: Release age, Estimated age
 The state used when the facts needed to calculate Release-Age or Shoot-Age are unavailable or semantically unclear. Unknown age does not block Library Ready.
 _Avoid_: Missing metadata failure
 
+### Performer Region
+
+A browse classification derived from a performer's supported nationality/region metadata. The first library menu groups performers into Asian or Western regions; a work with performers from multiple regions appears in each applicable region view without duplicating the underlying work or file.
+_Avoid_: Source region, Studio region
+
+### Unclassified Region
+
+A temporary browse state used when a performer's nationality/region is unknown. Missing region metadata does not block Library Ready.
+_Avoid_: Invalid performer, Pending work
+
