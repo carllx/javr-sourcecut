@@ -44,3 +44,25 @@ _Avoid_: Tag, label, chip
 The simple, fixed-position screen overlay containing the Hard Filter toggle, Soft Filter toggle, and compact status counters.
 _Avoid_: Modal, sidebar, floating dock
 
+## Media Library
+
+### Library Ready
+
+A media item state meaning the item has enough confirmed identity and local-media linkage to appear in the normal library/menu. Optional enrichment such as performer birth date, age, director, or shoot date does not block Library Ready.
+_Avoid_: Fully enriched, Metadata complete
+
+### Release-Age
+
+A derived display/filter value calculated from a performer's supported birth date and a work's supported release/published date.
+_Avoid_: Shoot age, Performer age
+
+### Shoot-Age
+
+A derived display value calculated only when both performer birth date and an explicitly supported shoot date are available.
+_Avoid_: Release age, Estimated age
+
+### Unknown Age
+
+The state used when the facts needed to calculate Release-Age or Shoot-Age are unavailable or semantically unclear. Unknown age does not block Library Ready.
+_Avoid_: Missing metadata failure
+
