@@ -43,7 +43,7 @@
 | **Stash & Stash-Box** | 成熟媒体库与元数据规范 (Go + GraphQL) | [stashapp/stash-box@v0.10.3](https://github.com/stashapp/stash-box/tree/v0.10.3)<br>• `graphql/schema/types/scene.graphql`<br>• `graphql/schema/types/performer.graphql` | GraphQL API (`/graphql`) | `[SOURCE-INSPECTION]` + `[LIVE-QUERY]` |
 | **XBVR** | VR 专用媒体库与刮削器 (Go) | [xbapps/xbvr@0.4.40](https://github.com/xbapps/xbvr/tree/0.4.40)<br>• `pkg/scrape/slrstudios.go`<br>• `pkg/tasks/volume.go` | 本地 HTTP 服务 (Port 9999) + SQLite | `[SOURCE-INSPECTION]` |
 | **ThePornDB (MetadataAPI)** | 欧美商业成人数据索引 | `https://theporndb.net/graphql`<br>• Stash-box 兼容 GraphQL API<br>• REST API (`api.metadataapi.net/performers`) | GraphQL / REST (Bearer Token) | `[LIVE-QUERY]` |
-| **IAFD** | 欧美历史成人电影资料库 | [stashapp/CommunityScrapers@master](https://github.com/stashapp/CommunityScrapers/tree/master)<br>• `scrapers/IAFD/IAFD.py`<br>• `scrapers/IAFD/IAFD.yml` | HTML 网页抓取 (ASP 动态页) | `[SOURCE-INSPECTION]` |
+| **IAFD** | 欧美历史成人电影资料库 | [stashapp/CommunityScrapers@dd6d3cd7e4d6fedb0490d120c7b0ecf35c336603](https://github.com/stashapp/CommunityScrapers/tree/dd6d3cd7e4d6fedb0490d120c7b0ecf35c336603)<br>• `scrapers/IAFD/IAFD.py`<br>• `scrapers/IAFD/IAFD.yml` | HTML 网页抓取 (ASP 动态页) | `[SOURCE-INSPECTION]` |
 | **JAVLibrary** | 社区 JAV 番号索引 | `http://www.javlibrary.com/ja/`<br>• `vl_searchbyid.php?keyword={id}`<br>• `vl_star.php?s={id}` | 动态 HTML (Cloudflare Turnstile) | `[LIVE-QUERY]` |
 | **JavDB** | 综合 JAV / 欧美编号数据库 | `https://javdb.com/`<br>• `/search?q={id}&f=all` | HTML (需 `over18=1` Cookie) | `[LIVE-QUERY]` |
 | **官方 DMM/FANZA** | 日本数字与实体官方发行平台 | `https://api.dmm.com/affiliate/v3/ItemList`<br>`https://www.dmm.co.jp/mono/dvd/-/detail/=/cid={cid}/`<br>`https://www.dmm.co.jp/digital/videoa/-/detail/=/cid={cid}/` | 官方 REST API (Affiliate) / 官方 Web | `[LIVE-QUERY]` |
@@ -114,7 +114,7 @@
     }
     ```
     针对欧美大量重名艺人（如多位 `Eva`），Stash-Box 强制使用 `disambiguation` 区分；其 `country` 字段契合 #26 确立的“欧美 / 亚洲地区分类”；
-  - **IAFD 别名过滤规则 (`stashapp/CommunityScrapers@master`, `scrapers/IAFD/IAFD.py`)**：
+  - **IAFD 别名过滤规则 (`stashapp/CommunityScrapers@dd6d3cd7e4d6fedb0490d120c7b0ecf35c336603`, `scrapers/IAFD/IAFD.py`)**：
     源码中包含关键防污染规则：严格按 `","` 拆分别名，但**坚决剔除包含 `" or "` 的模糊条目**（如 `"Jane Doe or Mary Sue"` 会被直接扔掉，避免将不确定的推测注入确信数据）。
 
 ---
@@ -158,7 +158,7 @@
 | **DMM/FANZA Web** | **中高** (地区封锁 Geo-Block) | 非日本 IP 直接返回 403 Forbidden 或 451 | 403 页面包含说明 HTML，但无有效数据；需要 `age_check_done=1` Cookie | 依赖日本住宅/机房代理；Web DOM 经常改版且部分数据（`video.dmm.co.jp`）需客户端 JS 渲染。 | `[LIVE-QUERY]` |
 | **DMM Affiliate API** | **低/稳定** (官方 JSON API) | 标准 REST API；凭 `api_id` 与 `affiliate_id` 请求 | 正常返回 JSON；参数错误返回格式化错误体 | **最轻量官方路径**：零反爬阻断，无需无头浏览器，但需要配置开发者 API Token。 | `[LIVE-QUERY]` |
 | **StashDB / ThePornDB** | **稳定** (官方 GraphQL) | 标准 GraphQL 响应；速率限制时返回 HTTP 429 | 鉴权失败返回 401/403；Schema 稳定 | `[Candidate Path]`：可单次请求获取关联场景、别名与演员国籍；需申请/配置 API Token。 | `[LIVE-QUERY]` |
-| **IAFD** | **高** (脆弱 ASP 架构 + 封锁) | 连续抓取 10~20 次即触发 IP 限流/403 | 页面返回 200，但提示 `"No results found"` 或搜索表单 | 仅适合作为本地冷门演员别名的一级离线辅助，不宜作为实时作品对齐依赖。 | `[SOURCE-INSPECTION]` (`CommunityScrapers@master`) |
+| **IAFD** | **高** (脆弱 ASP 架构 + 封锁) | 连续抓取 10~20 次即触发 IP 限流/403 | 页面返回 200，但提示 `"No results found"` 或搜索表单 | 仅适合作为本地冷门演员别名的一级离线辅助，不宜作为实时作品对齐依赖。 | `[SOURCE-INSPECTION]` (`CommunityScrapers@dd6d3cd7e4d6fedb0490d120c7b0ecf35c336603`) |
 
 ---
 
@@ -199,8 +199,8 @@
 
 ## 6. Evidence Gaps & 后续建议 (Next Steps)
 
-1. **真实素材样本库规模全量审计**：
-   - 本次研究重点对照了历史脚本中提取的 11 部代表性样本。在进入 #28（存量素材与历史命名抽样审计）时，需对整个存量媒体库做全量结构统计，验证是否存在极端非标准命名（如仅有纯数字 hash、无演员纯标题、无厂牌纯自制片段）。
+1. **存量命名分布的独立审计输入衔接**：
+   - 本票（#27）仅基于工作区脚本提取的 11 部代表性困难样本验证外部工具与来源机制。关于全量素材库的历史命名分布、极端非标准命名（如纯数字 hash、无演员纯标题、无厂牌纯自制片段）与物理存储形态，已由已结单的 #28（抽样审计真实存量素材与历史命名分布）提供独立审计输入，本票不重新声称验证 #28 的全量本地数据。
 2. **DMM Affiliate API 官方接入权限与无凭据降级**：
    - 官方 Affiliate API 是最干净、零反爬成本的途径，但需要有效的 `api_id` 与 `affiliate_id`。需在后续票中决定无凭据状态下的确定性离线解析降级路径。
 3. **StashDB / ThePornDB API Token 策略**：
