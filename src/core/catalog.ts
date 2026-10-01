@@ -48,44 +48,77 @@ export interface WorkRecord {
   evidences: IdentificationEvidence[];
   localFiles: LocalFileRecord[];
   isLibraryReady: boolean;
+  reviewStatus?: "ready" | "pending_review" | "query_failed";
+  reviewReason?: string;
   director?: string;
   releaseDate?: string;
   shootDate?: string;
 }
 
+export interface PerformerInput {
+  name: string;
+  aliases?: string[];
+  dateOfBirth?: string;
+  region?: "asian" | "western" | "unclassified";
+}
+
+export interface WorkInput {
+  title: string;
+  identifiers?: WorkIdentifier[];
+  director?: string;
+  releaseDate?: string;
+  shootDate?: string;
+}
+
+export interface LocalFileInput {
+  path: string;
+  sizeBytes?: number;
+  format?: string;
+  codec?: string;
+  resolution?: string;
+}
+
+export interface SourceReferenceInput {
+  provider: string;
+  sourceUrl: string;
+  providerAssetId?: string;
+  rawTitle?: string;
+}
+
+export interface IdentificationEvidenceInput {
+  source: string;
+  evidenceKey?: string;
+  evidenceValue: string;
+  recordedAt?: string;
+}
+
+export interface PendingMediaInput {
+  work: WorkInput;
+  reviewStatus?: "pending_review" | "query_failed";
+  reviewReason?: string;
+  performers?: PerformerInput[];
+  localFile: LocalFileInput;
+  sourceReferences?: SourceReferenceInput[];
+  evidences?: IdentificationEvidenceInput[];
+}
+
+export interface ReviewResolutionInput {
+  title?: string;
+  identifiers?: WorkIdentifier[];
+  performers?: PerformerInput[];
+  sourceReferences?: SourceReferenceInput[];
+  director?: string;
+  releaseDate?: string;
+  shootDate?: string;
+  notes?: string;
+}
+
 export interface ConfirmedMediaInput {
-  work: {
-    title: string;
-    identifiers?: WorkIdentifier[];
-    director?: string;
-    releaseDate?: string;
-    shootDate?: string;
-  };
-  performers: {
-    name: string;
-    aliases?: string[];
-    dateOfBirth?: string;
-    region?: "asian" | "western" | "unclassified";
-  }[];
-  localFile: {
-    path: string;
-    sizeBytes?: number;
-    format?: string;
-    codec?: string;
-    resolution?: string;
-  };
-  sourceReferences?: {
-    provider: string;
-    sourceUrl: string;
-    providerAssetId?: string;
-    rawTitle?: string;
-  }[];
-  evidences?: {
-    source: string;
-    evidenceKey?: string;
-    evidenceValue: string;
-    recordedAt?: string;
-  }[];
+  work: WorkInput;
+  performers: PerformerInput[];
+  localFile: LocalFileInput;
+  sourceReferences?: SourceReferenceInput[];
+  evidences?: IdentificationEvidenceInput[];
 }
 
 interface RawLocalFileRow {
@@ -140,9 +173,12 @@ export class MediaCatalog {
         release_date TEXT,
         shoot_date TEXT,
         is_library_ready INTEGER NOT NULL DEFAULT 0,
+        review_status TEXT,
+        review_reason TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS idx_works_library_ready ON works(is_library_ready);
 
       CREATE TABLE IF NOT EXISTS work_identifiers (
         work_id TEXT NOT NULL,
@@ -191,6 +227,16 @@ export class MediaCatalog {
       );
       CREATE INDEX IF NOT EXISTS idx_identification_evidences_work ON identification_evidences(work_id);
     `);
+
+    // Migration compatibility: ensure review_status and review_reason exist if table already existed
+    const cols = this.db.prepare("PRAGMA table_info(works)").all() as { name: string }[];
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("review_status")) {
+      this.db.exec("ALTER TABLE works ADD COLUMN review_status TEXT;");
+    }
+    if (!colNames.has("review_reason")) {
+      this.db.exec("ALTER TABLE works ADD COLUMN review_reason TEXT;");
+    }
   }
 
   private mapLocalFileRow(f: RawLocalFileRow): LocalFileRecord {
@@ -215,123 +261,149 @@ export class MediaCatalog {
     };
   }
 
-  public recordConfirmedMedia(input: ConfirmedMediaInput): WorkRecord {
-    const trimmedTitle = input.work?.title?.trim();
+  private validateMediaInput(
+    title?: string,
+    filePath?: string,
+    errorPrefix = "Invalid media input"
+  ): { trimmedTitle: string; trimmedFilePath: string } {
+    const trimmedTitle = title?.trim();
     if (!trimmedTitle) {
-      throw new Error("Invalid confirmed media: Work title is required.");
+      throw new Error(`${errorPrefix}: Work title is required.`);
     }
-
-    const trimmedFilePath = input.localFile?.path?.trim();
+    const trimmedFilePath = filePath?.trim();
     if (!trimmedFilePath) {
-      throw new Error("Invalid confirmed media: Local file path is required.");
+      throw new Error(`${errorPrefix}: Local file path is required.`);
     }
+    return { trimmedTitle, trimmedFilePath };
+  }
 
-    const now = new Date().toISOString();
-    const workId = randomUUID();
-
-    // Work identity is already confirmed by caller; having a valid work and associated local file makes it Library Ready
-    const isLibraryReady = true;
-
-    // 1. Insert Work
-    const insertWorkStmt = this.db.prepare(`
-      INSERT INTO works (id, title, director, release_date, shoot_date, is_library_ready, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertWorkStmt.run(
-      workId,
-      trimmedTitle,
-      input.work.director ?? null,
-      input.work.releaseDate ?? null,
-      input.work.shootDate ?? null,
-      isLibraryReady ? 1 : 0,
-      now,
-      now
+  private persistWorkIdentifiers(workId: string, identifiers?: WorkIdentifier[]): void {
+    if (!identifiers || identifiers.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT OR IGNORE INTO work_identifiers (work_id, scheme, value) VALUES (?, ?, ?)`
     );
-
-    // 2. Insert Work Identifiers
-    if (input.work.identifiers && input.work.identifiers.length > 0) {
-      const insertIdentifierStmt = this.db.prepare(`
-        INSERT OR IGNORE INTO work_identifiers (work_id, scheme, value)
-        VALUES (?, ?, ?)
-      `);
-      for (const ident of input.work.identifiers) {
-        insertIdentifierStmt.run(workId, ident.scheme, ident.value);
-      }
+    for (const ident of identifiers) {
+      stmt.run(workId, ident.scheme, ident.value);
     }
+  }
 
-    // 3. Insert Performers & Link
-    const insertPerformerStmt = this.db.prepare(`
-      INSERT INTO performers (id, name, aliases_json, date_of_birth, region)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const linkPerformerStmt = this.db.prepare(`
-      INSERT OR IGNORE INTO work_performers (work_id, performer_id)
-      VALUES (?, ?)
-    `);
-
-    for (const p of input.performers) {
+  private persistPerformers(workId: string, performers?: PerformerInput[]): void {
+    if (!performers || performers.length === 0) return;
+    const insertStmt = this.db.prepare(
+      `INSERT INTO performers (id, name, aliases_json, date_of_birth, region) VALUES (?, ?, ?, ?, ?)`
+    );
+    const linkStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO work_performers (work_id, performer_id) VALUES (?, ?)`
+    );
+    for (const p of performers) {
       const performerId = randomUUID();
-      insertPerformerStmt.run(
+      insertStmt.run(
         performerId,
         p.name,
         p.aliases ? JSON.stringify(p.aliases) : null,
         p.dateOfBirth ?? null,
         p.region ?? null
       );
-      linkPerformerStmt.run(workId, performerId);
+      linkStmt.run(workId, performerId);
     }
+  }
+
+  private persistSourceReferences(workId: string, refs?: SourceReferenceInput[]): void {
+    if (!refs || refs.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO source_references (id, work_id, provider, source_url, provider_asset_id, raw_title) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const ref of refs) {
+      stmt.run(
+        randomUUID(),
+        workId,
+        ref.provider,
+        ref.sourceUrl,
+        ref.providerAssetId ?? null,
+        ref.rawTitle ?? null
+      );
+    }
+  }
+
+  private persistEvidences(
+    workId: string,
+    evidences?: IdentificationEvidenceInput[],
+    defaultRecordedAt?: string
+  ): void {
+    if (!evidences || evidences.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO identification_evidences (id, work_id, source, evidence_key, evidence_value, recorded_at) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const ev of evidences) {
+      stmt.run(
+        randomUUID(),
+        workId,
+        ev.source,
+        ev.evidenceKey ?? null,
+        ev.evidenceValue,
+        ev.recordedAt ?? defaultRecordedAt ?? new Date().toISOString()
+      );
+    }
+  }
+
+  private insertMedia(
+    input: PendingMediaInput,
+    trimmedTitle: string,
+    trimmedFilePath: string,
+    isLibraryReady: boolean,
+    reviewStatus: "ready" | "pending_review" | "query_failed",
+    reviewReason: string | null
+  ): WorkRecord {
+    const now = new Date().toISOString();
+    const workId = randomUUID();
+
+    // 1. Insert Work
+    this.db
+      .prepare(
+        `INSERT INTO works (id, title, director, release_date, shoot_date, is_library_ready, review_status, review_reason, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        workId,
+        trimmedTitle,
+        input.work.director ?? null,
+        input.work.releaseDate ?? null,
+        input.work.shootDate ?? null,
+        isLibraryReady ? 1 : 0,
+        reviewStatus,
+        reviewReason,
+        now,
+        now
+      );
+
+    // 2. Insert Work Identifiers
+    this.persistWorkIdentifiers(workId, input.work.identifiers);
+
+    // 3. Insert Performers & Link
+    this.persistPerformers(workId, input.performers);
 
     // 4. Insert Local File
     const fileId = randomUUID();
-    const insertFileStmt = this.db.prepare(`
-      INSERT INTO local_files (id, work_id, path, size_bytes, format, codec, resolution)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertFileStmt.run(
-      fileId,
-      workId,
-      trimmedFilePath,
-      input.localFile.sizeBytes ?? null,
-      input.localFile.format ?? null,
-      input.localFile.codec ?? null,
-      input.localFile.resolution ?? null
-    );
+    this.db
+      .prepare(
+        `INSERT INTO local_files (id, work_id, path, size_bytes, format, codec, resolution)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        fileId,
+        workId,
+        trimmedFilePath,
+        input.localFile.sizeBytes ?? null,
+        input.localFile.format ?? null,
+        input.localFile.codec ?? null,
+        input.localFile.resolution ?? null
+      );
 
     // 5. Insert Source References
-    if (input.sourceReferences && input.sourceReferences.length > 0) {
-      const insertRefStmt = this.db.prepare(`
-        INSERT INTO source_references (id, work_id, provider, source_url, provider_asset_id, raw_title)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      for (const ref of input.sourceReferences) {
-        insertRefStmt.run(
-          randomUUID(),
-          workId,
-          ref.provider,
-          ref.sourceUrl,
-          ref.providerAssetId ?? null,
-          ref.rawTitle ?? null
-        );
-      }
-    }
+    this.persistSourceReferences(workId, input.sourceReferences);
 
     // 6. Insert Evidences
-    if (input.evidences && input.evidences.length > 0) {
-      const insertEvidenceStmt = this.db.prepare(`
-        INSERT INTO identification_evidences (id, work_id, source, evidence_key, evidence_value, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      for (const ev of input.evidences) {
-        insertEvidenceStmt.run(
-          randomUUID(),
-          workId,
-          ev.source,
-          ev.evidenceKey ?? null,
-          ev.evidenceValue,
-          ev.recordedAt ?? now
-        );
-      }
-    }
+    this.persistEvidences(workId, input.evidences, now);
 
     const createdWork = this.getWork(workId);
     if (!createdWork) {
@@ -340,10 +412,110 @@ export class MediaCatalog {
     return createdWork;
   }
 
+  public recordConfirmedMedia(input: ConfirmedMediaInput): WorkRecord {
+    const { trimmedTitle, trimmedFilePath } = this.validateMediaInput(
+      input.work?.title,
+      input.localFile?.path,
+      "Invalid confirmed media"
+    );
+    return this.insertMedia(input, trimmedTitle, trimmedFilePath, true, "ready", null);
+  }
+
+  public recordPendingMedia(input: PendingMediaInput): WorkRecord {
+    const { trimmedTitle, trimmedFilePath } = this.validateMediaInput(
+      input.work?.title,
+      input.localFile?.path,
+      "Invalid pending media"
+    );
+    const status = input.reviewStatus ?? "pending_review";
+    return this.insertMedia(
+      input,
+      trimmedTitle,
+      trimmedFilePath,
+      false,
+      status,
+      input.reviewReason ?? null
+    );
+  }
+
+  public resolveReview(workId: string, resolution: ReviewResolutionInput): WorkRecord {
+    const existing = this.getWork(workId);
+    if (!existing) {
+      throw new Error(`Cannot resolve review: Work not found: ${workId}`);
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Update works table
+    this.db
+      .prepare(
+        `UPDATE works
+         SET title = COALESCE(?, title),
+             director = COALESCE(?, director),
+             release_date = COALESCE(?, release_date),
+             shoot_date = COALESCE(?, shoot_date),
+             is_library_ready = 1,
+             review_status = 'ready',
+             review_reason = NULL,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(
+        resolution.title ?? null,
+        resolution.director ?? null,
+        resolution.releaseDate ?? null,
+        resolution.shootDate ?? null,
+        now,
+        workId
+      );
+
+    // 2. Insert new identifiers (replacing unconfirmed identifiers if provided)
+    if (resolution.identifiers && resolution.identifiers.length > 0) {
+      this.db.prepare("DELETE FROM work_identifiers WHERE work_id = ?").run(workId);
+      this.persistWorkIdentifiers(workId, resolution.identifiers);
+    }
+
+    // 3. Insert/link performers (replacing unconfirmed performers if provided)
+    if (resolution.performers && resolution.performers.length > 0) {
+      this.db.prepare("DELETE FROM work_performers WHERE work_id = ?").run(workId);
+      this.persistPerformers(workId, resolution.performers);
+    }
+
+    // 4. Insert source references
+    this.persistSourceReferences(workId, resolution.sourceReferences);
+
+    // 5. Insert evidence of manual correction
+    this.persistEvidences(
+      workId,
+      [
+        {
+          source: "user-manual-correction",
+          evidenceKey: "resolution",
+          evidenceValue: resolution.notes ?? JSON.stringify(resolution),
+          recordedAt: now,
+        },
+      ],
+      now
+    );
+
+    const updated = this.getWork(workId);
+    if (!updated) {
+      throw new Error(`Failed to retrieve work after resolving review: ${workId}`);
+    }
+    return updated;
+  }
+
+  public getPendingReviews(): WorkRecord[] {
+    const rows = this.db
+      .prepare(`SELECT id FROM works WHERE is_library_ready = 0 ORDER BY updated_at DESC`)
+      .all() as { id: string }[];
+    return rows.map((r) => this.getWork(r.id)!).filter(Boolean);
+  }
+
   public getWork(workId: string): WorkRecord | null {
     const workRow = this.db
       .prepare(`
-        SELECT id, title, director, release_date, shoot_date, is_library_ready
+        SELECT id, title, director, release_date, shoot_date, is_library_ready, review_status, review_reason
         FROM works
         WHERE id = ?
       `)
@@ -355,6 +527,8 @@ export class MediaCatalog {
           release_date: string | null;
           shoot_date: string | null;
           is_library_ready: number;
+          review_status: string | null;
+          review_reason: string | null;
         }
       | undefined;
 
@@ -441,6 +615,8 @@ export class MediaCatalog {
       evidences,
       localFiles,
       isLibraryReady: Boolean(workRow.is_library_ready),
+      ...(workRow.review_status ? { reviewStatus: workRow.review_status as any } : {}),
+      ...(workRow.review_reason ? { reviewReason: workRow.review_reason } : {}),
       ...(workRow.director ? { director: workRow.director } : {}),
       ...(workRow.release_date ? { releaseDate: workRow.release_date } : {}),
       ...(workRow.shoot_date ? { shootDate: workRow.shoot_date } : {}),
