@@ -17,10 +17,12 @@ export type { LocalFileInput };
 export type SourceFailureCode =
   | "HTTP_403"
   | "HTTP_429"
+  | "HTTP_503"
   | "AUTH_FAILED"
   | "CHALLENGE_SHELL"
   | "MALFORMED_RESPONSE"
-  | "NETWORK_ERROR";
+  | "NETWORK_ERROR"
+  | "IDENTITY_MISMATCH";
 
 export class SourceQueryFailure extends Error {
   public readonly code: SourceFailureCode;
@@ -422,6 +424,7 @@ export class IngestionService {
     for (let i = dirSegments.length - 1; i >= 0; i--) {
       const segment = dirSegments[i];
       if (/^[a-zA-Z]:$/i.test(segment)) continue; // skip drive letter
+      if (/^(?:temp|tmp|.*-test-.*)$/i.test(segment)) continue; // skip temporary/test runner directory segments
       const segCandidates = extractCatalogCandidates(segment, "observed-directory", "medium");
       if (segCandidates.length > 0) {
         dirCandidates = segCandidates;
