@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import type {
   MediaCatalog,
   WorkRecord,
@@ -8,8 +8,11 @@ import type {
   IdentificationEvidenceInput,
   ReviewCandidateRecord,
   ReviewResolutionInput,
+  LocalFileInput,
 } from "./catalog.js";
 import { extractCatalogCandidates } from "./identity.js";
+
+export type { LocalFileInput };
 
 export type SourceFailureCode =
   | "HTTP_403"
@@ -78,6 +81,7 @@ export interface IngestionInput {
     providerAssetId?: string;
   };
   sourceReference?: SourceReferenceInput;
+  sourceQueryError?: SourceQueryFailure;
 }
 
 export type ReviewReason =
@@ -407,11 +411,30 @@ export class IngestionService {
     }
 
     const filename = basename(filePath);
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    const dirPath = dirname(normalizedPath);
 
-    // 1. Extract clues
+    // 1. Extract clues: filename first, then innermost containing directory upwards
     const filenameCandidates = extractCatalogCandidates(filename, "observed-filename", "medium");
+
+    const dirSegments = dirPath.split("/").filter(Boolean);
+    let dirCandidates: ReturnType<typeof extractCatalogCandidates> = [];
+    for (let i = dirSegments.length - 1; i >= 0; i--) {
+      const segment = dirSegments[i];
+      if (/^[a-zA-Z]:$/i.test(segment)) continue; // skip drive letter
+      const segCandidates = extractCatalogCandidates(segment, "observed-directory", "medium");
+      if (segCandidates.length > 0) {
+        dirCandidates = segCandidates;
+        break;
+      }
+    }
+
     const extractedCatalogId =
-      filenameCandidates.length > 0 ? filenameCandidates[0].hyphenated : undefined;
+      filenameCandidates.length > 0
+        ? filenameCandidates[0].hyphenated
+        : dirCandidates.length > 0
+          ? dirCandidates[0].hyphenated
+          : undefined;
 
     const query: IngestionQuery = {
       catalogId: input.clues?.catalogId ?? extractedCatalogId,
@@ -435,6 +458,42 @@ export class IngestionService {
       recordedAt: now,
     });
 
+    if (dirPath && dirPath !== "." && dirPath !== "/") {
+      recordedEvidences.push({
+        source: "observed-directory",
+        evidenceKey: "directory",
+        evidenceValue: dirPath,
+        recordedAt: now,
+      });
+
+      if (dirCandidates.length > 0) {
+        recordedEvidences.push({
+          source: "observed-directory",
+          evidenceKey: "directory_catalog_candidate",
+          evidenceValue: dirCandidates[0].hyphenated,
+          recordedAt: now,
+        });
+      }
+    }
+
+    const mediaProps: [keyof typeof input.localFile, string][] = [
+      ["codec", "codec"],
+      ["resolution", "resolution"],
+      ["format", "format"],
+      ["sizeBytes", "size_bytes"],
+    ];
+    for (const [prop, key] of mediaProps) {
+      const val = input.localFile[prop];
+      if (val !== undefined && val !== null && val !== "") {
+        recordedEvidences.push({
+          source: "media-properties",
+          evidenceKey: key,
+          evidenceValue: String(val),
+          recordedAt: now,
+        });
+      }
+    }
+
     if (query.provider) {
       recordedEvidences.push({
         source: input.clues?.provider ? "user-clue" : "source-reference",
@@ -446,7 +505,11 @@ export class IngestionService {
 
     if (query.catalogId) {
       recordedEvidences.push({
-        source: input.clues?.catalogId ? "user-clue" : "observed-filename",
+        source: input.clues?.catalogId
+          ? "user-clue"
+          : filenameCandidates.length > 0
+            ? "observed-filename"
+            : "observed-directory",
         evidenceKey: "catalog_id",
         evidenceValue: query.catalogId,
         recordedAt: now,
@@ -464,7 +527,7 @@ export class IngestionService {
 
     if (query.performers && query.performers.length > 0) {
       recordedEvidences.push({
-        source: "user-clue",
+        source: input.sourceReference ? "source-reference" : "user-clue",
         evidenceKey: "declared_performers",
         evidenceValue: JSON.stringify(query.performers),
         recordedAt: now,
@@ -500,7 +563,7 @@ export class IngestionService {
 
     // 2. Query adapters
     const rawCandidates: IdentificationCandidate[] = [];
-    let firstQueryError: SourceQueryFailure | null = null;
+    let firstQueryError: SourceQueryFailure | null = input.sourceQueryError ?? null;
 
     for (const adapter of this.adapters) {
       if (adapter.canHandle && !adapter.canHandle(query)) {

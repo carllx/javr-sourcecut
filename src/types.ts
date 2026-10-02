@@ -23,6 +23,7 @@ export type CandidateProvenance =
   | "observed-title"
   | "source-url"
   | "observed-filename"
+  | "observed-directory"
   | "declared-hint"
   | "manual"
   | "external-authority";

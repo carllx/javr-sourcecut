@@ -21,3 +21,4 @@ export * from "./core/preflight.js";
 export * from "./core/mp4/index.js";
 export * from "./core/catalog.js";
 export * from "./core/ingestion.js";
+export * from "./core/source-bridge.js";
