@@ -17,10 +17,12 @@ export type { LocalFileInput };
 export type SourceFailureCode =
   | "HTTP_403"
   | "HTTP_429"
+  | "HTTP_503"
   | "AUTH_FAILED"
   | "CHALLENGE_SHELL"
   | "MALFORMED_RESPONSE"
-  | "NETWORK_ERROR";
+  | "NETWORK_ERROR"
+  | "IDENTITY_MISMATCH";
 
 export class SourceQueryFailure extends Error {
   public readonly code: SourceFailureCode;

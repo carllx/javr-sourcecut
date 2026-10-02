@@ -1,0 +1,5 @@
+{
+  "_synthetic_note": "Synthetic fixture simulating malformed JSON missing content_id",
+  "status": "ok",
+  "data": "some string without content_id"
+}
