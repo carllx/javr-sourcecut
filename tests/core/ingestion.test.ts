@@ -753,7 +753,13 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
         {
           title: "Unrelated Video Title",
           workIdentifiers: [{ scheme: "dmm_id", value: "dmm-9999" }],
-          sourceReferences: [{ provider: "dmm", providerAssetId: "dmm-9999" }],
+          sourceReferences: [
+            {
+              provider: "dmm",
+              sourceUrl: "https://www.dmm.co.jp/digital/videoa/-/detail/=/cid=dmm9999/",
+              providerAssetId: "dmm-9999",
+            },
+          ],
         },
       ],
     };
@@ -803,7 +809,13 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
           title: "Some Title",
           // Candidate has value 12345, but under an unrelated scheme like dmm_id or custom_id instead of catalog_id/scene_id
           workIdentifiers: [{ scheme: "dmm_id", value: "12345" }],
-          sourceReferences: [{ provider: "dmm", providerAssetId: "12345" }],
+          sourceReferences: [
+            {
+              provider: "dmm",
+              sourceUrl: "https://www.dmm.co.jp/digital/videoa/-/detail/=/cid=12345/",
+              providerAssetId: "12345",
+            },
+          ],
         },
       ],
     };
@@ -827,7 +839,13 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
       search: async () => [
         {
           title: "Scene 12345",
-          sourceReferences: [{ provider: "badoinkvr", providerAssetId: "12345" }],
+          sourceReferences: [
+            {
+              provider: "badoinkvr",
+              sourceUrl: "https://badoinkvr.com/scenes/12345",
+              providerAssetId: "12345",
+            },
+          ],
         },
       ],
     };
@@ -837,6 +855,41 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
       localFile: { path: "D:/Media/video.mp4" },
       clues: {
         provider: "eporner",
+        providerAssetId: "12345",
+      },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("approximate_identifier_mismatch");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
+
+  it("hard-negative: does not auto-confirm when providerAssetId matches but query has no provider namespace", async () => {
+    // query has providerAssetId: "12345", but NO provider
+    // candidate has providerAssetId: "12345" under some provider
+    // Must fail closed into pending_review unless independent strong evidence confirms it
+    const anyProviderAdapter: IdentificationSourceAdapter = {
+      provider: "some-provider",
+      search: async () => [
+        {
+          title: "Random Scene 12345",
+          sourceReferences: [
+            {
+              provider: "some-provider",
+              sourceUrl: "https://example.com/scenes/12345",
+              providerAssetId: "12345",
+            },
+          ],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [anyProviderAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/video.mp4" },
+      clues: {
         providerAssetId: "12345",
       },
     });

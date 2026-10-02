@@ -331,17 +331,22 @@ export class IngestionService {
       const normQueryAssetId = query.providerAssetId.trim().toLowerCase();
       const normQueryProvider = query.provider?.trim().toLowerCase();
 
-      const matchingRef = (cand.sourceReferences || []).find((r) => {
-        const assetMatches = r.providerAssetId?.trim().toLowerCase() === normQueryAssetId;
-        if (!assetMatches) return false;
-        if (normQueryProvider) {
-          return r.provider.trim().toLowerCase() === normQueryProvider;
+      // If provider is missing, provider-local asset ID cannot be scoped or trusted for auto-confirmation
+      if (!normQueryProvider) {
+        // Only allow confirmation if there is independent strong evidence (e.g. matching catalog ID)
+        if (!query.catalogId) {
+          return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
         }
-        return true;
-      });
+      } else {
+        const matchingRef = (cand.sourceReferences || []).find((r) => {
+          const assetMatches = r.providerAssetId?.trim().toLowerCase() === normQueryAssetId;
+          if (!assetMatches) return false;
+          return r.provider.trim().toLowerCase() === normQueryProvider;
+        });
 
-      if (!matchingRef) {
-        return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
+        if (!matchingRef) {
+          return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
+        }
       }
     }
 
