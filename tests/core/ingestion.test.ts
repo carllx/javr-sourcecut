@@ -519,4 +519,279 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
       expect(result.reviewReason).toBe("conflicting_title");
     }
   });
+
+  it("does not auto-confirm when query has catalog ID but candidate has unrelated or missing catalog identifier", async () => {
+    // Query has SIVR-340, but candidate only has an unrelated DMM CID without SIVR-340
+    const fakeAdapter: IdentificationSourceAdapter = {
+      provider: "dmm-provider",
+      search: async () => [
+        {
+          workIdentifiers: [{ scheme: "dmm_cid", value: "unrelated999" }],
+          title: "Some Other Work",
+          performers: [{ name: "Alice" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [fakeAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/SIVR-340.mp4" },
+      clues: { catalogId: "SIVR-340" },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.work.isLibraryReady).toBe(false);
+      expect(result.reviewReason).toBe("approximate_identifier_mismatch");
+    }
+  });
+
+  it("auto-confirms Western Work into Library Ready when provider, title, and performer match strongly without catalog ID", async () => {
+    // Western work: No catalog ID, no providerAssetId/scene ID
+    const westernAdapter: IdentificationSourceAdapter = {
+      provider: "badoinkvr",
+      search: async (query) => {
+        expect(query.rawTitle).toBe("Kush Queen");
+        return [
+          {
+            workIdentifiers: [], // No catalog number!
+            title: "Kush Queen",
+            studio: "BaDoinkVR",
+            performers: [{ name: "Jade Kush" }],
+            sourceReferences: [
+              {
+                provider: "badoinkvr",
+                sourceUrl: "https://badoinkvr.com/scenes/kush-queen",
+                rawTitle: "Kush Queen",
+              },
+            ],
+          },
+        ];
+      },
+    };
+
+    const service = new IngestionService(catalog, [westernAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/Jade Kush - Kush Queen - BaDoinkVR.mp4" },
+      clues: {
+        rawTitle: "Kush Queen",
+        studio: "BaDoinkVR",
+        performers: ["Jade Kush"],
+      },
+    });
+
+    expect(result.status).toBe("library_ready");
+    if (result.status === "library_ready") {
+      expect(result.work.isLibraryReady).toBe(true);
+      expect(result.work.title).toBe("Kush Queen");
+      expect(result.work.performers[0].name).toBe("Jade Kush");
+      expect(result.work.sourceReferences[0].provider).toBe("badoinkvr");
+    }
+  });
+
+  it("merges equivalent candidates from multiple adapters for the same Work into Library Ready without multiple_candidates ambiguity", async () => {
+    // Two adapters returning the same work (e.g. DMM and Eporner agreeing on WAVR-110)
+    const dmmAdapter: IdentificationSourceAdapter = {
+      provider: "dmm",
+      search: async () => [
+        {
+          workIdentifiers: [
+            { scheme: "catalog_id", value: "WAVR-110" },
+            { scheme: "dmm_cid", value: "wavr00110" },
+          ],
+          title: "Alice in VR Wonderland",
+          studio: "W-Agency",
+          performers: [{ name: "Alice", aliases: ["アリス"] }],
+          sourceReferences: [
+            {
+              provider: "dmm",
+              sourceUrl: "https://www.dmm.co.jp/mono/dvd/-/detail/=/cid=wavr00110",
+              providerAssetId: "wavr00110",
+            },
+          ],
+        },
+      ],
+    };
+
+    const epornerAdapter: IdentificationSourceAdapter = {
+      provider: "eporner",
+      search: async () => [
+        {
+          workIdentifiers: [{ scheme: "catalog_id", value: "WAVR-110" }],
+          title: "Alice in VR Wonderland 4K",
+          performers: [{ name: "Alice" }],
+          sourceReferences: [
+            {
+              provider: "eporner",
+              sourceUrl: "https://www.eporner.com/video-12345/alice-vr/",
+              providerAssetId: "12345",
+            },
+          ],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [dmmAdapter, epornerAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/WAVR-110.mp4" },
+      clues: { catalogId: "WAVR-110" },
+    });
+
+    // Should be merged into 1 candidate and confirmed to Library Ready!
+    expect(result.status).toBe("library_ready");
+    if (result.status === "library_ready") {
+      expect(result.work.isLibraryReady).toBe(true);
+      expect(result.work.title).toBe("Alice in VR Wonderland");
+
+      // Verify merged source references from BOTH adapters
+      expect(result.work.sourceReferences).toHaveLength(2);
+      expect(result.work.sourceReferences.some((r) => r.provider === "dmm")).toBe(true);
+      expect(result.work.sourceReferences.some((r) => r.provider === "eporner")).toBe(true);
+
+      // Verify merged identifiers
+      expect(result.work.identifiers).toHaveLength(2);
+      expect(result.work.identifiers.some((i) => i.scheme === "catalog_id")).toBe(true);
+      expect(result.work.identifiers.some((i) => i.scheme === "dmm_cid")).toBe(true);
+    }
+  });
+
+  it("persists all competing candidates and key provenance across Catalog close and reopen for pending review items", async () => {
+    // Ingest a file with true ambiguity (2 distinct candidate works)
+    const ambiguousAdapter: IdentificationSourceAdapter = {
+      provider: "multi-work-adapter",
+      search: async () => [
+        {
+          workIdentifiers: [{ scheme: "catalog_id", value: "WRK-101" }],
+          title: "Alice First Scene",
+          studio: "Studio Alpha",
+          performers: [{ name: "Alice", aliases: ["Ali"] }],
+          sourceReferences: [
+            {
+              provider: "multi-work-adapter",
+              sourceUrl: "https://example.com/works/wrk-101",
+              providerAssetId: "asset-101",
+              rawTitle: "Alice First Scene 4K",
+            },
+          ],
+        },
+        {
+          workIdentifiers: [{ scheme: "catalog_id", value: "WRK-202" }],
+          title: "Alice Second Scene",
+          studio: "Studio Beta",
+          performers: [{ name: "Alice", aliases: ["Alicia"] }],
+          sourceReferences: [
+            {
+              provider: "multi-work-adapter",
+              sourceUrl: "https://example.com/works/wrk-202",
+              providerAssetId: "asset-202",
+              rawTitle: "Alice Second Scene 4K",
+            },
+          ],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [ambiguousAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/Alice_Unclear.mp4" },
+      clues: { performers: ["Alice"] },
+    });
+
+    expect(result.status).toBe("pending_review");
+    const workId = result.work!.id;
+
+    // Verify both candidates are in result
+    expect(result.candidates).toHaveLength(2);
+
+    // Close SQLite database
+    catalog.close();
+
+    // Reopen from disk in a fresh instance
+    const reopened = MediaCatalog.open(dbPath);
+    try {
+      const restoredWork = reopened.getWork(workId);
+      expect(restoredWork).not.toBeNull();
+      expect(restoredWork?.isLibraryReady).toBe(false);
+      expect(restoredWork?.reviewStatus).toBe("pending_review");
+      expect(restoredWork?.reviewReason).toBe("same_performer_different_works");
+
+      // Verify all competing candidates survived reopen with full details!
+      expect(restoredWork?.reviewCandidates).toBeDefined();
+      expect(restoredWork?.reviewCandidates).toHaveLength(2);
+
+      const cand1 = restoredWork?.reviewCandidates?.[0];
+      expect(cand1?.title).toBe("Alice First Scene");
+      expect(cand1?.studio).toBe("Studio Alpha");
+      expect(cand1?.identifiers[0]).toEqual({ scheme: "catalog_id", value: "WRK-101" });
+      expect(cand1?.performers[0].name).toBe("Alice");
+      expect(cand1?.performers[0].aliases).toEqual(["Ali"]);
+      expect(cand1?.sourceReferences[0].providerAssetId).toBe("asset-101");
+      expect(cand1?.sourceReferences[0].sourceUrl).toBe("https://example.com/works/wrk-101");
+
+      const cand2 = restoredWork?.reviewCandidates?.[1];
+      expect(cand2?.title).toBe("Alice Second Scene");
+      expect(cand2?.studio).toBe("Studio Beta");
+      expect(cand2?.identifiers[0]).toEqual({ scheme: "catalog_id", value: "WRK-202" });
+      expect(cand2?.performers[0].name).toBe("Alice");
+      expect(cand2?.performers[0].aliases).toEqual(["Alicia"]);
+      expect(cand2?.sourceReferences[0].providerAssetId).toBe("asset-202");
+      expect(cand2?.sourceReferences[0].sourceUrl).toBe("https://example.com/works/wrk-202");
+
+      // Verify all source references are also accessible on the work
+      expect(restoredWork?.sourceReferences).toHaveLength(2);
+      expect(restoredWork?.sourceReferences.some((r) => r.providerAssetId === "asset-101")).toBe(true);
+      expect(restoredWork?.sourceReferences.some((r) => r.providerAssetId === "asset-202")).toBe(true);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("does not auto-confirm when query has a catalogId but candidate completely lacks matching identifier", async () => {
+    const missingIdAdapter: IdentificationSourceAdapter = {
+      provider: "dmm-unrelated",
+      search: async () => [
+        {
+          title: "Unrelated Video Title",
+          workIdentifiers: [{ scheme: "dmm_id", value: "dmm-9999" }],
+          sourceReferences: [{ provider: "dmm", providerAssetId: "dmm-9999" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [missingIdAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/SIVR-340.mp4" },
+      clues: { catalogId: "SIVR-340" },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("approximate_identifier_mismatch");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
+
+  it("does not auto-confirm Western work with title alone without performer corroboration", async () => {
+    const titleOnlyAdapter: IdentificationSourceAdapter = {
+      provider: "western-adapter",
+      search: async () => [
+        {
+          title: "A Common Generic Title",
+          performers: [{ name: "Some Actor" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [titleOnlyAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/A_Common_Generic_Title.mp4" },
+      clues: { rawTitle: "A Common Generic Title" },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("unconfirmed_identity");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
 });

@@ -1,125 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
+import type {
+  PerformerRecord,
+  WorkIdentifier,
+  IdentificationEvidence,
+  SourceReference,
+  LocalFileRecord,
+  ReviewCandidateRecord,
+  WorkRecord,
+  PerformerInput,
+  SourceReferenceInput,
+  IdentificationEvidenceInput,
+  PendingMediaInput,
+  ReviewResolutionInput,
+  ConfirmedMediaInput,
+} from "./catalog-types.js";
 
-export interface PerformerRecord {
-  id: string;
-  name: string;
-  aliases?: string[];
-  dateOfBirth?: string;
-  region?: "asian" | "western" | "unclassified";
-}
-
-export interface WorkIdentifier {
-  scheme: string;
-  value: string;
-}
-
-export interface IdentificationEvidence {
-  source: string;
-  evidenceKey?: string;
-  evidenceValue: string;
-  recordedAt: string;
-}
-
-export interface SourceReference {
-  id?: string;
-  provider: string;
-  sourceUrl: string;
-  providerAssetId?: string;
-  rawTitle?: string;
-}
-
-export interface LocalFileRecord {
-  id: string;
-  workId: string;
-  path: string;
-  sizeBytes?: number;
-  format?: string;
-  codec?: string;
-  resolution?: string;
-}
-
-export interface WorkRecord {
-  id: string;
-  title: string;
-  identifiers: WorkIdentifier[];
-  performers: PerformerRecord[];
-  sourceReferences: SourceReference[];
-  evidences: IdentificationEvidence[];
-  localFiles: LocalFileRecord[];
-  isLibraryReady: boolean;
-  reviewStatus?: "ready" | "pending_review" | "query_failed";
-  reviewReason?: string;
-  director?: string;
-  releaseDate?: string;
-  shootDate?: string;
-}
-
-export interface PerformerInput {
-  name: string;
-  aliases?: string[];
-  dateOfBirth?: string;
-  region?: "asian" | "western" | "unclassified";
-}
-
-export interface WorkInput {
-  title: string;
-  identifiers?: WorkIdentifier[];
-  director?: string;
-  releaseDate?: string;
-  shootDate?: string;
-}
-
-export interface LocalFileInput {
-  path: string;
-  sizeBytes?: number;
-  format?: string;
-  codec?: string;
-  resolution?: string;
-}
-
-export interface SourceReferenceInput {
-  provider: string;
-  sourceUrl: string;
-  providerAssetId?: string;
-  rawTitle?: string;
-}
-
-export interface IdentificationEvidenceInput {
-  source: string;
-  evidenceKey?: string;
-  evidenceValue: string;
-  recordedAt?: string;
-}
-
-export interface PendingMediaInput {
-  work: WorkInput;
-  reviewStatus?: "pending_review" | "query_failed";
-  reviewReason?: string;
-  performers?: PerformerInput[];
-  localFile: LocalFileInput;
-  sourceReferences?: SourceReferenceInput[];
-  evidences?: IdentificationEvidenceInput[];
-}
-
-export interface ReviewResolutionInput {
-  title?: string;
-  identifiers?: WorkIdentifier[];
-  performers?: PerformerInput[];
-  sourceReferences?: SourceReferenceInput[];
-  director?: string;
-  releaseDate?: string;
-  shootDate?: string;
-  notes?: string;
-}
-
-export interface ConfirmedMediaInput {
-  work: WorkInput;
-  performers: PerformerInput[];
-  localFile: LocalFileInput;
-  sourceReferences?: SourceReferenceInput[];
-  evidences?: IdentificationEvidenceInput[];
-}
+export * from "./catalog-types.js";
 
 interface RawLocalFileRow {
   id: string;
@@ -137,6 +34,29 @@ interface RawPerformerRow {
   aliases_json: string | null;
   date_of_birth: string | null;
   region: "asian" | "western" | "unclassified" | null;
+}
+
+interface RawWorkRow {
+  id: string;
+  title: string;
+  director: string | null;
+  release_date: string | null;
+  shoot_date: string | null;
+  is_library_ready: number;
+  review_status: string | null;
+  review_reason: string | null;
+}
+
+interface RawReviewCandidateRow {
+  title: string;
+  studio: string | null;
+  director: string | null;
+  release_date: string | null;
+  shoot_date: string | null;
+  identifiers_json: string;
+  performers_json: string;
+  source_references_json: string;
+  evidences_json: string | null;
 }
 
 export class MediaCatalog {
@@ -211,7 +131,7 @@ export class MediaCatalog {
         id TEXT PRIMARY KEY,
         work_id TEXT NOT NULL,
         provider TEXT NOT NULL,
-        source_url TEXT NOT NULL,
+        source_url TEXT,
         provider_asset_id TEXT,
         raw_title TEXT
       );
@@ -226,6 +146,23 @@ export class MediaCatalog {
         recorded_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_identification_evidences_work ON identification_evidences(work_id);
+
+      CREATE TABLE IF NOT EXISTS review_candidates (
+        id TEXT PRIMARY KEY,
+        work_id TEXT NOT NULL,
+        candidate_index INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        studio TEXT,
+        director TEXT,
+        release_date TEXT,
+        shoot_date TEXT,
+        identifiers_json TEXT,
+        performers_json TEXT,
+        source_references_json TEXT,
+        evidences_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_review_candidates_work ON review_candidates(work_id);
     `);
 
     // Migration compatibility: ensure review_status and review_reason exist if table already existed
@@ -318,7 +255,7 @@ export class MediaCatalog {
         randomUUID(),
         workId,
         ref.provider,
-        ref.sourceUrl,
+        ref.sourceUrl ?? null,
         ref.providerAssetId ?? null,
         ref.rawTitle ?? null
       );
@@ -342,6 +279,35 @@ export class MediaCatalog {
         ev.evidenceKey ?? null,
         ev.evidenceValue,
         ev.recordedAt ?? defaultRecordedAt ?? new Date().toISOString()
+      );
+    }
+  }
+
+  private persistReviewCandidates(workId: string, candidates?: ReviewCandidateRecord[]): void {
+    if (!candidates || candidates.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO review_candidates (
+        id, work_id, candidate_index, title, studio, director, release_date, shoot_date,
+        identifiers_json, performers_json, source_references_json, evidences_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = new Date().toISOString();
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      stmt.run(
+        randomUUID(),
+        workId,
+        i,
+        c.title,
+        c.studio ?? null,
+        c.director ?? null,
+        c.releaseDate ?? null,
+        c.shootDate ?? null,
+        JSON.stringify(c.identifiers || []),
+        JSON.stringify(c.performers || []),
+        JSON.stringify(c.sourceReferences || []),
+        c.evidences ? JSON.stringify(c.evidences) : null,
+        now
       );
     }
   }
@@ -404,6 +370,9 @@ export class MediaCatalog {
 
     // 6. Insert Evidences
     this.persistEvidences(workId, input.evidences, now);
+
+    // 7. Insert Review Candidates (durable across restarts for pending reviews)
+    this.persistReviewCandidates(workId, input.reviewCandidates);
 
     const createdWork = this.getWork(workId);
     if (!createdWork) {
@@ -469,13 +438,13 @@ export class MediaCatalog {
         workId
       );
 
-    // 2. Insert new identifiers (replacing unconfirmed identifiers if provided)
+    // 2. Replace unconfirmed identifiers with confirmed identifiers if provided
     if (resolution.identifiers && resolution.identifiers.length > 0) {
       this.db.prepare("DELETE FROM work_identifiers WHERE work_id = ?").run(workId);
       this.persistWorkIdentifiers(workId, resolution.identifiers);
     }
 
-    // 3. Insert/link performers (replacing unconfirmed performers if provided)
+    // 3. Replace unconfirmed performers with confirmed performers if provided
     if (resolution.performers && resolution.performers.length > 0) {
       this.db.prepare("DELETE FROM work_performers WHERE work_id = ?").run(workId);
       this.persistPerformers(workId, resolution.performers);
@@ -484,7 +453,10 @@ export class MediaCatalog {
     // 4. Insert source references
     this.persistSourceReferences(workId, resolution.sourceReferences);
 
-    // 5. Insert evidence of manual correction
+    // 5. Clean up pending review candidates
+    this.db.prepare("DELETE FROM review_candidates WHERE work_id = ?").run(workId);
+
+    // 6. Insert evidence of manual correction
     this.persistEvidences(
       workId,
       [
@@ -519,18 +491,7 @@ export class MediaCatalog {
         FROM works
         WHERE id = ?
       `)
-      .get(workId) as
-      | {
-          id: string;
-          title: string;
-          director: string | null;
-          release_date: string | null;
-          shoot_date: string | null;
-          is_library_ready: number;
-          review_status: string | null;
-          review_reason: string | null;
-        }
-      | undefined;
+      .get(workId) as RawWorkRow | undefined;
 
     if (!workRow) return null;
 
@@ -606,6 +567,28 @@ export class MediaCatalog {
       recordedAt: e.recorded_at,
     }));
 
+    // Review Candidates (if in review queue)
+    const candidateRows = this.db
+      .prepare(`
+        SELECT title, studio, director, release_date, shoot_date, identifiers_json, performers_json, source_references_json, evidences_json
+        FROM review_candidates
+        WHERE work_id = ?
+        ORDER BY candidate_index ASC
+      `)
+      .all(workId) as unknown as RawReviewCandidateRow[];
+
+    const reviewCandidates: ReviewCandidateRecord[] = candidateRows.map((r) => ({
+      title: r.title,
+      ...(r.studio ? { studio: r.studio } : {}),
+      ...(r.director ? { director: r.director } : {}),
+      ...(r.release_date ? { releaseDate: r.release_date } : {}),
+      ...(r.shoot_date ? { shootDate: r.shoot_date } : {}),
+      identifiers: JSON.parse(r.identifiers_json),
+      performers: JSON.parse(r.performers_json),
+      sourceReferences: JSON.parse(r.source_references_json),
+      ...(r.evidences_json ? { evidences: JSON.parse(r.evidences_json) } : {}),
+    }));
+
     return {
       id: workRow.id,
       title: workRow.title,
@@ -617,6 +600,7 @@ export class MediaCatalog {
       isLibraryReady: Boolean(workRow.is_library_ready),
       ...(workRow.review_status ? { reviewStatus: workRow.review_status as any } : {}),
       ...(workRow.review_reason ? { reviewReason: workRow.review_reason } : {}),
+      ...(reviewCandidates.length > 0 ? { reviewCandidates } : {}),
       ...(workRow.director ? { director: workRow.director } : {}),
       ...(workRow.release_date ? { releaseDate: workRow.release_date } : {}),
       ...(workRow.shoot_date ? { shootDate: workRow.shoot_date } : {}),

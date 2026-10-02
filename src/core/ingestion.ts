@@ -6,6 +6,7 @@ import type {
   PerformerInput,
   SourceReferenceInput,
   IdentificationEvidenceInput,
+  ReviewCandidateRecord,
   ReviewResolutionInput,
 } from "./catalog.js";
 import { extractCatalogCandidates } from "./identity.js";
@@ -121,14 +122,12 @@ function checkTitleConflict(a: string, b: string): boolean {
   if (normA === normB || normA.includes(normB) || normB.includes(normA)) {
     return false;
   }
-  // Extract words / CJK n-grams
   const wordsA = normA.split(/[\s\-_,.:;!?]+/).filter((w) => w.length > 1);
   const wordsB = new Set(normB.split(/[\s\-_,.:;!?]+/).filter((w) => w.length > 1));
   const commonWords = wordsA.filter((w) => wordsB.has(w));
   if (commonWords.length > 0) {
     return false;
   }
-  // Check CJK character overlap if present
   const cjkCharsA = normA.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) || [];
   const cjkCharsB = new Set(normB.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu) || []);
   const commonCjk = cjkCharsA.filter((c) => cjkCharsB.has(c));
@@ -136,6 +135,143 @@ function checkTitleConflict(a: string, b: string): boolean {
     return false;
   }
   return true;
+}
+
+function getPerformerNames(p: PerformerInput): Set<string> {
+  const set = new Set<string>();
+  if (p.name) set.add(p.name.trim().toLowerCase());
+  for (const a of p.aliases || []) {
+    if (a) set.add(a.trim().toLowerCase());
+  }
+  return set;
+}
+
+function areCandidatesEquivalent(a: IdentificationCandidate, b: IdentificationCandidate): boolean {
+  // 1. Shared matching Work Identifier
+  for (const idA of a.workIdentifiers || []) {
+    const normA = normalizeCatalogId(idA.value);
+    for (const idB of b.workIdentifiers || []) {
+      const normB = normalizeCatalogId(idB.value);
+      if (normA === normB && idA.scheme === idB.scheme) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Shared matching provider + providerAssetId
+  for (const refA of a.sourceReferences || []) {
+    if (!refA.providerAssetId) continue;
+    for (const refB of b.sourceReferences || []) {
+      if (
+        refB.providerAssetId &&
+        refA.provider === refB.provider &&
+        refA.providerAssetId === refB.providerAssetId
+      ) {
+        return true;
+      }
+    }
+  }
+
+  // 3. Shared normalized title + shared performer (name or alias) + non-conflicting studio
+  // (Only if they do not have distinct conflicting work identifiers)
+  const hasConflictingIdents = (a.workIdentifiers || []).some((idA) => {
+    const normA = normalizeCatalogId(idA.value);
+    return (b.workIdentifiers || []).some((idB) => {
+      const normB = normalizeCatalogId(idB.value);
+      return idA.scheme === idB.scheme && normA !== normB;
+    });
+  });
+
+  if (!hasConflictingIdents) {
+    const normA = a.title.trim().toLowerCase();
+    const normB = b.title.trim().toLowerCase();
+    const titlesMatch = normA === normB || !checkTitleConflict(a.title, b.title);
+
+    if (titlesMatch && normA.length > 2) {
+      const namesA = new Set<string>();
+      for (const p of a.performers || []) {
+        for (const name of getPerformerNames(p)) namesA.add(name);
+      }
+      const namesB = new Set<string>();
+      for (const p of b.performers || []) {
+        for (const name of getPerformerNames(p)) namesB.add(name);
+      }
+
+      const sharesPerformer = Array.from(namesA).some((name) => namesB.has(name));
+      if (sharesPerformer) {
+        if (a.studio && b.studio && a.studio.trim().toLowerCase() !== b.studio.trim().toLowerCase()) {
+          return false;
+        }
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function mergeTwoCandidates(target: IdentificationCandidate, source: IdentificationCandidate): IdentificationCandidate {
+  const identMap = new Map<string, WorkIdentifier>();
+  for (const ident of [...(target.workIdentifiers || []), ...(source.workIdentifiers || [])]) {
+    const key = `${ident.scheme}:${normalizeCatalogId(ident.value)}`;
+    if (!identMap.has(key)) {
+      identMap.set(key, ident);
+    }
+  }
+
+  const performerMap = new Map<string, PerformerInput>();
+  for (const p of [...(target.performers || []), ...(source.performers || [])]) {
+    const key = p.name.trim().toLowerCase();
+    const existing = performerMap.get(key);
+    if (!existing) {
+      performerMap.set(key, { ...p });
+    } else {
+      const combinedAliases = Array.from(
+        new Set([...(existing.aliases || []), ...(p.aliases || [])])
+      );
+      performerMap.set(key, {
+        ...existing,
+        aliases: combinedAliases.length > 0 ? combinedAliases : undefined,
+        dateOfBirth: existing.dateOfBirth || p.dateOfBirth,
+        region: existing.region || p.region,
+      });
+    }
+  }
+
+  const refMap = new Map<string, SourceReferenceInput>();
+  for (const r of [...(target.sourceReferences || []), ...(source.sourceReferences || [])]) {
+    const key = `${r.provider}:${r.providerAssetId || r.sourceUrl}`;
+    if (!refMap.has(key)) {
+      refMap.set(key, r);
+    }
+  }
+
+  const combinedEvidences = [...(target.evidences || []), ...(source.evidences || [])];
+
+  return {
+    title: target.title || source.title,
+    studio: target.studio || source.studio,
+    director: target.director || source.director,
+    releaseDate: target.releaseDate || source.releaseDate,
+    shootDate: target.shootDate || source.shootDate,
+    workIdentifiers: Array.from(identMap.values()),
+    performers: Array.from(performerMap.values()),
+    sourceReferences: Array.from(refMap.values()),
+    evidences: combinedEvidences.length > 0 ? combinedEvidences : undefined,
+  };
+}
+
+function deduplicateAndMergeCandidates(candidates: IdentificationCandidate[]): IdentificationCandidate[] {
+  const merged: IdentificationCandidate[] = [];
+  for (const candidate of candidates) {
+    const existingIndex = merged.findIndex((m) => areCandidatesEquivalent(m, candidate));
+    if (existingIndex >= 0) {
+      merged[existingIndex] = mergeTwoCandidates(merged[existingIndex], candidate);
+    } else {
+      merged.push({ ...candidate });
+    }
+  }
+  return merged;
 }
 
 export class IngestionService {
@@ -165,29 +301,31 @@ export class IngestionService {
 
     const cand = candidates[0];
 
-    // 1. Work Identity check: candidate must have a stable identifier or provider asset ID
-    const hasWorkIdentifier = cand.workIdentifiers && cand.workIdentifiers.length > 0;
-    const hasProviderAssetId = cand.sourceReferences?.some((r) => r.providerAssetId);
-    if (!hasWorkIdentifier && !hasProviderAssetId) {
-      return { status: "ambiguous", reason: "unconfirmed_identity" };
-    }
-
-    // 2. Approximate Catalog Number check (anti-false-positive)
+    // Rule 1: Corroboration of strong catalog ID clue when present in query
     if (query.catalogId) {
-      const candCatalogId = cand.workIdentifiers?.find(
-        (i) => i.scheme === "catalog_id" || !i.scheme
-      )?.value;
+      const normQueryId = normalizeCatalogId(query.catalogId);
+      const matchingIdent = cand.workIdentifiers?.find(
+        (i) => normalizeCatalogId(i.value) === normQueryId
+      );
 
-      if (candCatalogId) {
-        const normQuery = normalizeCatalogId(query.catalogId);
-        const normCand = normalizeCatalogId(candCatalogId);
-        if (normQuery !== normCand) {
-          return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
-        }
+      if (!matchingIdent) {
+        return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
       }
     }
 
-    // 3. Conflicting Studio check
+    // Rule 2: Corroboration of providerAssetId when present in query
+    if (query.providerAssetId) {
+      const normQueryAssetId = query.providerAssetId.trim().toLowerCase();
+      const candAssetIds = (cand.sourceReferences || [])
+        .map((r) => r.providerAssetId?.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (candAssetIds.length === 0 || !candAssetIds.includes(normQueryAssetId)) {
+        return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
+      }
+    }
+
+    // Rule 3: Conflicting Studio check
     if (query.studio && cand.studio) {
       const normQueryStudio = query.studio.trim().toLowerCase();
       const normCandStudio = cand.studio.trim().toLowerCase();
@@ -196,21 +334,42 @@ export class IngestionService {
       }
     }
 
-    // 4. Conflicting Title check
+    // Rule 4: Conflicting Title check
     if (query.rawTitle && cand.title) {
       if (checkTitleConflict(query.rawTitle, cand.title)) {
         return { status: "ambiguous", reason: "conflicting_title" };
       }
     }
 
-    // 5. Performer-only match without verified title or catalog ID
-    if (
-      query.performers &&
-      query.performers.length > 0 &&
-      !query.catalogId &&
-      (!query.rawTitle || query.rawTitle.length === 0)
-    ) {
-      return { status: "ambiguous", reason: "same_performer_different_works" };
+    // Rule 5: Non-ID Western Work (no catalogId and no providerAssetId in query)
+    if (!query.catalogId && !query.providerAssetId) {
+      const hasTitle = query.rawTitle && query.rawTitle.trim().length > 0;
+      const hasPerformers = query.performers && query.performers.length > 0;
+
+      // If query only has performer, but no title/catalogId -> same performer different works
+      if (!hasTitle && hasPerformers) {
+        return { status: "ambiguous", reason: "same_performer_different_works" };
+      }
+
+      // Strong Western Work corroboration: title matches AND performer(s) corroborate
+      if (hasTitle && hasPerformers) {
+        const titleMatches = !checkTitleConflict(query.rawTitle!, cand.title);
+        const performersMatch = (cand.performers || []).some((cp) => {
+          const candNames = getPerformerNames(cp);
+          return query.performers!.some((qp) => candNames.has(qp.trim().toLowerCase()));
+        });
+        const studioMatches =
+          !query.studio ||
+          !cand.studio ||
+          query.studio.trim().toLowerCase() === cand.studio.trim().toLowerCase();
+
+        if (titleMatches && performersMatch && studioMatches) {
+          return { status: "unambiguous", candidate: cand };
+        }
+      }
+
+      // If no strong corroboration was established (e.g. title only without performers/IDs, or mismatch)
+      return { status: "ambiguous", reason: "unconfirmed_identity" };
     }
 
     return { status: "unambiguous", candidate: cand };
@@ -305,7 +464,7 @@ export class IngestionService {
     }
 
     // 2. Query adapters
-    const candidates: IdentificationCandidate[] = [];
+    const rawCandidates: IdentificationCandidate[] = [];
     let firstQueryError: SourceQueryFailure | null = null;
 
     for (const adapter of this.adapters) {
@@ -315,7 +474,7 @@ export class IngestionService {
       try {
         const adapterResults = await adapter.search(query);
         for (const res of adapterResults) {
-          candidates.push(res);
+          rawCandidates.push(res);
           recordedEvidences.push({
             source: `source-adapter:${adapter.provider}`,
             evidenceKey: "search-candidate",
@@ -337,8 +496,8 @@ export class IngestionService {
       }
     }
 
-    // 3. Handle Query Failure (403, 429, challenge, auth, malformed) when no other adapter succeeded
-    if (candidates.length === 0 && firstQueryError) {
+    // 3. Handle Query Failure (403, 429, challenge, auth, malformed) when no adapter succeeded
+    if (rawCandidates.length === 0 && firstQueryError) {
       const queryError = firstQueryError;
       const failedWork = this.catalog.recordPendingMedia({
         work: {
@@ -369,7 +528,10 @@ export class IngestionService {
       };
     }
 
-    // 4. Candidate Arbitration
+    // 4. Deduplicate and merge equivalent candidates across adapters
+    const candidates = deduplicateAndMergeCandidates(rawCandidates);
+
+    // 5. Candidate Arbitration
     const evaluation = this.evaluateCandidates(query, candidates);
 
     if (evaluation.status === "unambiguous") {
@@ -405,10 +567,37 @@ export class IngestionService {
         ? candidates[0].title
         : query.rawTitle || query.catalogId || "Pending Ingestion Work";
 
-    const combinedSourceRefs = [
-      ...(candidates[0]?.sourceReferences || []),
-      ...(input.sourceReference ? [input.sourceReference] : []),
-    ];
+    // Preserve all source references across ALL competing candidates
+    const allCandidateSourceRefs: SourceReferenceInput[] = [];
+    const seenRefs = new Set<string>();
+    for (const c of candidates) {
+      for (const r of c.sourceReferences || []) {
+        const key = `${r.provider}:${r.providerAssetId || r.sourceUrl}`;
+        if (!seenRefs.has(key)) {
+          seenRefs.add(key);
+          allCandidateSourceRefs.push(r);
+        }
+      }
+    }
+    if (input.sourceReference) {
+      const key = `${input.sourceReference.provider}:${input.sourceReference.providerAssetId || input.sourceReference.sourceUrl}`;
+      if (!seenRefs.has(key)) {
+        seenRefs.add(key);
+        allCandidateSourceRefs.push(input.sourceReference);
+      }
+    }
+
+    const reviewCandidates: ReviewCandidateRecord[] = candidates.map((c) => ({
+      title: c.title,
+      studio: c.studio,
+      director: c.director,
+      releaseDate: c.releaseDate,
+      shootDate: c.shootDate,
+      identifiers: c.workIdentifiers || [],
+      performers: c.performers || [],
+      sourceReferences: c.sourceReferences || [],
+      evidences: c.evidences,
+    }));
 
     const pendingWork = this.catalog.recordPendingMedia({
       work: {
@@ -419,8 +608,9 @@ export class IngestionService {
       reviewReason: evaluation.reason,
       performers: candidates[0]?.performers,
       localFile: input.localFile,
-      sourceReferences: combinedSourceRefs,
+      sourceReferences: allCandidateSourceRefs,
       evidences: recordedEvidences,
+      reviewCandidates,
     });
 
     return {
