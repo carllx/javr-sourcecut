@@ -794,4 +794,87 @@ describe("Unified Ingestion Tracer Bullet (Issue #36)", () => {
       expect(result.work.isLibraryReady).toBe(false);
     }
   });
+
+  it("hard-negative: does not auto-confirm when identifier value matches but scheme is wrong", async () => {
+    const wrongSchemeAdapter: IdentificationSourceAdapter = {
+      provider: "dmm",
+      search: async () => [
+        {
+          title: "Some Title",
+          // Candidate has value 12345, but under an unrelated scheme like dmm_id or custom_id instead of catalog_id/scene_id
+          workIdentifiers: [{ scheme: "dmm_id", value: "12345" }],
+          sourceReferences: [{ provider: "dmm", providerAssetId: "12345" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [wrongSchemeAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/12345.mp4" },
+      clues: { catalogId: "12345" },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("approximate_identifier_mismatch");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
+
+  it("hard-negative: does not auto-confirm when providerAssetId matches but provider namespace is wrong", async () => {
+    const wrongProviderAdapter: IdentificationSourceAdapter = {
+      provider: "badoinkvr",
+      search: async () => [
+        {
+          title: "Scene 12345",
+          sourceReferences: [{ provider: "badoinkvr", providerAssetId: "12345" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [wrongProviderAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/video.mp4" },
+      clues: {
+        provider: "eporner",
+        providerAssetId: "12345",
+      },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("approximate_identifier_mismatch");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
+
+  it("hard-negative: does not merge or auto-confirm no-ID works with same performer + studio when titles only partially overlap", async () => {
+    // Two scenes by same performer & studio, with words overlapping but clearly distinct titles
+    const diffSceneAdapter: IdentificationSourceAdapter = {
+      provider: "studio-x",
+      search: async () => [
+        {
+          title: "Alice Beach Vacation 2",
+          studio: "Beach Productions",
+          performers: [{ name: "Alice" }],
+        },
+      ],
+    };
+
+    const service = new IngestionService(catalog, [diffSceneAdapter]);
+    const result = await service.ingest({
+      localFile: { path: "D:/Media/Alice Beach Party 1.mp4" },
+      clues: {
+        rawTitle: "Alice Beach Party 1",
+        studio: "Beach Productions",
+        performers: ["Alice"],
+      },
+    });
+
+    expect(result.status).toBe("pending_review");
+    if (result.status === "pending_review") {
+      expect(result.reviewReason).toBe("unconfirmed_identity");
+      expect(result.work.isLibraryReady).toBe(false);
+    }
+  });
 });

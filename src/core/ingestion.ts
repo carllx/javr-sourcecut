@@ -48,6 +48,7 @@ export interface IngestionQuery {
   rawTitle?: string;
   performers?: string[];
   sourceUrl?: string;
+  provider?: string;
   providerAssetId?: string;
   studio?: string;
   filename?: string;
@@ -146,6 +147,20 @@ function getPerformerNames(p: PerformerInput): Set<string> {
   return set;
 }
 
+function normalizeTitleForEquivalence(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\b(4k|8k|2k|1080p|720p|2160p|60fps|vr|av1|h264|hevc)\b/gi, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function areTitlesPositivelyEquivalent(a: string, b: string): boolean {
+  const normA = normalizeTitleForEquivalence(a);
+  const normB = normalizeTitleForEquivalence(b);
+  return normA.length > 2 && normA === normB;
+}
+
 function areCandidatesEquivalent(a: IdentificationCandidate, b: IdentificationCandidate): boolean {
   // 1. Shared matching Work Identifier
   for (const idA of a.workIdentifiers || []) {
@@ -183,11 +198,7 @@ function areCandidatesEquivalent(a: IdentificationCandidate, b: IdentificationCa
   });
 
   if (!hasConflictingIdents) {
-    const normA = a.title.trim().toLowerCase();
-    const normB = b.title.trim().toLowerCase();
-    const titlesMatch = normA === normB || !checkTitleConflict(a.title, b.title);
-
-    if (titlesMatch && normA.length > 2) {
+    if (areTitlesPositivelyEquivalent(a.title, b.title)) {
       const namesA = new Set<string>();
       for (const p of a.performers || []) {
         for (const name of getPerformerNames(p)) namesA.add(name);
@@ -305,7 +316,9 @@ export class IngestionService {
     if (query.catalogId) {
       const normQueryId = normalizeCatalogId(query.catalogId);
       const matchingIdent = cand.workIdentifiers?.find(
-        (i) => normalizeCatalogId(i.value) === normQueryId
+        (i) =>
+          (i.scheme === "catalog_id" || i.scheme === "scene_id") &&
+          normalizeCatalogId(i.value) === normQueryId
       );
 
       if (!matchingIdent) {
@@ -316,11 +329,18 @@ export class IngestionService {
     // Rule 2: Corroboration of providerAssetId when present in query
     if (query.providerAssetId) {
       const normQueryAssetId = query.providerAssetId.trim().toLowerCase();
-      const candAssetIds = (cand.sourceReferences || [])
-        .map((r) => r.providerAssetId?.trim().toLowerCase())
-        .filter(Boolean);
+      const normQueryProvider = query.provider?.trim().toLowerCase();
 
-      if (candAssetIds.length === 0 || !candAssetIds.includes(normQueryAssetId)) {
+      const matchingRef = (cand.sourceReferences || []).find((r) => {
+        const assetMatches = r.providerAssetId?.trim().toLowerCase() === normQueryAssetId;
+        if (!assetMatches) return false;
+        if (normQueryProvider) {
+          return r.provider.trim().toLowerCase() === normQueryProvider;
+        }
+        return true;
+      });
+
+      if (!matchingRef) {
         return { status: "ambiguous", reason: "approximate_identifier_mismatch" };
       }
     }
@@ -353,7 +373,7 @@ export class IngestionService {
 
       // Strong Western Work corroboration: title matches AND performer(s) corroborate
       if (hasTitle && hasPerformers) {
-        const titleMatches = !checkTitleConflict(query.rawTitle!, cand.title);
+        const titleMatches = areTitlesPositivelyEquivalent(query.rawTitle!, cand.title);
         const performersMatch = (cand.performers || []).some((cp) => {
           const candNames = getPerformerNames(cp);
           return query.performers!.some((qp) => candNames.has(qp.trim().toLowerCase()));
@@ -395,6 +415,7 @@ export class IngestionService {
       studio: input.clues?.studio,
       sourceUrl: input.clues?.sourceUrl ?? input.sourceReference?.sourceUrl,
       providerAssetId: input.clues?.providerAssetId ?? input.sourceReference?.providerAssetId,
+      provider: input.clues?.provider ?? input.sourceReference?.provider,
       filename,
     };
 
@@ -408,6 +429,15 @@ export class IngestionService {
       evidenceValue: filename,
       recordedAt: now,
     });
+
+    if (query.provider) {
+      recordedEvidences.push({
+        source: input.clues?.provider ? "user-clue" : "source-reference",
+        evidenceKey: "provider",
+        evidenceValue: query.provider,
+        recordedAt: now,
+      });
+    }
 
     if (query.catalogId) {
       recordedEvidences.push({
